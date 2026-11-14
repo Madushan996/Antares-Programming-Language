@@ -999,6 +999,22 @@ pub fn pk_screlu(x: &PK, xr: Option<Value>, w: &PK, wr: Option<Value>, cap: f64,
     at(crate::builtins::screlu_dot_rows(xs, ws, || crate::builtins::max_abs(w), cap), line)
 }
 
+/// argmax(table, first, last) for a fixed table of numbers.
+#[inline]
+pub fn t_argmax(t: &[f64], first: f64, last: f64, line: u32) -> R<f64> {
+    at(crate::builtins::argmax_range(t, first, last), line)
+}
+
+/// argmax(row, first, last) for a row variable.
+#[inline]
+pub fn a_argmax(a: &T, first: f64, last: f64, line: u32) -> R<f64> {
+    if a.shape.len() != 1 {
+        return fail("argmax with a range needs a row of numbers", line);
+    }
+    let d = unsafe { &*a.data.as_ptr() };
+    at(crate::builtins::argmax_range(d, first, last), line)
+}
+
 /// number(x) without the cost of a general built-in call.
 #[inline]
 pub fn to_number(v: &Value, line: u32) -> R<f64> {

@@ -260,6 +260,11 @@ fn builtin_ret(name: &str, tys: &[Ty]) -> Ty {
             _ => Dyn,
         },
         "range" | "read_binary" | "shape" => Arr,
+        "argmax" if tys.len() == 3 => match tys[0] {
+            Arr => Num,
+            Bot => Bot,
+            _ => Dyn,
+        },
         // compact(x, rows, cols) is a matrix; compact(row) a row
         "compact" => match tys {
             [_, _, _] => PkM,
@@ -345,6 +350,8 @@ struct Cx<'a> {
     fast: Vec<((usize, usize), String)>,
     /// Top-level rows kept as fixed-size tables: variable -> (length, integers?).
     tables: HashMap<usize, (usize, bool)>,
+    /// The numbers a table made from a constant list starts with.
+    table_init: HashMap<usize, Vec<i64>>,
 }
 
 /// What an innermost counting loop does with rows (see `Cx::fast_rows`).
@@ -452,6 +459,26 @@ impl<'a> Cx<'a> {
             }
         }
         Callee::Dynamic
+    }
+
+    /// Arithmetic on numbers and top-level constants, worked out when compiling
+    /// exactly as the program would (ordinary decimal arithmetic).
+    fn const_expr(&self, e: &Expr) -> Option<f64> {
+        match e {
+            Expr::Num(n) => Some(*n),
+            Expr::Neg(a, _) => Some(-self.const_expr(a)?),
+            Expr::Var { depth: 0, idx, .. } => self.consts.get(&(*idx as usize)).copied(),
+            Expr::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div), a, b, _) => {
+                let (x, y) = (self.const_expr(a)?, self.const_expr(b)?);
+                Some(match op {
+                    BinOp::Add => x + y,
+                    BinOp::Sub => x - y,
+                    BinOp::Mul => x * y,
+                    _ => x / y,
+                })
+            }
+            _ => None,
+        }
     }
 
     /// The value of an expression that is a known number when compiling.
@@ -916,6 +943,20 @@ impl<'a> Cx<'a> {
                 self.iconsts.insert(i, n);
             }
         }
+        // A top-level variable given once, directly at the top level, arithmetic
+        // on constants given before it (AH = HIST + 1) is a constant too.
+        for st in top {
+            if let Stmt::Assign { idx, value } = st {
+                let i = *idx as usize;
+                if self.gcount[i] == 1 && !self.consts.contains_key(&i) && !self.iconsts.contains_key(&i) && !self.static_fn.contains_key(&i) {
+                    if let Some(v) = self.const_expr(value) {
+                        if v.is_finite() {
+                            self.consts.insert(i, v);
+                        }
+                    }
+                }
+            }
+        }
         for s in &mut self.scopes {
             for v in &mut s.vars {
                 *v = Ty::Bot;
@@ -1255,6 +1296,22 @@ impl<'a> Cx<'a> {
                             return (format!("idiv({}, {}, {})?", x, y, line), Ty::Int);
                         }
                         _ => {}
+                    }
+                    if name == "argmax" && args.len() == 3 && matches!(self.ty(&args[1], sc), Ty::Num | Ty::Int) && matches!(self.ty(&args[2], sc), Ty::Num | Ty::Int) {
+                        if let Expr::Var { depth, idx: vi, .. } = &args[0] {
+                            let target = if let Some((tb, false)) = self.table_of(sc, *depth, *vi) {
+                                Some(format!("t_argmax(&*std::ptr::addr_of!({})", tb))
+                            } else if self.ty(&args[0], sc) == Ty::Arr {
+                                self.plain_place(&args[0], sc).map(|p| format!("a_argmax(&{}", p))
+                            } else {
+                                None
+                            };
+                            if let Some(t) = target {
+                                let first = self.num_code(&args[1], sc);
+                                let last = self.num_code(&args[2], sc);
+                                return (format!("{{ let a_ = {}; let b_ = {}; {}, a_, b_, {})? }}", first, last, t, line), Ty::Num);
+                            }
+                        }
                     }
                     if name == "screlu_dot" && args.len() == 3 {
                         if let Some(code) = self.pk_screlu(args, sc, *line) {
@@ -2197,7 +2254,9 @@ impl<'a> Cx<'a> {
                 Stmt::AssignOuter { depth, idx, value } => {
                     if self.resolve(sc, *depth) == 0 {
                         refs.insert(*idx as usize);
-                        bad.insert(*idx as usize);
+                        if self.reset_kind(value, sc).is_none() {
+                            bad.insert(*idx as usize);
+                        }
                     }
                     self.table_uses_expr(value, sc, bad, refs);
                 }
@@ -2305,7 +2364,14 @@ impl<'a> Cx<'a> {
             }
             Expr::Call(f, args, _) => {
                 self.table_uses_expr(f, sc, bad, refs);
-                for a in args {
+                let reads_range = matches!(self.callee(f, sc), Callee::Builtin(b) if self.bnames[b] == "argmax") && args.len() == 3;
+                for (k, a) in args.iter().enumerate() {
+                    if let (true, 0, Expr::Var { depth, idx, .. }) = (reads_range, k, a) {
+                        if self.resolve(sc, *depth) == 0 {
+                            refs.insert(*idx as usize);
+                            continue;
+                        }
+                    }
                     self.table_uses_expr(a, sc, bad, refs);
                 }
             }
@@ -2335,6 +2401,79 @@ impl<'a> Cx<'a> {
     /// that runs before that line able to use them. Such a row is never shared
     /// and never changes length, so it needs no sharing check and its length is
     /// a constant.
+    /// `ints(n)` or `zeros(n)`: whether it is ints, and the expression for n.
+    fn reset_kind<'e>(&self, e: &'e Expr, sc: usize) -> Option<(bool, &'e Expr)> {
+        let Expr::Call(f, args, _) = e else { return None };
+        let Callee::Builtin(b) = self.callee(f, sc) else { return None };
+        match (self.bnames[b], &args[..]) {
+            ("ints", [a]) => Some((true, a)),
+            ("zeros", [a]) => Some((false, a)),
+            _ => None,
+        }
+    }
+
+    /// The size `e` (seen from scope `sc`) is sure to have, using top-level
+    /// variables given a known number once.
+    fn size_in(&self, e: &Expr, sc: usize, first: &HashMap<usize, (usize, *const Expr)>) -> Option<f64> {
+        if let Some(c) = self.const_of(e, sc) {
+            return Some(c);
+        }
+        match e {
+            Expr::Int(n) => Some(*n as f64),
+            Expr::Neg(a, _) => Some(-self.size_in(a, sc, first)?),
+            Expr::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul), a, b, _) => {
+                let (x, y) = (self.size_in(a, sc, first)?, self.size_in(b, sc, first)?);
+                Some(match op {
+                    BinOp::Add => x + y,
+                    BinOp::Sub => x - y,
+                    _ => x * y,
+                })
+            }
+            Expr::Var { depth, idx, .. } if self.resolve(sc, *depth) == 0 => {
+                let i = *idx as usize;
+                if self.gcount[i] != 1 {
+                    return None;
+                }
+                let &(k2, e2) = first.get(&i)?;
+                self.const_size(unsafe { &*e2 }, k2, first, 1)
+            }
+            _ => None,
+        }
+    }
+
+    /// Every assignment to a top-level variable: the variable, and for
+    /// `ints(n)` / `zeros(n)` with a known n, (n, whether ints).
+    fn table_assigns(&self, stmts: &[Stmt], sc: usize, first: &HashMap<usize, (usize, *const Expr)>, out: &mut Vec<(usize, Option<(f64, bool)>)>) {
+        for st in stmts {
+            match st {
+                Stmt::Assign { idx, value } if sc == 0 => {
+                    if !matches!(value, Expr::Lambda(_)) {
+                        let k = self.reset_kind(value, sc).and_then(|(int, a)| self.size_in(a, sc, first).map(|n| (n, int)));
+                        out.push((*idx as usize, k));
+                    }
+                }
+                Stmt::AssignOuter { depth, idx, value } if self.resolve(sc, *depth) == 0 => {
+                    let k = self.reset_kind(value, sc).and_then(|(int, a)| self.size_in(a, sc, first).map(|n| (n, int)));
+                    out.push((*idx as usize, k));
+                }
+                Stmt::Repeat { body, .. } | Stmt::Each { body, .. } | Stmt::While { body, .. } => self.table_assigns(body, sc, first, out),
+                Stmt::When { arms, otherwise } => {
+                    for (_, b, _) in arms {
+                        self.table_assigns(b, sc, first, out);
+                    }
+                    if let Some(b) = otherwise {
+                        self.table_assigns(b, sc, first, out);
+                    }
+                }
+                Stmt::Try { body, handler, .. } => {
+                    self.table_assigns(body, sc, first, out);
+                    self.table_assigns(handler, sc, first, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn find_tables(&mut self, top: &[Stmt]) {
         let n = self.scopes.len();
         let mut first: HashMap<usize, (usize, *const Expr)> = HashMap::new();
@@ -2342,6 +2481,13 @@ impl<'a> Cx<'a> {
             if let Stmt::Assign { idx, value } = st {
                 first.entry(*idx as usize).or_insert((k, value as *const Expr));
             }
+        }
+        // every assignment to a top-level variable, to allow resets with the same size
+        let mut assigns = vec![];
+        self.table_assigns(top, 0, &first, &mut assigns);
+        for s in 1..n {
+            let def: &FnDef = unsafe { &*self.scopes[s].def };
+            self.table_assigns(&def.body, s, &first, &mut assigns);
         }
         // where each scope uses top-level variables, and which are used other ways
         let mut bad = std::collections::HashSet::new();
@@ -2373,7 +2519,29 @@ impl<'a> Cx<'a> {
         for (k, st) in top.iter().enumerate() {
             if let Stmt::Assign { idx, value: Expr::Call(f, args, _) } = st {
                 let i = *idx as usize;
+                let mut init: Option<Vec<i64>> = None;
                 let kind = match (self.callee(f, 0), &args[..]) {
+                    (Callee::Builtin(b), [Expr::List(items)]) if self.bnames[b] == "ints" && !items.is_empty() => {
+                        let whole = |e: &Expr| -> Option<i64> {
+                            match e {
+                                Expr::Int(n) => Some(*n),
+                                Expr::Neg(x, _) if matches!(&**x, Expr::Int(_)) => {
+                                    if let Expr::Int(n) = &**x { Some(n.wrapping_neg()) } else { None }
+                                }
+                                _ => self.const_of(e, 0).filter(|c| *c == c.trunc() && c.abs() < 9.0e15).map(|c| c as i64),
+                            }
+                        };
+                        let vals: Option<Vec<i64>> = items.iter().map(whole).collect();
+                        // given only this once
+                        match vals {
+                            Some(v) if self.gcount[i] == 1 => {
+                                let len = v.len() as f64;
+                                init = Some(v);
+                                Some((len, true))
+                            }
+                            _ => None,
+                        }
+                    }
                     (Callee::Builtin(b), [a]) if matches!(self.bnames[b], "ints" | "zeros") => {
                         self.const_size(a, k, &first, 0).map(|len| (len, self.bnames[b] == "ints"))
                     }
@@ -2385,13 +2553,20 @@ impl<'a> Cx<'a> {
                     if ty_ok
                         && len >= 1.0
                         && len <= (1u64 << 24) as f64
-                        && self.gcount[i] == 1
+                        // given only by ints(n) / zeros(n) of this size: later ones reset it to zeros
+                        && (init.is_some() || {
+                            let mine: Vec<&Option<(f64, bool)>> = assigns.iter().filter(|a| a.0 == i).map(|a| &a.1).collect();
+                            mine.len() == self.gcount[i] as usize && mine.iter().all(|a| **a == Some((len, int)))
+                        })
                         && first.get(&i).map(|f| f.0) == Some(k)
                         && !bad.contains(&i)
                         && !self.scopes[0].captured[i]
                         && !used_before
                     {
                         self.tables.insert(i, (len as usize, int));
+                        if let Some(v) = init.take() {
+                            self.table_init.insert(i, v);
+                        }
                     }
                 }
             }
@@ -2420,6 +2595,13 @@ impl<'a> Cx<'a> {
                 eprintln!("explain: {} is a fixed table of {} numbers", self.gnames.get(i).cloned().unwrap_or_default(), len);
             }
         }
+    }
+
+    /// `t = ints(n)` / `zeros(n)` for a fixed table: all zeros again (nothing
+    /// else can hold the old row, so this is the same as a new one).
+    fn table_fill(&self, i: usize) -> String {
+        let zero = if self.tables[&i].1 { "0i64" } else { "0.0f64" };
+        format!("(*std::ptr::addr_of_mut!(TB{})).fill({});\n", i, zero)
     }
 
     /// The table a variable refers to, if it is one: (Rust expression for the
@@ -2970,8 +3152,11 @@ impl<'a> Cx<'a> {
                     }
                 }
                 if sc == 0 && self.tables.contains_key(&i) {
-                    // a fixed table: it already holds zeros
-                    return String::new();
+                    if self.table_init.contains_key(&i) {
+                        // the table already holds the list's numbers
+                        return String::new();
+                    }
+                    return self.table_fill(i);
                 }
                 if self.var_ty(sc, i) == Ty::Whole {
                     let c = self.whole_code(value, sc);
@@ -2982,6 +3167,9 @@ impl<'a> Cx<'a> {
             }
             Stmt::AssignOuter { depth, idx, value } => {
                 let t = self.resolve(sc, *depth);
+                if t == 0 && self.tables.contains_key(&(*idx as usize)) {
+                    return self.table_fill(*idx as usize);
+                }
                 if self.var_ty(t, *idx as usize) == Ty::Whole {
                     let c = self.whole_code(value, sc);
                     return self.assign(t, *idx as usize, c);
@@ -3441,7 +3629,14 @@ impl<'a> Cx<'a> {
             if let Some(&(len, int)) = self.tables.get(&i) {
                 let zero = if int { "0i64" } else { "0.0f64" };
                 let ty = if int { "i64" } else { "f64" };
-                tables.push_str(&format!("static mut TB{}: [{}; {}] = [{}; {}];   // {}\n", i, ty, len, zero, len, self.gnames.get(i).map(|s| s.as_str()).unwrap_or("")));
+                let name = self.gnames.get(i).map(|s| s.as_str()).unwrap_or("");
+                match self.table_init.get(&i) {
+                    Some(vals) => {
+                        let nums: Vec<String> = vals.iter().map(|v| format!("{}i64", v)).collect();
+                        tables.push_str(&format!("static mut TB{}: [i64; {}] = [{}];   // {}\n", i, len, nums.join(", "), name));
+                    }
+                    None => tables.push_str(&format!("static mut TB{}: [{}; {}] = [{}; {}];   // {}\n", i, ty, len, zero, len, name)),
+                }
                 continue;
             }
             let t = if self.static_fn.contains_key(&i) { Ty::Dyn } else { g.vars[i] };
@@ -3691,6 +3886,7 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String],
         plain: false,
         fast: vec![],
         tables: HashMap::new(),
+        table_init: HashMap::new(),
     };
     cx.infer(&stmts);
     cx.infer_whole(&stmts);

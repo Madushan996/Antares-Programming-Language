@@ -60,3 +60,24 @@ picks = [1, "two", 2.5, -1, int(3)]
 each p in picks {
     try { show "any", counts[p], scores[p] } else e { show "any", e }
 }
+# a table given ints(n) / zeros(n) of the same size again is reset to zeros
+hist = zeros(8)
+to clear_hist() { change hist = zeros(8) }
+hist[3] = 5
+show "before reset", hist[3]
+clear_hist()
+show "after reset", hist[3]
+hist[3] = 2
+hist = zeros(8)
+show "top-level reset", hist[3]
+other = ints(4)
+to grow() { change other = ints(6) }
+grow()
+other[5] = int(1)
+show "grown", other[5]
+# a table made from a constant list starts with those numbers
+masks = ints([1, 2, 4, 8, 0x10, -3])
+show "list table", masks[0], masks[4], masks[-1]
+masks[2] = int(40)
+show masks[2]
+try { show masks[6] } else e { show "list", e }
