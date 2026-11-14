@@ -124,6 +124,7 @@ Options for `build`:
 | `--cpu x86-64-v2` | Processors with SSE4.2 |
 | `--cpu x86-64-v3` | Processors with AVX2 |
 | `--embed file` | Pack a file into the executable (may be repeated) |
+| `--icon file.ico` | The icon Windows shows for the executable (see below) |
 
 ## Your first program
 
@@ -1220,6 +1221,10 @@ antares build program.ant out.exe --cpu x86-64
 ## Embedding files
 
 `--embed file` packs a file into the executable. The program reads it under the name `"embedded:<file name>"` with `read_binary`, and `exists` says whether it is there, so the same source can fall back to a file on disk when run interpreted. The chess engine embeds its 25 MB neural network this way.
+
+## Icons
+
+`--icon file.ico` gives a Windows executable its icon, the one Explorer and the taskbar show. With Microsoft's Rust toolchain nothing else is needed; with the GNU toolchain it needs `windres` (part of MinGW binutils). If that isn't there the program is still built, without the icon, and `antares build` says so. On other systems the option is ignored.
 
 ## Writing fast compiled code
 

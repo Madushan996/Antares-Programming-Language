@@ -574,6 +574,8 @@ Things to know:
   the name `"embedded:<file name>"` with `read_binary`, and `exists` says
   whether it is there, so the same source can fall back to a file on disk
   when run interpreted. The chess engine embeds its 25 MB network this way.
+- `--icon file.ico` gives a Windows executable its icon (with the GNU Rust
+  toolchain it needs `windres`).
 - To see why something is slow, build with the environment variable
   `ANTARES_EXPLAIN=1`. The compiler then names every variable that ended up
   as a general value and what it was given. A common cause is two files using

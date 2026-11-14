@@ -3174,6 +3174,117 @@ impl<'a> Cx<'a> {
 /// `embed` lists files to pack into the program; it reads them as "embedded:<file name>".
 const REPOSITORY: &str = "https://github.com/Madushan996/Antares-Programming-Language";
 
+/// The build script that puts an icon into a Windows program. Antares writes
+/// the compiled resource (icon.res) itself; Microsoft's linker takes it as it
+/// is, and for the GNU toolchain windres only converts it to an object file.
+const ICON_BUILD_RS: &str = r#"fn main() {
+    println!("cargo:rerun-if-changed=icon.res");
+    let here = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+    let res = format!("{}/icon.res", here);
+    if std::env::var("TARGET").map(|t| t.ends_with("-gnu")).unwrap_or(false) {
+        let obj = format!("{}/icon.o", std::env::var("OUT_DIR").unwrap());
+        let made = std::process::Command::new("windres").args(["-J", "res", "-O", "coff", "-i", &res, "-o", &obj]).status();
+        if made.map(|s| s.success()).unwrap_or(false) {
+            println!("cargo:rustc-link-arg-bins={}", obj);
+        } else {
+            println!("cargo:warning=windres couldn't convert the icon; building without it");
+        }
+    } else {
+        println!("cargo:rustc-link-arg-bins={}", res);
+    }
+}
+"#;
+
+/// An .ico file as a compiled Windows resource (.res): each picture becomes an
+/// icon resource and the list of them an icon group, as a resource compiler
+/// would make them. None if the file isn't an icon.
+fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
+    let u16_at = |b: &[u8], i: usize| -> Option<u16> { Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?)) };
+    let u32_at = |b: &[u8], i: usize| -> Option<u32> { Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
+    if u16_at(ico, 0)? != 0 || u16_at(ico, 2)? != 1 {
+        return None;
+    }
+    let count = u16_at(ico, 4)? as usize;
+    if count == 0 {
+        return None;
+    }
+    // one resource: header (type and name as numbers) and data, padded to 4 bytes
+    fn resource(out: &mut Vec<u8>, kind: u16, name: u16, flags: u16, data: &[u8]) {
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&32u32.to_le_bytes());
+        out.extend_from_slice(&[0xFF, 0xFF]);
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&[0xFF, 0xFF]);
+        out.extend_from_slice(&name.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes()); // data version
+        out.extend_from_slice(&flags.to_le_bytes());
+        out.extend_from_slice(&0x0409u16.to_le_bytes()); // language: English (United States)
+        out.extend_from_slice(&0u32.to_le_bytes()); // version
+        out.extend_from_slice(&0u32.to_le_bytes()); // characteristics
+        out.extend_from_slice(data);
+        while out.len() % 4 != 0 {
+            out.push(0);
+        }
+    }
+    let mut out = Vec::new();
+    resource(&mut out, 0, 0, 0, &[]); // a .res file starts with an empty entry
+    let mut group = Vec::new();
+    group.extend_from_slice(&0u16.to_le_bytes());
+    group.extend_from_slice(&1u16.to_le_bytes());
+    group.extend_from_slice(&(count as u16).to_le_bytes());
+    for k in 0..count {
+        let e = 6 + 16 * k;
+        let entry = ico.get(e..e + 16)?;
+        let size = u32_at(ico, e + 8)? as usize;
+        let at = u32_at(ico, e + 12)? as usize;
+        let picture = ico.get(at..at.checked_add(size)?)?;
+        let id = (k + 1) as u16;
+        resource(&mut out, 3, id, 0x1010, picture); // RT_ICON
+        group.extend_from_slice(&entry[..12]); // size, colours, planes, bits, bytes
+        group.extend_from_slice(&id.to_le_bytes());
+    }
+    resource(&mut out, 14, 1, 0x1030, &group); // RT_GROUP_ICON
+    Some(out)
+}
+
+/// Writes (or removes) the files that give the program an icon. False on a
+/// problem worth stopping for.
+fn write_icon_files(dir: &std::path::Path, icon: Option<&str>) -> bool {
+    let (res, script) = (dir.join("icon.res"), dir.join("build.rs"));
+    let _ = std::fs::remove_file(&res);
+    let _ = std::fs::remove_file(&script);
+    let Some(icon) = icon else { return true };
+    if !cfg!(windows) {
+        eprintln!("Note: --icon only applies to Windows programs, so this one is built without it.");
+        return true;
+    }
+    let data = match std::fs::read(icon) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Couldn't open the icon \"{}\": {}", icon, e);
+            return false;
+        }
+    };
+    let Some(compiled) = ico_to_res(&data) else {
+        eprintln!("\"{}\" isn't an .ico file.", icon);
+        return false;
+    };
+    // the toolchain that built Antares is the one that builds the program
+    if cfg!(target_env = "gnu") {
+        let found = std::process::Command::new("windres")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok();
+        if !found {
+            eprintln!("Note: adding an icon needs `windres` (it comes with MinGW binutils), which wasn't found; building without the icon.");
+            return true;
+        }
+    }
+    std::fs::write(&res, compiled).is_ok() && std::fs::write(&script, ICON_BUILD_RS).is_ok()
+}
+
 /// Whether a folder holds the Antares source (compiled programs build against it).
 fn is_source(dir: &std::path::Path) -> bool {
     dir.join("src").join("rt.rs").is_file()
@@ -3208,7 +3319,8 @@ fn cache_dir() -> Option<PathBuf> {
     base.map(|b| b.join("antares").join(env!("CARGO_PKG_VERSION")))
 }
 
-pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String]) -> i32 {
+/// `icon`: an .ico file to show for the program in Windows (ignored elsewhere).
+pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String], icon: Option<&str>) -> i32 {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -3337,6 +3449,9 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         || std::fs::write(dir.join("src").join("main.rs"), &code).is_err()
     {
         eprintln!("Couldn't write the build files to {}", dir.display());
+        return 1;
+    }
+    if !write_icon_files(&dir, icon) {
         return 1;
     }
     eprintln!("Compiling {} (this takes a little while the first time)...", path);
