@@ -306,6 +306,28 @@ struct Cx<'a> {
     cur: Option<usize>,
     /// Whether the body being generated returns a plain value.
     plain: bool,
+    /// Rows read and written through a direct pointer in the loop body being
+    /// generated: (scope, variable) and the pointer's name.
+    fast: Vec<((usize, usize), String)>,
+}
+
+/// What an innermost counting loop does with rows (see `Cx::fast_rows`).
+struct FastScan {
+    ok: bool,
+    /// Variables used in some other way than `row[counter + constant]`.
+    bad: BTreeSet<usize>,
+    /// Row variable: lowest and highest constant added to the counter, and
+    /// whether the loop writes to it.
+    rows: std::collections::BTreeMap<usize, (i64, i64, bool)>,
+}
+
+impl FastScan {
+    fn note(&mut self, r: usize, off: i64, write: bool) {
+        let e = self.rows.entry(r).or_insert((off, off, false));
+        e.0 = e.0.min(off);
+        e.1 = e.1.max(off);
+        e.2 |= write;
+    }
 }
 
 /// Where a variable gets a value from (for finding whole-number variables).
@@ -1280,6 +1302,12 @@ impl<'a> Cx<'a> {
                     return (format!("{{ let b_ = {}; slice(&b_, vec![{}], {})? }}", b, parts.join(", "), line), Ty::Dyn);
                 }
                 if want == Ty::Num || want == Ty::Int {
+                    if let Expr::Var { depth, idx: vi, .. } = &**base {
+                        let t = self.resolve(sc, *depth);
+                        if let (Some(p), Some(ic)) = (self.fast_ptr(t, *vi as usize), self.icode(&idx[0], sc, true)) {
+                            return (format!("(*{}.add(({}) as usize))", p, ic), want);
+                        }
+                    }
                     let it = self.ty(&idx[0], sc);
                     // which reader: (row kind, position kind)
                     let at = self.icode(&idx[0], sc, true);
@@ -1345,6 +1373,242 @@ impl<'a> Cx<'a> {
 
     fn var_ty_param(&self, s: usize, i: usize) -> Ty {
         self.var_ty(s, i)
+    }
+
+    /// `counter`, `counter + c`, `c + counter` or `counter - c` for the loop
+    /// counter `v` of scope `sc` and a small whole constant c: the c.
+    fn fast_offset(&self, e: &Expr, sc: usize, v: usize) -> Option<i64> {
+        let is_v = |x: &Expr| matches!(x, Expr::Var { depth, idx, .. } if self.resolve(sc, *depth) == sc && *idx as usize == v);
+        let c = |x: &Expr| self.const_of(x, sc).filter(|c| *c == c.trunc() && c.abs() <= 1048576.0).map(|c| c as i64);
+        match e {
+            _ if is_v(e) => Some(0),
+            Expr::Binary(BinOp::Add, a, b, _) => {
+                if is_v(a) {
+                    c(b)
+                } else if is_v(b) {
+                    c(a)
+                } else {
+                    None
+                }
+            }
+            Expr::Binary(BinOp::Sub, a, b, _) if is_v(a) => c(b).map(|x| -x),
+            _ => None,
+        }
+    }
+
+    /// A row variable (plain or integer) of scope `sc` itself.
+    fn row_var(&self, sc: usize, depth: u32, idx: u32) -> Option<usize> {
+        let i = idx as usize;
+        (self.resolve(sc, depth) == sc && matches!(self.var_ty(sc, i), Ty::Arr | Ty::IArr)).then_some(i)
+    }
+
+    fn fast_note_set(&self, sc: usize, depth: u32, idx: u32, v: usize, f: &mut FastScan) {
+        if self.resolve(sc, depth) == sc {
+            if idx as usize == v {
+                f.ok = false;
+            }
+            f.bad.insert(idx as usize);
+        }
+    }
+
+    fn fast_scan_block(&self, stmts: &[Stmt], sc: usize, v: usize, f: &mut FastScan) {
+        for st in stmts {
+            match st {
+                Stmt::Expr(e) => self.fast_scan_expr(e, sc, v, f),
+                Stmt::Assign { idx, value } => {
+                    self.fast_note_set(sc, 0, *idx, v, f);
+                    self.fast_scan_expr(value, sc, v, f);
+                }
+                Stmt::AssignOuter { depth, idx, value } => {
+                    self.fast_note_set(sc, *depth, *idx, v, f);
+                    self.fast_scan_expr(value, sc, v, f);
+                }
+                Stmt::Learn { idx, value, .. } => {
+                    self.fast_note_set(sc, 0, *idx, v, f);
+                    self.fast_scan_expr(value, sc, v, f);
+                }
+                Stmt::SetPath { depth, idx, path, value, .. } => {
+                    self.fast_scan_expr(value, sc, v, f);
+                    for a in path {
+                        if let Access::Index(es) = a {
+                            for e in es {
+                                self.fast_scan_expr(e, sc, v, f);
+                            }
+                        }
+                    }
+                    if self.resolve(sc, *depth) == sc && *idx as usize == v {
+                        f.ok = false;
+                    }
+                    let off = self.fast_set(path).and_then(|ie| self.fast_offset(ie, sc, v));
+                    match (self.row_var(sc, *depth, *idx), off) {
+                        (Some(r), Some(o)) => f.note(r, o, true),
+                        (Some(r), None) => {
+                            f.bad.insert(r);
+                        }
+                        _ => self.fast_note_set(sc, *depth, *idx, v, f),
+                    }
+                }
+                Stmt::Show(es) => {
+                    for e in es {
+                        self.fast_scan_expr(e, sc, v, f);
+                    }
+                }
+                Stmt::Give(e) => {
+                    if let Some(e) = e {
+                        self.fast_scan_expr(e, sc, v, f);
+                    }
+                }
+                // only innermost loops get a direct version
+                Stmt::Repeat { .. } | Stmt::Each { .. } | Stmt::While { .. } => f.ok = false,
+                Stmt::When { arms, otherwise } => {
+                    for (c, b, _) in arms {
+                        self.fast_scan_expr(c, sc, v, f);
+                        self.fast_scan_block(b, sc, v, f);
+                    }
+                    if let Some(b) = otherwise {
+                        self.fast_scan_block(b, sc, v, f);
+                    }
+                }
+                Stmt::Descend { loss, rate, .. } => {
+                    self.fast_scan_expr(loss, sc, v, f);
+                    self.fast_scan_expr(rate, sc, v, f);
+                }
+                Stmt::Try { body, var, handler } => {
+                    if let Some(x) = var {
+                        self.fast_note_set(sc, 0, *x, v, f);
+                    }
+                    self.fast_scan_block(body, sc, v, f);
+                    self.fast_scan_block(handler, sc, v, f);
+                }
+                Stmt::Stop(_) | Stmt::Skip(_) => {}
+            }
+        }
+    }
+
+    fn fast_scan_expr(&self, e: &Expr, sc: usize, v: usize, f: &mut FastScan) {
+        match e {
+            Expr::Var { depth, idx, .. } => {
+                if self.resolve(sc, *depth) == sc {
+                    f.bad.insert(*idx as usize);
+                }
+            }
+            Expr::Index(base, idx, _) => {
+                if let (Expr::Var { depth, idx: bi, .. }, [ie]) = (&**base, &idx[..]) {
+                    if let (Some(r), Some(o)) = (self.row_var(sc, *depth, *bi), self.fast_offset(ie, sc, v)) {
+                        f.note(r, o, false);
+                        self.fast_scan_expr(ie, sc, v, f);
+                        return;
+                    }
+                }
+                self.fast_scan_expr(base, sc, v, f);
+                for x in idx {
+                    self.fast_scan_expr(x, sc, v, f);
+                }
+            }
+            Expr::Interp(p) | Expr::List(p) => {
+                for x in p {
+                    self.fast_scan_expr(x, sc, v, f);
+                }
+            }
+            Expr::Map(m) => {
+                for (_, x) in m {
+                    self.fast_scan_expr(x, sc, v, f);
+                }
+            }
+            Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => self.fast_scan_expr(a, sc, v, f),
+            Expr::Binary(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+                self.fast_scan_expr(a, sc, v, f);
+                self.fast_scan_expr(b, sc, v, f);
+            }
+            Expr::Call(fe, args, _) => {
+                for a in args {
+                    self.fast_scan_expr(a, sc, v, f);
+                }
+                match self.callee(fe, sc) {
+                    Callee::Builtin(_) => {}
+                    // a function could change a top-level variable
+                    Callee::Static(_) => {
+                        if sc == 0 {
+                            f.ok = false;
+                        }
+                    }
+                    Callee::Dynamic => {
+                        if sc == 0 {
+                            f.ok = false;
+                        }
+                        self.fast_scan_expr(fe, sc, v, f);
+                    }
+                }
+            }
+            Expr::Range(a, z, _) => {
+                for x in [a, z].into_iter().flatten() {
+                    self.fast_scan_expr(x, sc, v, f);
+                }
+            }
+            Expr::Lambda(_) => f.ok = false,
+            Expr::Ask { model, prompt, .. } => {
+                self.fast_scan_expr(model, sc, v, f);
+                self.fast_scan_expr(prompt, sc, v, f);
+            }
+            Expr::ModelNew { spec, opts, .. } => {
+                self.fast_scan_expr(spec, sc, v, f);
+                if let Some(o) = opts {
+                    self.fast_scan_expr(o, sc, v, f);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// For an innermost counting loop over the whole-number counter `v`: the
+    /// row variables used only as `row[v + constant]` in its body, with the
+    /// lowest and highest constant and whether the loop writes to the row.
+    /// Such a loop also gets a version that checks positions and sharing once
+    /// before it starts and then reads and writes the rows directly.
+    fn fast_rows(&self, body: &[Stmt], sc: usize, v: usize) -> Vec<(usize, i64, i64, bool)> {
+        let mut f = FastScan { ok: true, bad: BTreeSet::new(), rows: Default::default() };
+        self.fast_scan_block(body, sc, v, &mut f);
+        if !f.ok {
+            return vec![];
+        }
+        f.rows.iter().filter(|(r, _)| !f.bad.contains(r)).map(|(r, (lo, hi, w))| (*r, *lo, *hi, *w)).collect()
+    }
+
+    /// The loop body over `rows` with direct pointers, and the code that gets
+    /// those pointers (to run after the loop's checks have passed).
+    fn fast_body(&mut self, body: &[Stmt], sc: usize, k: usize, rows: &[(usize, i64, i64, bool)]) -> (String, String) {
+        let mut setup = String::new();
+        let before = self.fast.len();
+        for &(r, _, _, write) in rows {
+            let name = format!("p{}_{}", k, r);
+            let int = self.var_ty(sc, r) == Ty::IArr;
+            let get = match (int, write) {
+                (false, true) => format!("arr_unique(&mut {})", self.place(sc, r)),
+                (false, false) => format!("arr_ptr(&{})", self.place(sc, r)),
+                (true, true) => format!("iarr_unique(&mut {})", self.place(sc, r)),
+                (true, false) => format!("iarr_ptr(&{})", self.place(sc, r)),
+            };
+            setup.push_str(&format!("let {} = {};\n", name, get));
+            self.fast.push(((sc, r), name));
+        }
+        self.loops.push((k, self.try_depth));
+        let b = self.block(body, sc, false);
+        self.loops.pop();
+        self.fast.truncate(before);
+        (setup, b)
+    }
+
+    /// The length of row variable `r` of scope `sc`.
+    fn row_len(&self, sc: usize, r: usize) -> String {
+        if self.var_ty(sc, r) == Ty::IArr {
+            format!("({}.len())", self.place(sc, r))
+        } else {
+            format!("alen(&{})", self.place(sc, r))
+        }
+    }
+
+    fn fast_ptr(&self, t: usize, i: usize) -> Option<String> {
+        self.fast.iter().find(|(r, _)| *r == (t, i)).map(|(_, p)| p.clone())
     }
 
     /// `range(...)` with number inputs and a constant step: its start (if
@@ -2104,6 +2368,12 @@ impl<'a> Cx<'a> {
                 let t = self.resolve(sc, *depth);
                 let i = *idx as usize;
                 let captured = t != 0 && self.scopes[t].captured[i];
+                if let (Some(p), Some(ie)) = (self.fast_ptr(t, i), self.fast_set(path)) {
+                    if let Some(ic) = self.icode(ie, sc, true) {
+                        let vc = if self.var_ty(t, i) == Ty::IArr { self.int_code(value, sc, *line) } else { self.num_code(value, sc) };
+                        return format!("{{ let v_ = {}; let i_ = {}; *{}.add(i_ as usize) = v_; }}\n", vc, ic, p);
+                    }
+                }
                 if self.var_ty(t, i) == Ty::Arr {
                     if let Some(ie) = self.fast_set(path) {
                         let vc = self.num_code(value, sc);
@@ -2202,6 +2472,27 @@ impl<'a> Cx<'a> {
                 self.loops.push((k, self.try_depth));
                 let b = self.block(body, sc, false);
                 self.loops.pop();
+                // A direct version when the counter only reaches rows at counter
+                // + constant: the counter runs from 1 to n.
+                let rows = match var {
+                    Some(v) if self.var_ty(sc, *v as usize) == Ty::Whole => self.fast_rows(body, sc, *v as usize),
+                    _ => vec![],
+                };
+                if !rows.is_empty() && rows.iter().all(|r| r.1 >= -1) {
+                    let conds: Vec<String> =
+                        rows.iter().map(|&(r, _, hi, _)| format!("(n{} as i128) + {} < ({} as i128)", k, hi, self.row_len(sc, r))).collect();
+                    let (setup, fb) = self.fast_body(body, sc, k, &rows);
+                    return format!(
+                        "{{ let n{k} = ({n}) as u64; let mut i{k} = 0u64;\nif {conds} {{\n{setup}'l{k}: while i{k} < n{k} {{\ni{k} += 1;\n{set}{fb}}}\n}} else {{\n'l{k}: while i{k} < n{k} {{\ni{k} += 1;\n{set}{b}}}\n}} }}\n",
+                        k = k,
+                        n = n,
+                        conds = conds.join(" && "),
+                        setup = setup,
+                        set = set,
+                        fb = fb,
+                        b = b
+                    );
+                }
                 // (the count is a whole number below 2^64, so this counts the same)
                 format!(
                     "{{ let n{k} = ({n}) as u64; let mut i{k} = 0u64;\n'l{k}: while i{k} < n{k} {{\ni{k} += 1;\n{set}{b}}} }}\n",
@@ -2234,6 +2525,22 @@ impl<'a> Cx<'a> {
                 self.loops.pop();
                 let cmp = if step > 0.0 { "<" } else { ">" };
                 // the same numbers range() would list, one at a time
+                let rows = if whole && step > 0.0 { self.fast_rows(body, sc, v) } else { vec![] };
+                if !rows.is_empty() {
+                    // Every counter value c satisfies start <= c < end, so checking
+                    // the first and last positions once covers every iteration.
+                    let conds: Vec<String> = rows
+                        .iter()
+                        .map(|&(r, lo, hi, _)| {
+                            format!("x{k}.wrapping_add({lo}) >= 0 && e{k} + {hi:?}f64 <= ({len} as f64)", k = k, lo = lo, hi = hi as f64, len = self.row_len(sc, r))
+                        })
+                        .collect();
+                    let (setup, fb) = self.fast_body(body, sc, k, &rows);
+                    return format!(
+                        "{{ let mut x{k}: i64 = {s}; let e{k}: f64 = {e};\nif {conds} {{\n{setup}let z{k} = e{k}.ceil() as i64;\n'l{k}: while x{k} < z{k} {{\nlet c{k} = x{k}; x{k} += {st}i64;\n{set}{fb}}}\n}} else {{\n'l{k}: while (x{k} as f64) < e{k} {{\nlet c{k} = x{k}; x{k} += {st}i64;\n{set}{b}}}\n}} }}\n",
+                        k = k, s = s, e = e, conds = conds.join(" && "), setup = setup, st = step as i64, set = set, fb = fb, b = b
+                    );
+                }
                 if whole {
                     format!(
                         "{{ let mut x{k}: i64 = {s}; let e{k}: f64 = {e};\n'l{k}: while (x{k} as f64) {cmp} e{k} {{\nlet c{k} = x{k}; x{k} += {st}i64;\n{set}{b}}} }}\n",
@@ -2590,6 +2897,7 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         prop: vec![],
         cur: None,
         plain: false,
+        fast: vec![],
     };
     cx.infer(&stmts);
     cx.infer_whole(&stmts);

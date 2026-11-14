@@ -604,6 +604,41 @@ pub fn aset_i(a: &mut T, i: i64, x: f64, line: u32) -> R<()> {
     aset_slow(a, i as f64, x, line)
 }
 
+// ---------- direct access for loops that checked positions up front ----------
+
+/// The numbers of a row, for a loop that only reads them.
+#[inline(always)]
+pub fn arr_ptr(a: &T) -> *mut f64 {
+    unsafe { (&mut *a.data.as_ptr()).as_mut_ptr() }
+}
+
+/// The numbers of a row for a loop that writes them: a row another variable
+/// shares is copied first (as the first write would do anyway).
+#[inline]
+pub fn arr_unique(a: &mut T) -> *mut f64 {
+    if Rc::strong_count(a) != 1 {
+        let copy = tensor::new(a.shape.clone(), a.data.borrow().clone());
+        *a = copy;
+    }
+    arr_ptr(a)
+}
+
+#[inline(always)]
+pub fn iarr_ptr(a: &IA) -> *mut i64 {
+    a.as_ptr() as *mut i64
+}
+
+#[inline]
+pub fn iarr_unique(a: &mut IA) -> *mut i64 {
+    if Rc::get_mut(a).is_none() {
+        *a = Rc::new((**a).clone());
+    }
+    match Rc::get_mut(a) {
+        Some(v) => v.as_mut_ptr(),
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// number(x) without the cost of a general built-in call.
 #[inline]
 pub fn to_number(v: &Value, line: u32) -> R<f64> {
