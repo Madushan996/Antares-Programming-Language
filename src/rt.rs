@@ -254,14 +254,53 @@ pub fn scall(f: fn(&[Value]) -> Result<Value, String>, args: &[Value], line: u32
 
 /// name[key] = v for one index. Lists are changed in place without building a path.
 pub fn set1(target: &mut Value, key: Value, v: Value, name: &str, line: u32) -> R<()> {
-    if let (Value::List(rc), Value::Num(i)) = (&mut *target, &key) {
-        let k = whole(*i);
-        if k as f64 == *i && (k as u64) < rc.len() as u64 {
+    if let Value::List(rc) = &mut *target {
+        let k = match key {
+            Value::Num(i) => {
+                let k = whole(i);
+                if k as f64 == i { k } else { -1 }
+            }
+            Value::Int(k) => k,
+            _ => -1,
+        };
+        if (k as u64) < rc.len() as u64 {
             Rc::make_mut(rc)[k as usize] = v;
             return Ok(());
         }
     }
     set_path(target, vec![Key::Idx(vec![key])], v, name, line)
+}
+
+/// Fails if a variable hasn't been given a value yet.
+#[inline(always)]
+pub fn has_value(v: &Value, name: &str, line: u32) -> R<()> {
+    if let Value::Unset = v {
+        return unset(name, line).map(|_| ());
+    }
+    Ok(())
+}
+
+/// b[key] for one position, reading a variable in place (no copy of a list is
+/// made). `name` is the variable's name, for the "doesn't have a value" problem.
+#[inline]
+pub fn index1(b: &Value, key: Value, name: &str, line: u32) -> R<Value> {
+    if let Value::List(l) = b {
+        let k = match key {
+            Value::Num(i) => {
+                let k = whole(i);
+                if k as f64 == i { k } else { -1 }
+            }
+            Value::Int(k) => k,
+            _ => -1,
+        };
+        if (k as u64) < l.len() as u64 {
+            return Ok(l[k as usize].clone());
+        }
+    }
+    if let Value::Unset = b {
+        return unset(name, line);
+    }
+    index(b, &[key], line)
 }
 
 /// Calls any function value.

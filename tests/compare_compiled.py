@@ -12,7 +12,7 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ANTARES = os.path.join(ROOT, "target", "release", "antares.exe" if os.name == "nt" else "antares")
 DEFAULT = [
-    "tests/check.ant", "tests/features.ant", "tests/engine.ant", "tests/integers.ant", "tests/counters.ant", "tests/rows.ant",
+    "tests/check.ant", "tests/features.ant", "tests/engine.ant", "tests/integers.ant", "tests/counters.ant", "tests/rows.ant", "tests/lists.ant",
     "examples/hello.ant", "examples/line.ant", "examples/xor.ant", "examples/ask.ant",
 ]
 

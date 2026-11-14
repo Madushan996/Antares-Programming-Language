@@ -464,6 +464,35 @@ fn combine_rows(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]])
     #[cfg(target_arch = "x86_64")]
     {
         if std::arch::is_x86_feature_detected!("avx2") {
+            // A move adds and removes one or two rows; with the counts fixed the
+            // inner loops disappear and only the arithmetic is left.
+            if out.len() % 16 == 0 && base.len() == out.len() {
+                macro_rules! fixed {
+                    ($a:literal, $s:literal) => {{
+                        let mut ap = [std::ptr::null::<i16>(); $a];
+                        let mut sp = [std::ptr::null::<i16>(); $s];
+                        for k in 0..$a {
+                            ap[k] = adds[k].as_ptr();
+                        }
+                        for k in 0..$s {
+                            sp[k] = subs[k].as_ptr();
+                        }
+                        unsafe { combine_fixed_avx2::<$a, $s>(out.as_mut_ptr(), base.as_ptr(), ap, sp, out.len()) };
+                        return;
+                    }};
+                }
+                if adds.iter().chain(subs.iter()).all(|r| r.len() == out.len()) {
+                    match (adds.len(), subs.len()) {
+                        (1, 1) => fixed!(1, 1),
+                        (1, 2) => fixed!(1, 2),
+                        (2, 2) => fixed!(2, 2),
+                        (2, 1) => fixed!(2, 1),
+                        (1, 0) => fixed!(1, 0),
+                        (0, 1) => fixed!(0, 1),
+                        _ => {}
+                    }
+                }
+            }
             unsafe { combine_rows_avx2(out, base, adds, subs) };
             return;
         }
@@ -477,6 +506,34 @@ fn combine_rows(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]])
             v = v.wrapping_sub(r[i]);
         }
         out[i] = v;
+    }
+}
+
+/// combine_rows for a fixed number of rows to add (A) and remove (S), on rows
+/// whose length `n` is a multiple of 16.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn combine_fixed_avx2<const A: usize, const S: usize>(
+    out: *mut i16,
+    base: *const i16,
+    adds: [*const i16; A],
+    subs: [*const i16; S],
+    n: usize,
+) {
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut i = 0;
+        while i < n {
+            let mut v = _mm256_loadu_si256(base.add(i) as *const __m256i);
+            for r in adds {
+                v = _mm256_add_epi16(v, _mm256_loadu_si256(r.add(i) as *const __m256i));
+            }
+            for r in subs {
+                v = _mm256_sub_epi16(v, _mm256_loadu_si256(r.add(i) as *const __m256i));
+            }
+            _mm256_storeu_si256(out.add(i) as *mut __m256i, v);
+            i += 16;
+        }
     }
 }
 
@@ -537,7 +594,19 @@ unsafe fn screlu_dot_avx2_16(x: &[i16], w: &[i16], cap: i32) -> i64 {
         while i < n {
             // at most 512 numbers per block keeps each 32-bit running total in range
             let end = (i + 512).min(n);
-            let mut acc = zero;
+            // two running totals, so consecutive steps don't wait for each other
+            let (mut acc, mut acc2) = (zero, zero);
+            while i + 32 <= end {
+                let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
+                let wv = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+                let xv2 = _mm256_loadu_si256(x.as_ptr().add(i + 16) as *const __m256i);
+                let wv2 = _mm256_loadu_si256(w.as_ptr().add(i + 16) as *const __m256i);
+                let c = _mm256_min_epi16(_mm256_max_epi16(xv, zero), capv);
+                let c2 = _mm256_min_epi16(_mm256_max_epi16(xv2, zero), capv);
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_mullo_epi16(c, wv), c));
+                acc2 = _mm256_add_epi32(acc2, _mm256_madd_epi16(_mm256_mullo_epi16(c2, wv2), c2));
+                i += 32;
+            }
             while i < end {
                 let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
                 let wv = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
@@ -546,6 +615,7 @@ unsafe fn screlu_dot_avx2_16(x: &[i16], w: &[i16], cap: i32) -> i64 {
                 acc = _mm256_add_epi32(acc, _mm256_madd_epi16(t, c));
                 i += 16;
             }
+            let acc = _mm256_add_epi32(acc, acc2);
             let mut parts = [0i32; 8];
             _mm256_storeu_si256(parts.as_mut_ptr() as *mut __m256i, acc);
             total += parts.iter().map(|v| *v as i64).sum::<i64>();

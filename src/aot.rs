@@ -133,6 +133,20 @@ fn binop_name(op: BinOp) -> &'static str {
     }
 }
 
+/// Whether working out `e` may call a function (and so change variables).
+fn calls_anything(e: &Expr) -> bool {
+    match e {
+        Expr::Call(..) | Expr::Ask { .. } | Expr::ModelNew { .. } | Expr::Lambda(_) => true,
+        Expr::Interp(p) | Expr::List(p) => p.iter().any(calls_anything),
+        Expr::Map(m) => m.iter().any(|(_, x)| calls_anything(x)),
+        Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => calls_anything(a),
+        Expr::Binary(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => calls_anything(a) || calls_anything(b),
+        Expr::Index(b, idx, _) => calls_anything(b) || idx.iter().any(calls_anything),
+        Expr::Range(a, z, _) => a.as_deref().is_some_and(calls_anything) || z.as_deref().is_some_and(calls_anything),
+        _ => false,
+    }
+}
+
 /// Built-ins that call functions given to them.
 fn calls_back(name: &str) -> bool {
     matches!(name, "map" | "filter" | "reduce")
@@ -1320,16 +1334,37 @@ impl<'a> Cx<'a> {
                     } else {
                         (self.expr(&idx[0], sc).0, "aget")
                     };
-                    // A variable is read in place; no copy of the handle is needed.
+                    // A variable is read in place; no copy of the handle is needed
+                    // (unless working out the position could change the variable).
                     if let Expr::Var { depth, idx: vi, .. } = &**base {
                         let t = self.resolve(sc, *depth);
-                        if !(t != 0 && self.scopes[t].captured[*vi as usize]) && !(t == 0 && self.consts.contains_key(&(*vi as usize))) {
+                        if !(t != 0 && self.scopes[t].captured[*vi as usize])
+                            && !(t == 0 && self.consts.contains_key(&(*vi as usize)))
+                            && !calls_anything(&idx[0])
+                        {
                             let p = self.place(t, *vi as usize);
                             return (format!("{{ let i_ = {}; {}(&{}, i_, {})? }}", ic, reader, p, line), want);
                         }
                     }
                     let (bc, _) = self.expr(base, sc);
                     return (format!("{{ let a_ = {}; let i_ = {}; {}(&a_, i_, {})? }}", bc, ic, reader, line), want);
+                }
+                // One position into a variable: read it in place. (Only when
+                // working out the position can't change the variable first.)
+                if let ([ie], Expr::Var { depth, idx: vi, name, .. }) = (&idx[..], &**base) {
+                    let t = self.resolve(sc, *depth);
+                    let i = *vi as usize;
+                    let plain_var = !(t != 0 && self.scopes[t].captured[i])
+                        && !(t == 0 && (self.consts.contains_key(&i) || self.iconsts.contains_key(&i) || self.is_builtin(i) || self.static_fn.contains_key(&i)))
+                        && self.var_ty(t, i) == Ty::Dyn;
+                    if plain_var && !calls_anything(ie) {
+                        let k = self.dyn_code(ie, sc);
+                        let p = self.place(t, i);
+                        return (
+                            format!("{{ has_value(&{p}, {n:?}, {l})?; let k_ = {k}; index1(&{p}, k_, {n:?}, {l})? }}", p = p, n = &**name, l = line, k = k),
+                            Ty::Dyn,
+                        );
+                    }
                 }
                 let b = self.dyn_code(base, sc);
                 (format!("{{ let b_ = {}; index(&b_, &[{}], {})? }}", b, self.dyn_list(idx, sc), line), Ty::Dyn)
