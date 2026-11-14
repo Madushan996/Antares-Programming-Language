@@ -75,7 +75,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.1.0`.
+You should see `Antares 0.2.0`.
 
 ### Option 2: download it yourself
 
@@ -564,6 +564,15 @@ Things to know:
 - A global given one literal number at the top level and never changed
   (`SIZE = 64`) is treated as a constant, and a list made only of such
   numbers is built once. Both make arithmetic like `x % SIZE` much cheaper.
+- Whole-number counters (`repeat ... as i`, `each i in range(...)`, and
+  variables only ever changed by `i = i + 1` and the like) are machine
+  integers, so positions like `row[i + 1]` cost only a range check.
+- A top-level row made once with `ints(n)` or `zeros(n)`, with a size known
+  when compiling, and afterwards only used as `t[i]` and `t[i] = v`, becomes a
+  fixed table, the fastest kind of row. Using the row as a whole anywhere
+  (`len(t)`, passing `t` to a function, `each x in t`) turns this off.
+- The innermost `each i in range(...)` or `repeat ... as i` loop that uses
+  rows only as `row[i + c]` checks positions once, before it starts.
 - One value of unknown kind can slow down everything it touches. If a number
   comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler
   knows it is a number. In the chess engine, one such lookup made the whole
