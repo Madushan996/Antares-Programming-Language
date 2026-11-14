@@ -65,3 +65,33 @@ try { show screlu_dot(acc[20], outw[0], 255) } else e { show "screlu", e }
 show screlu_dot(acc[-1], outw[-1], 255)
 acc[-2] = acc[-10]
 show expand(acc[8])
+
+# update_rows from a compact row into a row: kept in step with the general way
+adds[0] = 2
+keep2 = acc
+acc[9] = update_rows(bias, weights, adds, 1, subs, 0)
+show expand(keep2[9]), expand(acc[9])
+acc[-3] = update_rows(bias, weights, adds, 1, subs, 0)
+show expand(acc[7])
+try { acc[11] = update_rows(bias, weights, adds, 1, subs, 0) } else e { show "with d", e }
+adds[0] = 70
+try { acc[11] = update_rows(bias, weights, adds, 1, subs, 0) } else e { show "with both", e }
+try { acc[2.5] = update_rows(bias, weights, adds, 0, subs, 0) } else e { show "with frac", e }
+
+# the same inside a function, with local matrices and rows
+to local_rows(k) {
+    m = compact(zeros(4 * H), 4, H)
+    b = compact(range(H))
+    a = zeros(2)
+    s = zeros(2)
+    a[0] = k
+    m[1] = update_rows(b, weights, a, 1, s, 0)
+    m[2] = update_rows(m[1], weights, a, 1, s, 0)
+    m[k % 4] = m[2]
+    sq = compact(range(4 * H), 4, H)
+    sq[0] = update_rows(sq[1], sq, a, 0, s, 0)
+    sq[3] = update_rows(b, sq, s, 1, a, 0)
+    give [expand(m[1]), expand(m[k % 4]), screlu_dot(m[2], b, 255), expand(sq[0]), expand(sq[3])]
+}
+show local_rows(3)
+show local_rows(6)

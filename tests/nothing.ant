@@ -1,0 +1,47 @@
+# Functions that give back nothing: by ending, by `give nothing`, or by ending
+# with a call to another function that gives back nothing.
+
+count = 0
+
+to bump(n) {
+    change count = count + n
+}
+
+to bump_twice(n) {
+    bump(n)
+    bump(n)
+}
+
+to bump_unless(n, skip_it) {
+    when skip_it { give nothing }
+    bump(n)
+}
+
+to bump_or_not(n) {
+    when n > 5 { give nothing }
+    when n > 3 { give }
+    bump_twice(n)
+}
+
+to choose(n) {
+    when n > 0 { bump(n) } else { give nothing }
+}
+
+bump_twice(2)
+bump_unless(10, yes)
+bump_unless(1, no)
+bump_or_not(9)
+bump_or_not(4)
+bump_or_not(1)
+choose(3)
+choose(-3)
+show count
+
+# the result of such a call is nothing
+a = bump_twice(1)
+b = bump_unless(1, yes)
+c = choose(-1)
+d = choose(1)
+show a, b, c, d, count
+show bump_or_not(9) == nothing, bump_or_not(2) == nothing
+show count

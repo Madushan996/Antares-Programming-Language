@@ -855,6 +855,50 @@ fn pos_of(k: &Value, n: usize, line: u32) -> R<usize> {
     at(interp::to_index(k, n), line)
 }
 
+/// A row position given to the compact-matrix operations: an integer or a
+/// number when the compiler knows it, any value otherwise.
+pub trait PkKey {
+    fn pos(&self, n: usize, line: u32) -> R<usize>;
+    fn value(self) -> Value;
+}
+
+impl PkKey for i64 {
+    #[inline(always)]
+    fn pos(&self, n: usize, line: u32) -> R<usize> {
+        if (*self as u64) < n as u64 {
+            return Ok(*self as usize);
+        }
+        at(interp::to_index(&Value::Int(*self), n), line)
+    }
+    fn value(self) -> Value {
+        Value::Int(self)
+    }
+}
+
+impl PkKey for f64 {
+    #[inline(always)]
+    fn pos(&self, n: usize, line: u32) -> R<usize> {
+        let w = whole(*self);
+        if w as f64 == *self && (w as u64) < n as u64 {
+            return Ok(w as usize);
+        }
+        at(interp::to_index(&Value::Num(*self), n), line)
+    }
+    fn value(self) -> Value {
+        Value::Num(self)
+    }
+}
+
+impl PkKey for Value {
+    #[inline(always)]
+    fn pos(&self, n: usize, line: u32) -> R<usize> {
+        pos_of(self, n, line)
+    }
+    fn value(self) -> Value {
+        self
+    }
+}
+
 /// Makes a compact value unshared before it is changed in place.
 #[inline]
 fn pk_unique(m: &mut PK) {
@@ -905,16 +949,16 @@ fn pk_update_general(m: &mut PK, d: Value, base: Value, w: &PK, adds: &T, n_add:
 }
 
 /// m[d] = update_rows(m[s], w, adds, n_add, subs, n_sub)
-pub fn pk_update_from(m: &mut PK, d: Value, s: Value, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
+pub fn pk_update_from<D: PkKey, S: PkKey>(m: &mut PK, d: D, s: S, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
     if !m.matrix || Rc::ptr_eq(m, w) || !w.matrix || w.cols != m.cols {
-        let base = pk_index(m, s, line)?;
-        return pk_update_general(m, d, base, w, adds, n_add, subs, n_sub, line);
+        let base = pk_index(m, s.value(), line)?;
+        return pk_update_general(m, d.value(), base, w, adds, n_add, subs, n_sub, line);
     }
-    let si = pos_of(&s, m.rows, line)?;
+    let si = s.pos(m.rows, line)?;
     let h = m.cols;
     // Usual case: a different row of the same matrix, written in one pass with
     // no row in between. Row lists are checked before anything is written.
-    if let Ok(di) = pos_of(&d, m.rows, line) {
+    if let Ok(di) = d.pos(m.rows, line) {
         if di != si {
             pk_unique(m);
             let wd = w.data.borrow();
@@ -934,37 +978,36 @@ pub fn pk_update_from(m: &mut PK, d: Value, s: Value, w: &PK, adds: &T, n_add: f
         let (md, wd) = (m.data.borrow(), w.data.borrow());
         at(crate::builtins::update_rows_into(&mut out, &md[si * h..(si + 1) * h], w.rows, &wd, adds, n_add, subs, n_sub), line)?;
     }
-    let di = pos_of(&d, m.rows, line)?;
+    let di = d.pos(m.rows, line)?;
     pk_unique(m);
     m.data.borrow_mut()[di * h..(di + 1) * h].copy_from_slice(&out);
     Ok(())
 }
 
 /// m[d] = update_rows(base, w, ...) with `base` a compact row.
-pub fn pk_update_with(m: &mut PK, d: Value, base: &PK, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
-    if !m.matrix || base.matrix || Rc::ptr_eq(m, w) || Rc::ptr_eq(m, base) || !w.matrix || w.cols != base.cols || base.cols != m.cols {
-        return pk_update_general(m, d, Value::Packed(base.clone()), w, adds, n_add, subs, n_sub, line);
-    }
-    let h = m.cols;
-    let mut out = vec![0i16; h];
-    {
+pub fn pk_update_with<D: PkKey>(m: &mut PK, d: D, base: &PK, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
+    let plain = m.matrix && !base.matrix && !Rc::ptr_eq(m, w) && !Rc::ptr_eq(m, base) && w.matrix && w.cols == base.cols && base.cols == m.cols;
+    // Usual case: written straight into row d (the row lists are checked
+    // before anything is written). A bad row d is left to the general way, so
+    // which problem is reported stays the same.
+    if let (true, Ok(di)) = (plain, d.pos(m.rows, line)) {
+        let h = m.cols;
+        pk_unique(m);
         let (bd, wd) = (base.data.borrow(), w.data.borrow());
-        at(crate::builtins::update_rows_into(&mut out, &bd, w.rows, &wd, adds, n_add, subs, n_sub), line)?;
+        let mut md = m.data.borrow_mut();
+        return at(crate::builtins::update_rows_into(&mut md[di * h..(di + 1) * h], &bd, w.rows, &wd, adds, n_add, subs, n_sub), line);
     }
-    let d = pos_of(&d, m.rows, line)?;
-    pk_unique(m);
-    m.data.borrow_mut()[d * h..(d + 1) * h].copy_from_slice(&out);
-    Ok(())
+    pk_update_general(m, d.value(), Value::Packed(base.clone()), w, adds, n_add, subs, n_sub, line)
 }
 
 /// m[d] = m[s]
-pub fn pk_copy_row(m: &mut PK, d: Value, s: Value, line: u32) -> R<()> {
+pub fn pk_copy_row<D: PkKey, S: PkKey>(m: &mut PK, d: D, s: S, line: u32) -> R<()> {
     if !m.matrix {
-        let v = pk_index(m, s, line)?;
-        return pk_set(m, d, v, line);
+        let v = pk_index(m, s.value(), line)?;
+        return pk_set(m, d.value(), v, line);
     }
-    let s = pos_of(&s, m.rows, line)?;
-    let d = pos_of(&d, m.rows, line)?;
+    let s = s.pos(m.rows, line)?;
+    let d = d.pos(m.rows, line)?;
     pk_unique(m);
     let h = m.cols;
     m.data.borrow_mut().copy_within(s * h..(s + 1) * h, d * h);
@@ -973,25 +1016,25 @@ pub fn pk_copy_row(m: &mut PK, d: Value, s: Value, line: u32) -> R<()> {
 
 /// screlu_dot(x, w, cap) where x and w are compact rows, or rows `xr` / `wr`
 /// of compact matrices.
-pub fn pk_screlu(x: &PK, xr: Option<Value>, w: &PK, wr: Option<Value>, cap: f64, line: u32) -> R<f64> {
+pub fn pk_screlu<X: PkKey, W: PkKey>(x: &PK, xr: Option<X>, w: &PK, wr: Option<W>, cap: f64, line: u32) -> R<f64> {
     if xr.is_some() != x.matrix || wr.is_some() != w.matrix {
         // not the plain case: do it step by step
         let xv = match xr {
-            Some(k) => pk_index(x, k, line)?,
+            Some(k) => pk_index(x, k.value(), line)?,
             None => Value::Packed(x.clone()),
         };
         let wv = match wr {
-            Some(k) => pk_index(w, k, line)?,
+            Some(k) => pk_index(w, k.value(), line)?,
             None => Value::Packed(w.clone()),
         };
         return as_num(at(crate::builtins::screlu_dot_slice(&[xv, wv, Value::Num(cap)]), line)?, line);
     }
     let xi = match &xr {
-        Some(k) => pos_of(k, x.rows, line)?,
+        Some(k) => k.pos(x.rows, line)?,
         None => 0,
     };
     let wi = match &wr {
-        Some(k) => pos_of(k, w.rows, line)?,
+        Some(k) => k.pos(w.rows, line)?,
         None => 0,
     };
     let (xd, wd) = (x.data.borrow(), w.data.borrow());

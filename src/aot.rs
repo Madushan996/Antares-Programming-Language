@@ -597,10 +597,24 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The type of `e` as what a function gives back: like `ty`, except that
+    /// `nothing` and a call to a function that gives back nothing are no value
+    /// at all, so a function ending that way doesn't give back a general value.
+    fn result_ty(&self, e: &Expr, sc: usize) -> Ty {
+        match e {
+            Expr::Nothing => Ty::Unit,
+            Expr::Call(f, args, _) => match self.callee(f, sc) {
+                Callee::Static(s) if args.len() == self.scopes[s].nparams && self.scopes[s].ret == Ty::Unit => Ty::Unit,
+                _ => self.ty(e, sc),
+            },
+            _ => self.ty(e, sc),
+        }
+    }
+
     fn tail_ty(&self, stmts: &[Stmt], sc: usize) -> Ty {
         match stmts.last() {
             None => Ty::Unit,
-            Some(Stmt::Expr(e)) => self.ty(e, sc),
+            Some(Stmt::Expr(e)) => self.result_ty(e, sc),
             Some(Stmt::Give(_)) | Some(Stmt::Stop(_)) | Some(Stmt::Skip(_)) => Ty::Bot,
             Some(Stmt::When { arms, otherwise }) => {
                 let mut t = match otherwise {
@@ -795,7 +809,7 @@ impl<'a> Cx<'a> {
                 let t = match e {
                     Some(e) => {
                         self.walk_expr(e, sc);
-                        self.ty(e, sc)
+                        self.result_ty(e, sc)
                     }
                     None => Ty::Unit,
                 };
@@ -2641,13 +2655,27 @@ impl<'a> Cx<'a> {
         Some(self.place(t, i))
     }
 
+    /// A row position for the compact-matrix operations, as an integer or a
+    /// number when its type is known (no general value is made for it).
+    fn pk_key(&mut self, e: &Expr, sc: usize) -> String {
+        if let Some(c) = self.icode(e, sc, false) {
+            return c;
+        }
+        let (c, t) = self.expr(e, sc);
+        match t {
+            Ty::Int => c,
+            Ty::Num | Ty::ILit => conv(c, t, Ty::Num),
+            _ => conv(c, t, Ty::Dyn),
+        }
+    }
+
     /// A compact-row argument: a compact row (code, no row) or a row of a compact
     /// matrix variable (the matrix in place, and the row position).
     fn pk_arg(&mut self, e: &Expr, sc: usize) -> Option<(String, Option<String>)> {
         if let Expr::Index(base, idx, _) = e {
             if idx.len() == 1 && !matches!(idx[0], Expr::Range(..)) && self.ty(base, sc) == Ty::PkM && !calls_anything(&idx[0]) {
                 let p = self.plain_place(base, sc)?;
-                let k = self.dyn_code(&idx[0], sc);
+                let k = self.pk_key(&idx[0], sc);
                 return Some((format!("&{}", p), Some(k)));
             }
         }
@@ -2673,7 +2701,7 @@ impl<'a> Cx<'a> {
         let cap = self.num_code(&args[2], sc);
         let opt = |r: Option<String>| match r {
             Some(k) => format!("Some({})", k),
-            None => "None".to_string(),
+            None => "None::<i64>".to_string(),
         };
         Some(format!("pk_screlu({}, {}, {}, {}, {}, {})?", x, opt(xr), w, opt(wr), cap, line))
     }
@@ -2686,8 +2714,8 @@ impl<'a> Cx<'a> {
             // m[d] = m[s]
             if let Expr::Index(b, ix, _) = value {
                 if ix.len() == 1 && !matches!(ix[0], Expr::Range(..)) && same(b, self) && !calls_anything(&ix[0]) {
-                    let s_ = self.dyn_code(&ix[0], sc);
-                    let d_ = self.dyn_code(ie, sc);
+                    let s_ = self.pk_key(&ix[0], sc);
+                    let d_ = self.pk_key(ie, sc);
                     return format!("{{ let s_ = {}; let d_ = {}; pk_copy_row(&mut {}, d_, s_, {})?; }}\n", s_, d_, place, line);
                 }
             }
@@ -2695,7 +2723,7 @@ impl<'a> Cx<'a> {
             if let Expr::Call(f, a, _) = value {
                 if let Callee::Builtin(b) = self.callee(f, sc) {
                     if self.bnames[b] == "update_rows" && a.len() == 6 && !a.iter().any(calls_anything) {
-                        let w = self.plain_place(&a[1], sc).filter(|_| self.ty(&a[1], sc) == Ty::PkM);
+                        let w = self.plain_place(&a[1], sc).filter(|_| self.ty(&a[1], sc) == Ty::PkM && !same(&a[1], self));
                         let adds = self.plain_place(&a[2], sc).filter(|_| self.ty(&a[2], sc) == Ty::Arr);
                         let subs = self.plain_place(&a[4], sc).filter(|_| self.ty(&a[4], sc) == Ty::Arr);
                         let num = |e: &Expr, s: &Self| matches!(s.ty(e, sc), Ty::Num | Ty::Int);
@@ -2705,23 +2733,28 @@ impl<'a> Cx<'a> {
                                 _ => None,
                             };
                             if let Some(srow) = from_row {
-                                let s_ = self.dyn_code(srow, sc);
+                                let s_ = self.pk_key(srow, sc);
                                 let na = self.num_code(&a[3], sc);
                                 let ns = self.num_code(&a[5], sc);
-                                let d_ = self.dyn_code(ie, sc);
+                                let d_ = self.pk_key(ie, sc);
                                 return format!(
                                     "{{ let s_ = {}; let na_ = {}; let ns_ = {}; let d_ = {}; pk_update_from(&mut {}, d_, s_, &{}, &{}, na_, &{}, ns_, {})?; }}\n",
                                     s_, na, ns, d_, place, w, adds, subs, line
                                 );
                             }
                             if self.ty(&a[0], sc) == Ty::PkR {
-                                let (bc, _) = self.expr(&a[0], sc);
+                                // a compact-row variable other than the target is
+                                // read in place; anything else is worked out first
+                                let (bc, bref) = match self.plain_place(&a[0], sc).filter(|_| !same(&a[0], self)) {
+                                    Some(p) => (String::from("()"), format!("&{}", p)),
+                                    None => (self.expr(&a[0], sc).0, String::from("&b_")),
+                                };
                                 let na = self.num_code(&a[3], sc);
                                 let ns = self.num_code(&a[5], sc);
-                                let d_ = self.dyn_code(ie, sc);
+                                let d_ = self.pk_key(ie, sc);
                                 return format!(
-                                    "{{ let b_ = {}; let na_ = {}; let ns_ = {}; let d_ = {}; pk_update_with(&mut {}, d_, &b_, &{}, &{}, na_, &{}, ns_, {})?; }}\n",
-                                    bc, na, ns, d_, place, w, adds, subs, line
+                                    "{{ let b_ = {}; let na_ = {}; let ns_ = {}; let d_ = {}; pk_update_with(&mut {}, d_, {}, &{}, &{}, na_, &{}, ns_, {})?; }}\n",
+                                    bc, na, ns, d_, place, bref, w, adds, subs, line
                                 );
                             }
                         }
