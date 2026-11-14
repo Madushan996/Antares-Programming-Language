@@ -112,6 +112,26 @@ to forever(n) = forever(n + 1)
 try { forever(0) } else e { caught = e }
 check(has(caught, "without ending"), "endless recursion is a catchable problem")
 check(depth(100) == 100, "engine recovers after endless recursion")
+check(is_even(5000) and is_odd(777), "deep mutual recursion")
+to no_base(n) = no_base(n - 1) + no_base(n - 2)
+try { no_base(30) } else e { caught = e }
+check(has(caught, "'no_base' keeps calling itself"), "endless recursion that branches: {caught}")
+to sum_to(n) { when n == 0 { 0 } else { n + sum_to(n - 1) } }
+to sum_sums(k) {
+    total = 0
+    repeat k as i { total = total + sum_to(i) }
+    total
+}
+check(sum_sums(50) == 22100, "recursion called from a loop")
+try { sum_sums(20000) } else e { caught = e }
+check(has(caught, "'sum_to' keeps calling itself"), "endless recursion inside a loop: {caught}")
+to via_map(n) = map([1], x => via_map(n + 1))
+try { via_map(0) } else e { caught = e }
+check(has(caught, "'via_map' keeps calling itself"), "endless recursion through a built-in: {caught}")
+check(depth(9999) == 9999, "recursion up to the limit")
+caught = "none"
+try { depth(10000) } else e { caught = e }
+check(has(caught, "10000 levels"), "one level past the limit: {caught}")
 
 # wrong number of inputs, calling a non-function, unset values
 try { fact(1, 2) } else e { caught = e }

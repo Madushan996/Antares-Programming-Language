@@ -123,6 +123,11 @@ fn binop_name(op: BinOp) -> &'static str {
     }
 }
 
+/// Built-ins that call functions given to them.
+fn calls_back(name: &str) -> bool {
+    matches!(name, "map" | "filter" | "reduce")
+}
+
 fn is_bit_op(op: BinOp) -> bool {
     matches!(op, BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr)
 }
@@ -278,6 +283,30 @@ struct Cx<'a> {
     loops: Vec<(usize, usize)>,
     try_depth: usize,
     ret: Option<Ty>,
+    /// Functions called by name that can call themselves again (directly, through
+    /// other functions, or through functions passed around as values): only
+    /// these check for endless recursion.
+    rec: Vec<bool>,
+    /// Functions called by name that can't fail: they return a plain value.
+    inf: Vec<bool>,
+    /// Plain-value functions that may return with endless recursion recorded
+    /// (see `rt::fault`); callers that can report problems check for it.
+    prop: Vec<bool>,
+    /// The function called by name whose body is being generated, if any.
+    cur: Option<usize>,
+    /// Whether the body being generated returns a plain value.
+    plain: bool,
+}
+
+/// What a function body does, for deciding how to call it.
+#[derive(Default)]
+struct Scan {
+    /// Functions called by name.
+    calls: Vec<usize>,
+    /// Calls something that may call functions passed around as values.
+    unknown: bool,
+    /// Has a loop, shows something or changes a variable outside itself.
+    effects: bool,
 }
 
 impl<'a> Cx<'a> {
@@ -1139,7 +1168,10 @@ impl<'a> Cx<'a> {
                         let code = format!("scall({}_slice, &[{}], {})?", name, parts.join(", "), line);
                         return (conv(code, Ty::Dyn, want), want);
                     }
-                    let code = format!("bcall({}, vec![{}], {})?", i, parts.join(", "), line);
+                    let mut code = format!("bcall({}, vec![{}], {})?", i, parts.join(", "), line);
+                    if calls_back(name) {
+                        code = self.callback(code);
+                    }
                     (conv(code, Ty::Dyn, want), want)
                 }
                 Callee::Static(s) => {
@@ -1159,16 +1191,18 @@ impl<'a> Cx<'a> {
                         let (c, t) = self.expr(a, sc);
                         parts.push(conv(c, t, self.var_ty_param(s, i)));
                     }
+                    parts.push(self.depth_arg().to_string());
+                    let call = self.static_call(s, format!("f{}({})", s, parts.join(", ")));
                     if self.scopes[s].ret == Ty::Unit {
-                        (format!("{{ f{}({})?; Value::Nothing }}", s, parts.join(", ")), Ty::Dyn)
+                        (format!("{{ {}; Value::Nothing }}", call), Ty::Dyn)
                     } else {
-                        (format!("f{}({})?", s, parts.join(", ")), self.scopes[s].ret)
+                        (call, self.scopes[s].ret)
                     }
                 }
                 Callee::Dynamic => {
                     let fc = self.dyn_code(f, sc);
                     let code = format!("{{ let f_ = {}; call(&f_, vec![{}], {})? }}", fc, self.dyn_list(args, sc), line);
-                    (code, Ty::Dyn)
+                    (self.callback(code), Ty::Dyn)
                 }
             },
             Expr::Index(base, idx, line) => {
@@ -1258,6 +1292,270 @@ impl<'a> Cx<'a> {
         self.var_ty(s, i)
     }
 
+    /// The depth to give a function called by name.
+    fn depth_arg(&self) -> &'static str {
+        if self.cur.is_some() {
+            "d_ + 1"
+        } else {
+            "depth() + 1"
+        }
+    }
+
+    /// A call of function `s` (already written as `call`), handling its problems.
+    fn static_call(&self, s: usize, call: String) -> String {
+        if !self.inf.get(s).copied().unwrap_or(false) {
+            return format!("{}?", call);
+        }
+        let caller_prop = self.cur.is_some_and(|c| self.prop.get(c).copied().unwrap_or(false));
+        if self.prop[s] && !caller_prop {
+            format!("checked({})?", call)
+        } else {
+            call
+        }
+    }
+
+    /// Code that may call back into closures: inside a function called by
+    /// name, the shared depth counter is set to that function's depth first.
+    fn callback(&self, code: String) -> String {
+        if self.cur.is_some() {
+            format!("{{ let _g = at_depth(d_); {} }}", code)
+        } else {
+            code
+        }
+    }
+
+    // ---------- what functions do ----------
+
+    fn scan_block(&self, stmts: &[Stmt], sc: usize, out: &mut Scan) {
+        for st in stmts {
+            match st {
+                Stmt::Expr(e) | Stmt::Assign { value: e, .. } => self.scan_expr(e, sc, out),
+                Stmt::AssignOuter { value, .. } | Stmt::Learn { value, .. } => {
+                    out.effects = true;
+                    self.scan_expr(value, sc, out);
+                }
+                Stmt::SetPath { path, value, .. } => {
+                    out.effects = true;
+                    self.scan_expr(value, sc, out);
+                    for a in path {
+                        if let Access::Index(es) = a {
+                            for e in es {
+                                self.scan_expr(e, sc, out);
+                            }
+                        }
+                    }
+                }
+                Stmt::Show(es) => {
+                    out.effects = true;
+                    for e in es {
+                        self.scan_expr(e, sc, out);
+                    }
+                }
+                Stmt::Give(e) => {
+                    if let Some(e) = e {
+                        self.scan_expr(e, sc, out);
+                    }
+                }
+                Stmt::Repeat { count, body, .. } => {
+                    out.effects = true;
+                    self.scan_expr(count, sc, out);
+                    self.scan_block(body, sc, out);
+                }
+                Stmt::Each { iter, body, .. } => {
+                    out.effects = true;
+                    self.scan_expr(iter, sc, out);
+                    self.scan_block(body, sc, out);
+                }
+                Stmt::While { cond, body, .. } => {
+                    out.effects = true;
+                    self.scan_expr(cond, sc, out);
+                    self.scan_block(body, sc, out);
+                }
+                Stmt::When { arms, otherwise } => {
+                    for (c, b, _) in arms {
+                        self.scan_expr(c, sc, out);
+                        self.scan_block(b, sc, out);
+                    }
+                    if let Some(b) = otherwise {
+                        self.scan_block(b, sc, out);
+                    }
+                }
+                Stmt::Descend { loss, rate, .. } => {
+                    out.effects = true;
+                    self.scan_expr(loss, sc, out);
+                    self.scan_expr(rate, sc, out);
+                }
+                Stmt::Try { body, handler, .. } => {
+                    out.effects = true;
+                    self.scan_block(body, sc, out);
+                    self.scan_block(handler, sc, out);
+                }
+                Stmt::Stop(_) | Stmt::Skip(_) => {}
+            }
+        }
+    }
+
+    fn scan_expr(&self, e: &Expr, sc: usize, out: &mut Scan) {
+        match e {
+            Expr::Interp(p) | Expr::List(p) => {
+                for x in p {
+                    self.scan_expr(x, sc, out);
+                }
+            }
+            Expr::Map(m) => {
+                for (_, x) in m {
+                    self.scan_expr(x, sc, out);
+                }
+            }
+            Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => self.scan_expr(a, sc, out),
+            Expr::Binary(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+                self.scan_expr(a, sc, out);
+                self.scan_expr(b, sc, out);
+            }
+            Expr::Call(f, args, _) => {
+                for a in args {
+                    self.scan_expr(a, sc, out);
+                }
+                match self.callee(f, sc) {
+                    Callee::Static(s) => out.calls.push(s),
+                    Callee::Builtin(i) => {
+                        if calls_back(self.bnames[i]) {
+                            out.unknown = true;
+                        }
+                    }
+                    Callee::Dynamic => {
+                        out.unknown = true;
+                        self.scan_expr(f, sc, out);
+                    }
+                }
+            }
+            Expr::Index(b, idx, _) => {
+                self.scan_expr(b, sc, out);
+                for x in idx {
+                    self.scan_expr(x, sc, out);
+                }
+            }
+            Expr::Range(a, z, _) => {
+                for x in [a, z].into_iter().flatten() {
+                    self.scan_expr(x, sc, out);
+                }
+            }
+            Expr::Ask { model, prompt, .. } => {
+                self.scan_expr(model, sc, out);
+                self.scan_expr(prompt, sc, out);
+            }
+            Expr::ModelNew { spec, opts, .. } => {
+                self.scan_expr(spec, sc, out);
+                if let Some(o) = opts {
+                    self.scan_expr(o, sc, out);
+                }
+            }
+            // a function made here runs when called, as a closure of its own
+            _ => {}
+        }
+    }
+
+    /// Decides which functions called by name need the recursion check and
+    /// which can return plain values.
+    fn plan_calls(&mut self, statics: &[usize]) {
+        let n = self.scopes.len();
+        let mut scans: Vec<Scan> = (0..n).map(|_| Scan::default()).collect();
+        for &s in statics {
+            let def: &FnDef = unsafe { &*self.scopes[s].def };
+            let mut out = Scan::default();
+            self.scan_block(&def.body, s, &mut out);
+            scans[s] = out;
+        }
+        // Calls through values can reach any function that is passed around,
+        // and any function called by name from inside a closure.
+        let mut escaping: Vec<usize> = statics.iter().copied().filter(|&s| self.scopes[s].escapes).collect();
+        for c in 1..n {
+            if !statics.contains(&c) {
+                let def: &FnDef = unsafe { &*self.scopes[c].def };
+                let mut out = Scan::default();
+                self.scan_block(&def.body, c, &mut out);
+                escaping.extend(out.calls);
+            }
+        }
+        let succ = |s: usize| -> Vec<usize> {
+            let mut v = scans[s].calls.clone();
+            if scans[s].unknown {
+                v.extend(escaping.iter().copied());
+            }
+            v
+        };
+        self.rec = vec![false; n];
+        for &s in statics {
+            let mut seen = vec![false; n];
+            let mut stack = succ(s);
+            while let Some(t) = stack.pop() {
+                if t == s {
+                    self.rec[s] = true;
+                    break;
+                }
+                if !seen[t] {
+                    seen[t] = true;
+                    stack.extend(succ(t));
+                }
+            }
+        }
+        // Loop-free functions without side effects that only call such functions.
+        let mut pure = vec![false; n];
+        for &s in statics {
+            pure[s] = !scans[s].effects;
+        }
+        loop {
+            let mut changed = false;
+            for &s in statics {
+                if pure[s] && scans[s].calls.iter().any(|&t| !pure[t]) {
+                    pure[s] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // Start from "no function can fail" and drop the ones whose code turns
+        // out to have a way to fail, until nothing changes.
+        self.inf = vec![false; n];
+        for &s in statics {
+            self.inf[s] = !(self.rec[s] && !pure[s]);
+        }
+        loop {
+            self.prop = vec![false; n];
+            loop {
+                let mut changed = false;
+                for &s in statics {
+                    if self.inf[s]
+                        && pure[s]
+                        && !self.prop[s]
+                        && (self.rec[s] || scans[s].calls.iter().any(|&t| self.prop[t]))
+                    {
+                        self.prop[s] = true;
+                        changed = true;
+                    }
+                }
+                if !changed {
+                    break;
+                }
+            }
+            let mut changed = false;
+            for &s in statics {
+                if self.inf[s] {
+                    let text = self.static_text(s);
+                    if text.contains('?') || text.contains("fail") || text.contains("Err") || text.contains("R<") {
+                        self.inf[s] = false;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
     fn ret_str(&self) -> &'static str {
         match self.ret {
             None => "()",
@@ -1268,6 +1566,8 @@ impl<'a> Cx<'a> {
     fn emit_return(&self, code: &str) -> String {
         if self.try_depth > 0 {
             format!("return Ok(Flow::Ret({}));\n", code)
+        } else if self.plain {
+            format!("return {};\n", code)
         } else {
             format!("return Ok({});\n", code)
         }
@@ -1617,18 +1917,40 @@ impl<'a> Cx<'a> {
     }
 
     /// The body of function `s`, with code generation state set for it.
-    fn fn_body(&mut self, s: usize, ret: Ty) -> String {
+    /// `by_name`: a function called by name, which receives its depth as `d_`.
+    fn fn_body(&mut self, s: usize, ret: Ty, by_name: bool) -> String {
         let ret = if ret == Ty::Unit { None } else { Some(ret) };
         let def: &FnDef = unsafe { &*self.scopes[s].def };
-        let saved = (std::mem::take(&mut self.loops), self.try_depth, self.ret);
+        let saved = (std::mem::take(&mut self.loops), self.try_depth, self.ret, self.cur, self.plain);
         self.try_depth = 0;
         self.ret = ret;
-        let mut out = format!("let _d = enter({:?})?;\n", self.scopes[s].name);
+        self.cur = if by_name { Some(s) } else { None };
+        self.plain = by_name && self.inf.get(s).copied().unwrap_or(false);
+        let mut out = String::new();
+        if !by_name {
+            out.push_str(&format!("let _d = enter({:?})?;\n", self.scopes[s].name));
+        } else if self.rec.get(s).copied().unwrap_or(true) {
+            if self.plain {
+                let placeholder = match ret {
+                    None => "()",
+                    Some(Ty::Dyn) => "Value::Nothing",
+                    Some(t) => zero_of(t),
+                };
+                out.push_str(&format!(
+                    "if d_ > limit() {{ return fault({:?}, {}); }}\n",
+                    self.scopes[s].name, placeholder
+                ));
+            } else {
+                out.push_str(&format!("if d_ > MAX_CALL_DEPTH {{ return too_deep_at({:?}); }}\n", self.scopes[s].name));
+            }
+        }
         out.push_str(&self.locals(s));
         out.push_str(&self.block(&def.body, s, true));
         self.loops = saved.0;
         self.try_depth = saved.1;
         self.ret = saved.2;
+        self.cur = saved.3;
+        self.plain = saved.4;
         out
     }
 
@@ -1643,7 +1965,7 @@ impl<'a> Cx<'a> {
                 params.push_str(&format!("let mut v{}: Value = a_.next().unwrap();\n", i));
             }
         }
-        let body = self.fn_body(s, Ty::Dyn);
+        let body = self.fn_body(s, Ty::Dyn, false);
         let mut clones = String::new();
         for (t, i) in &self.scopes[s].free {
             clones.push_str(&format!("let c{t}_{i} = c{t}_{i}.clone();\n", t = t, i = i));
@@ -1659,7 +1981,7 @@ impl<'a> Cx<'a> {
     }
 
     /// A top-level function called by name: a plain Rust function with typed inputs.
-    fn static_item(&mut self, s: usize) {
+    fn static_text(&mut self, s: usize) -> String {
         let n = self.scopes[s].nparams;
         let ret = self.scopes[s].ret;
         let mut sig = vec![];
@@ -1672,23 +1994,20 @@ impl<'a> Cx<'a> {
                 sig.push(format!("mut v{}: {}", i, rust_ty(self.scopes[s].vars[i])));
             }
         }
-        let body = self.fn_body(s, ret);
-        let item = format!(
-            "unsafe fn f{}({}) -> R<{}> {{\n{}{}}}\n\n",
-            s,
-            sig.join(", "),
-            rust_ty(ret),
-            cells,
-            body
-        );
-        self.items.push_str(&item);
+        sig.push("d_: usize".into());
+        let body = self.fn_body(s, ret, true);
+        let ret_ty = if self.inf[s] { rust_ty(ret).to_string() } else { format!("R<{}>", rust_ty(ret)) };
+        format!("unsafe fn f{}({}) -> {} {{\n{}{}}}\n\n", s, sig.join(", "), ret_ty, cells, body)
     }
 
     fn program(&mut self, top: &[Stmt], files: &[(String, String)], main_src: &str) -> String {
         let mut statics: Vec<(usize, usize)> = self.static_fn.iter().map(|(a, b)| (*a, *b)).collect();
         statics.sort();
+        let ids: Vec<usize> = statics.iter().map(|(_, s)| *s).collect();
+        self.plan_calls(&ids);
         for (_, s) in &statics {
-            self.static_item(*s);
+            let item = self.static_text(*s);
+            self.items.push_str(&item);
         }
         self.ret = None;
         let body = self.block(top, 0, false);
@@ -1698,14 +2017,15 @@ impl<'a> Cx<'a> {
         for (gi, s) in &statics {
             if self.scopes[*s].escapes {
                 let n = self.scopes[*s].nparams;
-                let args: Vec<String> = (0..n).map(|_| "a_.next().unwrap()".to_string()).collect();
+                let mut args: Vec<String> = (0..n).map(|_| "a_.next().unwrap()".to_string()).collect();
+                args.push("depth() + 1".into());
+                let call = self.static_call(*s, format!("f{}({})", s, args.join(", ")));
                 init.push_str(&format!(
-                    "(*G).v{gi} = rust_fn({name:?}, {n}, |args: Vec<Value>| -> R<Value> {{ let mut a_ = args.into_iter(); let r_ = unsafe {{ f{s}({args})? }}; Ok({conv}) }});\n",
+                    "(*G).v{gi} = rust_fn({name:?}, {n}, |args: Vec<Value>| -> R<Value> {{ let mut a_ = args.into_iter(); let r_ = unsafe {{ {call} }}; Ok({conv}) }});\n",
                     gi = gi,
                     name = self.scopes[*s].name,
                     n = n,
-                    s = s,
-                    args = args.join(", "),
+                    call = call,
                     conv = conv("r_".into(), self.scopes[*s].ret, Ty::Dyn)
                 ));
             }
@@ -1734,7 +2054,7 @@ impl<'a> Cx<'a> {
         let file_list: Vec<String> = files.iter().map(|(n, s)| format!("({:?}, {:?})", n, s)).collect();
 
         format!(
-            "// Generated by `antares build`. Do not edit.\n#![allow(warnings)]\nuse antares::rt::*;\n\nstruct Globals {{\n{fields}}}\n\nstatic mut G: *mut Globals = std::ptr::null_mut();\nstatic mut S: *const Vec<Value> = std::ptr::null();\nstatic mut A: *const Vec<T> = std::ptr::null();\n\n#[inline(always)]\nunsafe fn sc(i: usize) -> Value {{ (&*S)[i].clone() }}\n\n#[inline(always)]\nunsafe fn ac(i: usize) -> T {{ (&*A)[i].clone() }}\n\n{items}unsafe fn main_body() -> R<()> {{\nlet _d = enter(\"program\")?;\n{init}{body}Ok(())\n}}\n\nfn body() -> R<()> {{\n    let mut g = Globals {{ {inits} }};\n    let strs: Vec<Value> = vec![{strs}];\n    let arrs: Vec<T> = vec![{arrs}];\n    unsafe {{\n        G = &mut g;\n        S = &strs;\n        A = &arrs;\n        main_body()\n    }}\n}}\n\nstatic FILES: &[(&str, &str)] = &[{files}];\nstatic MAIN_SRC: &str = {main:?};\n\nfn main() {{\n    start(FILES, MAIN_SRC, body)\n}}\n",
+            "// Generated by `antares build`. Do not edit.\n#![allow(warnings)]\nuse antares::rt::*;\n\nstruct Globals {{\n{fields}}}\n\nstatic mut G: *mut Globals = std::ptr::null_mut();\nstatic mut S: *const Vec<Value> = std::ptr::null();\nstatic mut A: *const Vec<T> = std::ptr::null();\n\n#[inline(always)]\nunsafe fn sc(i: usize) -> Value {{ (&*S)[i].clone() }}\n\n#[inline(always)]\nunsafe fn ac(i: usize) -> T {{ (&*A)[i].clone() }}\n\n{items}unsafe fn main_body() -> R<()> {{\n{init}{body}Ok(())\n}}\n\nfn body() -> R<()> {{\n    let mut g = Globals {{ {inits} }};\n    let strs: Vec<Value> = vec![{strs}];\n    let arrs: Vec<T> = vec![{arrs}];\n    unsafe {{\n        G = &mut g;\n        S = &strs;\n        A = &arrs;\n        main_body()\n    }}\n}}\n\nstatic FILES: &[(&str, &str)] = &[{files}];\nstatic MAIN_SRC: &str = {main:?};\n\nfn main() {{\n    start(FILES, MAIN_SRC, body)\n}}\n",
             fields = fields,
             items = self.items,
             init = init,
@@ -1845,6 +2165,11 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         loops: vec![],
         try_depth: 0,
         ret: None,
+        rec: vec![],
+        inf: vec![],
+        prop: vec![],
+        cur: None,
+        plain: false,
     };
     cx.infer(&stmts);
     let mut code = cx.program(&stmts, parser.files(), &src);

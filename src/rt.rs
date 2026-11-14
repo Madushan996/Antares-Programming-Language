@@ -106,6 +106,86 @@ pub fn embed(files: &[(&'static str, &'static [u8])]) {
     crate::builtins::set_embedded(files);
 }
 
+/// The current call depth (compiled functions called by name receive their
+/// depth as an input instead; this is for closures and the program body).
+#[inline(always)]
+pub fn depth() -> usize {
+    unsafe { DEPTH }
+}
+
+/// Puts a function's depth into the shared counter while it calls something
+/// that may call back into closures (and restores it afterwards).
+pub struct AtDepth(usize);
+
+impl Drop for AtDepth {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe { DEPTH = self.0 }
+    }
+}
+
+#[inline(always)]
+pub fn at_depth(d: usize) -> AtDepth {
+    unsafe {
+        let saved = DEPTH;
+        DEPTH = d;
+        AtDepth(saved)
+    }
+}
+
+/// The deepest a function called by name may be (see `too_deep_at`).
+pub const MAX_CALL_DEPTH: usize = MAX_DEPTH;
+
+/// Endless recursion in a function that otherwise returns a `Result`.
+#[cold]
+pub fn too_deep_at<X>(name: &str) -> R<X> {
+    fail(format!("'{}' keeps calling itself without ending ({} levels deep)", name, MAX_DEPTH), 0)
+}
+
+// Functions that can't fail apart from endless recursion return plain values.
+// When one of them goes too deep it records the problem here and returns a
+// placeholder; while a problem is recorded every such function returns at
+// once, and the first caller that can report problems (`checked`) does so.
+// Only loop-free functions without side effects work this way, so the
+// placeholders are never seen.
+static mut LIMIT: usize = MAX_DEPTH;
+static mut FAULT_NAME: &str = "";
+
+#[inline(always)]
+pub fn limit() -> usize {
+    unsafe { LIMIT }
+}
+
+#[cold]
+#[inline(never)]
+pub fn fault<X>(name: &'static str, placeholder: X) -> X {
+    unsafe {
+        if LIMIT != 0 {
+            LIMIT = 0;
+            FAULT_NAME = name;
+        }
+    }
+    placeholder
+}
+
+#[cold]
+#[inline(never)]
+fn faulted<X>() -> R<X> {
+    unsafe {
+        LIMIT = MAX_DEPTH;
+        too_deep_at(FAULT_NAME)
+    }
+}
+
+/// The result of a function that may have gone too deep (see `fault`).
+#[inline(always)]
+pub fn checked<X>(x: X) -> R<X> {
+    if unsafe { LIMIT } == 0 {
+        return faulted();
+    }
+    Ok(x)
+}
+
 pub struct Depth;
 
 impl Drop for Depth {
