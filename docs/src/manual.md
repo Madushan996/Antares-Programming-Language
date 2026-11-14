@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.2.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.3.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.2.0 — type a line and press Enter. `exit` to leave.
+Antares 0.3.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -795,7 +795,7 @@ show sum(m, 0), sum(m, 1), mean(m, -1)
 [12, 15, 18] [6, 15, 24] [2, 5, 8]
 ```
 
-`max` and `min` give the largest or smallest number among all their inputs. `argmax(x)` gives the position of the largest value along the last dimension, one result per row.
+`max` and `min` give the largest or smallest number among all their inputs. `argmax(x)` gives the position of the largest value along the last dimension, one result per row. `argmax(row, first, last)` gives the position of the first largest number of a row from `first` up to (not including) `last`, or -1 if the range is empty; on a fixed table in a compiled program it reads the table directly.
 
 ## Element-by-element maths
 
@@ -1231,7 +1231,9 @@ antares build program.ant out.exe --cpu x86-64
 - **Constants.** A global given one literal number at the top level and never changed (`SIZE = 64`) is treated as a constant, and a list made only of such numbers is built once. Both make arithmetic like `x % SIZE` much cheaper.
 - **Counters are integers.** Whole-number counters (`repeat ... as i`, `each i in range(...)`, and variables only ever changed by `i = i + 1` and the like) are machine integers, so positions like `row[i + 1]` cost only a range check. They still behave and print exactly like ordinary numbers.
 - **Fixed tables.** A top-level row made once with `ints(n)` or `zeros(n)`, with a size known when compiling (a number, or arithmetic on such constants), and afterwards only used as `t[i]` and `t[i] = v`, becomes a fixed table: the fastest kind of row. Using the row as a whole anywhere (`len(t)`, passing `t` to a function, `each x in t`) turns this off.
-- **Simple loops.** The innermost `each i in range(...)` or `repeat ... as i` loop that uses rows only as `row[i + c]` checks positions once, before it starts, and then reads and writes the rows directly.
+- **Simple loops.** The innermost `each i in range(...)`, `repeat ... as i` or counting `while` loop (`while i < n { ...; i = i + 1 }`, where `n` doesn't change in the loop) that uses rows and fixed tables only as `row[i + c]` checks positions once, before it starts, and then reads and writes them directly.
+- **Clearing and filling tables.** Giving a fixed table `ints(n)` or `zeros(n)` of the same size again (as a program does to clear its tables) keeps it a fixed table: the new assignment just fills it with zeros. `ints([...])` of constant numbers makes a fixed table that starts with them.
+- **Constants from constants.** A top-level variable given, once, arithmetic on constants given before it (`AH = HIST + 1`, `SIZE = ROWS * 8`) is a constant as well.
 - **Say what is a number.** One value of unknown kind can slow down everything it touches. If a number comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler knows it is a number. In the chess engine, one such lookup made the whole board slow until it was wrapped.
 - **Set before reading.** A number variable that is read before it is given a value reads as 0 in a compiled program, where the interpreter reports a problem.
 - **Find the slow spots.** Build with the environment variable `ANTARES_EXPLAIN=1`. The compiler then names every variable that ended up as a general value and what it was given. A common cause is two files using the same global name for different things.
@@ -1250,6 +1252,17 @@ A group of built-ins does common neural-network inner loops in a single call, wi
 | `screlu_dot(x, weights, cap)` | The same as `sum_product(screlu(x, cap), weights)`, without building the row in between |
 | `compact(x)` / `compact(x, rows, cols)` | Whole numbers from -32768 to 32767 stored in 2 bytes instead of 8. Much faster for the row built-ins on large tables |
 | `expand(c)` | Compact numbers back as an ordinary row or matrix |
+
+Compact numbers are read and changed by position like other rows. `m[r]` is row `r` of a compact matrix (a compact row) and `c[i]` a number of a compact row; `m[r] = row` and `c[i] = x` change them, with the usual copy-on-write, and `len` gives the number of rows (of a matrix) or numbers (of a row). Keeping many accumulators as the rows of one compact matrix and changing them by row is what makes network evaluation fast in a compiled program:
+
+```antares
+accs = compact(zeros(rows * width), rows, width)
+accs[d] = update_rows(accs[s], weights, add, n_add, remove, n_remove)
+accs[d] = accs[s]
+total = screlu_dot(accs[r], out[k], 255)
+```
+
+The compiler does these three forms in place on the matrix's memory, with no row built in between; the results and problems are the same as doing them step by step.
 
 ## A real program: a chess engine
 
@@ -1289,6 +1302,7 @@ Inputs in brackets `[ ]` are optional. "Tensor" means a number or any list of nu
 | `max(a, ...)` | Largest number among all inputs |
 | `min(a, ...)` | Smallest number among all inputs |
 | `argmax(x)` | Position of the largest value along the last dimension |
+| `argmax(row, first, last)` | Position of the first largest number from `first` up to (not including) `last`; -1 for an empty range |
 
 ## Maths (element by element)
 
@@ -1312,7 +1326,7 @@ Inputs in brackets `[ ]` are optional. "Tensor" means a number or any list of nu
 | `sum_product(a, b, ...)` | Position-by-position product, all added up |
 | `screlu(x, cap)` | Clamp to 0..cap, then square |
 | `screlu_dot(x, w, cap)` | `sum_product(screlu(x, cap), w)` in one step |
-| `compact(x [, rows, cols])` | 16-bit storage of whole numbers |
+| `compact(x [, rows, cols])` | 16-bit storage of whole numbers; `m[r]` is a row of a compact matrix |
 | `expand(c)` | Compact numbers back to an ordinary tensor |
 
 ## Integers
@@ -1431,7 +1445,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.1. Not there yet:
+This is version 0.3. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
 - Tools and multi-turn chat for language models.

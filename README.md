@@ -75,7 +75,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.2.0`.
+You should see `Antares 0.3.0`.
 
 ### Option 2: download it yourself
 
@@ -571,8 +571,17 @@ Things to know:
   when compiling, and afterwards only used as `t[i]` and `t[i] = v`, becomes a
   fixed table, the fastest kind of row. Using the row as a whole anywhere
   (`len(t)`, passing `t` to a function, `each x in t`) turns this off.
-- The innermost `each i in range(...)` or `repeat ... as i` loop that uses
-  rows only as `row[i + c]` checks positions once, before it starts.
+- The innermost `each i in range(...)`, `repeat ... as i` or counting `while`
+  loop (`while i < n { ...; i = i + 1 }`) that uses rows and fixed tables only
+  as `row[i + c]` checks positions once, before it starts.
+- A fixed table can be cleared by giving it `ints(n)` / `zeros(n)` of the same
+  size again, and `ints([...])` of constant numbers makes one that starts with
+  them. A top-level variable given, once, arithmetic on constants given before
+  it (`AH = HIST + 1`) is a constant too.
+- Rows of a compact matrix are read and changed by position:
+  `m[d] = update_rows(m[s], w, ...)`, `m[d] = m[s]` and
+  `screlu_dot(m[r], w[k], cap)` run in place on the matrix in a compiled
+  program, with no row built in between.
 - One value of unknown kind can slow down everything it touches. If a number
   comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler
   knows it is a number. In the chess engine, one such lookup made the whole
@@ -615,7 +624,7 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.1. Not there yet: giving a value to a slice
+This is version 0.3. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
 than Anthropic, and GPU support.
 
