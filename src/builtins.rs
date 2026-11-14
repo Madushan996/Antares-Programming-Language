@@ -244,7 +244,95 @@ fn b_min(_: &mut Interp, a: Vec<Value>) -> Res {
     extreme(a, "min", |x, b| x < b)
 }
 
+/// The position of the first largest number of `s` (as from a plain scan that
+/// keeps the first value unless a later one is larger), plus `base`; -1 if
+/// `s` is empty. Four running lanes, so the processor can compare several
+/// numbers at once.
+pub fn argmax_slice(s: &[f64], base: usize) -> f64 {
+    if s.is_empty() {
+        return -1.0;
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        if s.len() >= 8 && !s[0].is_nan() && std::arch::is_x86_feature_detected!("avx2") {
+            return (base + unsafe { argmax_avx2(s) }) as f64;
+        }
+    }
+    let mut bi = 0;
+    for i in 1..s.len() {
+        if s[i] > s[bi] {
+            bi = i;
+        }
+    }
+    (base + bi) as f64
+}
+
+/// The same for at least 8 numbers, the first not NaN: four numbers per step,
+/// each lane keeping its largest value and where it was first seen.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn argmax_avx2(s: &[f64]) -> usize {
+    unsafe {
+        use std::arch::x86_64::*;
+        let n = s.len() / 4 * 4;
+        let mut vmax = _mm256_set1_pd(f64::NEG_INFINITY);
+        let mut vat = _mm256_set1_pd(-1.0);
+        let mut cur = _mm256_set_pd(3.0, 2.0, 1.0, 0.0);
+        let four = _mm256_set1_pd(4.0);
+        let mut i = 0;
+        while i < n {
+            let x = _mm256_loadu_pd(s.as_ptr().add(i));
+            let gt = _mm256_cmp_pd::<_CMP_GT_OQ>(x, vmax);
+            vmax = _mm256_blendv_pd(vmax, x, gt);
+            vat = _mm256_blendv_pd(vat, cur, gt);
+            cur = _mm256_add_pd(cur, four);
+            i += 4;
+        }
+        let mut maxes = [0.0f64; 4];
+        let mut ats = [0.0f64; 4];
+        _mm256_storeu_pd(maxes.as_mut_ptr(), vmax);
+        _mm256_storeu_pd(ats.as_mut_ptr(), vat);
+        let (mut best, mut at) = (f64::NEG_INFINITY, usize::MAX);
+        for l in 0..4 {
+            if ats[l] >= 0.0 && (maxes[l] > best || (maxes[l] == best && (ats[l] as usize) < at)) {
+                best = maxes[l];
+                at = ats[l] as usize;
+            }
+        }
+        for k in n..s.len() {
+            if s[k] > best {
+                best = s[k];
+                at = k;
+            }
+        }
+        // nothing above minus infinity: the scan keeps the first number
+        if at == usize::MAX { 0 } else { at }
+    }
+}
+
+/// argmax(row, first, last) for a row of numbers `d`.
+pub fn argmax_range(d: &[f64], first: f64, last: f64) -> Result<f64, String> {
+    if first != first.trunc() || last != last.trunc() || first < 0.0 || last < first || last > d.len() as f64 {
+        return Err(format!(
+            "argmax: positions {} to {} aren't a range inside this row (0 to {})",
+            fmt_num(first),
+            fmt_num(last),
+            d.len()
+        ));
+    }
+    Ok(argmax_slice(&d[first as usize..last as usize], first as usize))
+}
+
 fn b_argmax(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() == 3 {
+        // argmax(row, first, last): the first largest number from first up to (not including) last
+        let t = ten(&a[0], "argmax")?;
+        if t.shape.len() != 1 {
+            return Err("argmax with a range needs a row of numbers".into());
+        }
+        let (first, last) = (num(&a[1], "argmax")?, num(&a[2], "argmax")?);
+        return Ok(Value::Num(argmax_range(&t.data.borrow(), first, last)?));
+    }
     want(&a, 1, "argmax")?;
     let t = ten(&a[0], "argmax")?;
     let d = t.shape.last().copied().unwrap_or(1).max(1);
@@ -404,39 +492,8 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
         }
         _ => None,
     };
-    // Collect the rows to add and to remove, then do everything in one pass.
-    // (kept on the stack: allocating even a small list here costs more than the arithmetic)
-    let empty: &[i16] = &[];
-    let mut add_rows: [&[i16]; 32] = [empty; 32];
-    let mut sub_rows: [&[i16]; 32] = [empty; 32];
-    let (mut n_add, mut n_sub) = (0usize, 0usize);
-    for (rows_arg, count_arg, add) in [(&a[2], &a[3], true), (&a[4], &a[5], false)] {
-        let rows = ten(rows_arg, "update_rows")?;
-        let rd = rows.data.borrow();
-        let count = num(count_arg, "update_rows")? as usize;
-        if count > rd.len() {
-            return Err("update_rows was asked for more rows than row numbers were given".into());
-        }
-        for &r in &rd[..count] {
-            if r < 0.0 || r as usize >= m.rows {
-                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), m.rows));
-            }
-            let row = &md[r as usize * h..(r as usize + 1) * h];
-            if add {
-                if n_add == 32 {
-                    return Err("update_rows adds at most 32 rows at a time".into());
-                }
-                add_rows[n_add] = row;
-                n_add += 1;
-            } else {
-                if n_sub == 32 {
-                    return Err("update_rows removes at most 32 rows at a time".into());
-                }
-                sub_rows[n_sub] = row;
-                n_sub += 1;
-            }
-        }
-    }
+    let (adds, subs) = (ten(&a[2], "update_rows")?, ten(&a[4], "update_rows")?);
+    let (n_add, n_sub) = (num(&a[3], "update_rows")?, num(&a[5], "update_rows")?);
     let bd = base.data.borrow();
     let mut fresh_row: Vec<i16> = Vec::new();
     let mut held;
@@ -451,12 +508,70 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
             &mut fresh_row[..]
         }
     };
-    combine_rows(out, &bd, &add_rows[..n_add], &sub_rows[..n_sub]);
+    update_rows_into(out, &bd, m.rows, &md, &adds, n_add, &subs, n_sub)?;
     drop(bd);
     match &recycled {
         Some(t) => Ok(Value::Packed(t.clone())),
         None => Ok(packed(fresh_row, 1, h, false)),
     }
+}
+
+/// update_rows on compact numbers, into `out`: base plus the rows of the
+/// matrix `md` (`rows` rows) listed in `adds` (the first `n_add` of them), minus
+/// those listed in `subs`. Checks the row lists as update_rows does.
+pub fn update_rows_into(
+    out: &mut [i16],
+    base: &[i16],
+    rows: usize,
+    md: &[i16],
+    adds: &T,
+    n_add: f64,
+    subs: &T,
+    n_sub: f64,
+) -> Result<(), String> {
+    let h = base.len();
+    // Collect the rows to add and to remove, then do everything in one pass.
+    // (kept on the stack, and not filled in advance: allocating or clearing even
+    // a small list here costs more than the arithmetic)
+    use std::mem::MaybeUninit;
+    let mut add_rows: [MaybeUninit<&[i16]>; 32] = [const { MaybeUninit::uninit() }; 32];
+    let mut sub_rows: [MaybeUninit<&[i16]>; 32] = [const { MaybeUninit::uninit() }; 32];
+    let (mut na, mut ns) = (0usize, 0usize);
+    for (list, count, add) in [(adds, n_add, true), (subs, n_sub, false)] {
+        let rd = list.data.borrow();
+        let count = count as usize;
+        if count > rd.len() {
+            return Err("update_rows was asked for more rows than row numbers were given".into());
+        }
+        for &r in &rd[..count] {
+            if r < 0.0 || r as usize >= rows {
+                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), rows));
+            }
+            let row = &md[r as usize * h..(r as usize + 1) * h];
+            if add {
+                if na == 32 {
+                    return Err("update_rows adds at most 32 rows at a time".into());
+                }
+                add_rows[na].write(row);
+                na += 1;
+            } else {
+                if ns == 32 {
+                    return Err("update_rows removes at most 32 rows at a time".into());
+                }
+                sub_rows[ns].write(row);
+                ns += 1;
+            }
+        }
+    }
+    // only the first na and ns entries were written, and only those are read
+    let (adds, subs) = unsafe {
+        (
+            std::slice::from_raw_parts(add_rows.as_ptr() as *const &[i16], na),
+            std::slice::from_raw_parts(sub_rows.as_ptr() as *const &[i16], ns),
+        )
+    };
+    combine_rows(out, base, adds, subs);
+    Ok(())
 }
 
 /// out = base + every row in `adds` - every row in `subs`, wrapping in 16 bits.
@@ -481,7 +596,7 @@ fn combine_rows(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]])
                         return;
                     }};
                 }
-                if adds.iter().chain(subs.iter()).all(|r| r.len() == out.len()) {
+                if adds.len() + subs.len() <= 4 && adds.iter().chain(subs.iter()).all(|r| r.len() == out.len()) {
                     match (adds.len(), subs.len()) {
                         (1, 1) => fixed!(1, 1),
                         (1, 2) => fixed!(1, 2),
@@ -569,7 +684,7 @@ unsafe fn combine_rows_avx2(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs
 }
 
 /// The largest size of any number in a compact row (remembered after the first time).
-fn max_abs(p: &Packed) -> i32 {
+pub fn max_abs(p: &Packed) -> i32 {
     let known = p.max_abs.get();
     if known >= 0 {
         return known;
@@ -644,6 +759,12 @@ fn screlu_dot_plain(x: &[i16], w: &[i16], cap: i32) -> i64 {
 
 fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
     let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    Ok(Value::Num(screlu_dot_rows(&xd, &wd, || max_abs(w), cap)?))
+}
+
+/// screlu_dot of two rows of compact numbers. `w_max` gives (an upper bound
+/// of) the largest size of a weight; it is only asked for when needed.
+pub fn screlu_dot_rows(xd: &[i16], wd: &[i16], w_max: impl FnOnce() -> i32, cap: f64) -> Result<f64, String> {
     if xd.len() != wd.len() {
         return Err("screlu_dot needs two rows of the same length".into());
     }
@@ -652,18 +773,22 @@ fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
         #[cfg(target_arch = "x86_64")]
         {
             // cap * weight must fit in 16 bits for the 16-bit steps to be exact
-            if std::arch::is_x86_feature_detected!("avx2") && cap * max_abs(w) <= 32767 {
-                return Ok(Value::Num(unsafe { screlu_dot_avx2_16(&xd, &wd, cap) } as f64));
+            if std::arch::is_x86_feature_detected!("avx2") && (cap * w_max() <= 32767 || cap * row_max_abs(wd) <= 32767) {
+                return Ok(unsafe { screlu_dot_avx2_16(xd, wd, cap) } as f64);
             }
         }
-        return Ok(Value::Num(screlu_dot_plain(&xd, &wd, cap) as f64));
+        return Ok(screlu_dot_plain(xd, wd, cap) as f64);
     }
     let mut total: i64 = 0;
     for (p, q) in xd.iter().zip(wd.iter()) {
         let c = (*p as i32).max(0).min(cap);
         total += (c as i64) * (c as i64) * (*q as i64);
     }
-    Ok(Value::Num(total as f64))
+    Ok(total as f64)
+}
+
+fn row_max_abs(d: &[i16]) -> i32 {
+    d.iter().map(|x| (*x as i32).abs()).max().unwrap_or(0)
 }
 
 /// rows(matrix): the rows of a matrix as a list, so one can be picked without copying.
@@ -984,6 +1109,13 @@ fn b_len(_: &mut Interp, a: Vec<Value>) -> Res {
         Value::Str(st) => st.chars().count(),
         Value::Map(m) => m.len(),
         Value::Tensor(t) if !t.shape.is_empty() => t.shape[0],
+        Value::Packed(p) => {
+            if p.matrix {
+                p.rows
+            } else {
+                p.cols
+            }
+        }
         other => return Err(format!("a {} has no length", other.kind())),
     } as f64))
 }

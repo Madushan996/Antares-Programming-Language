@@ -1,0 +1,67 @@
+# Compact matrices: reading and changing rows, update_rows into a row, and
+# screlu_dot on rows. Compiled programs do these in place; this prints enough
+# for tests/compare_compiled.py to check they behave exactly as step by step.
+# Run: antares tests/compact.ant
+
+m = compact(zeros(12), 3, 4)
+w = compact([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 3, 4)
+show len(m), len(w), len(w[1])
+r = w[1]
+show expand(r), r[2], kind(r)
+m[0] = w[2]
+m[2] = update_rows(m[0], w, [1], 1, [0], 1)
+show expand(m[0]), expand(m[2])
+copy = m
+copy[1] = w[0]
+show expand(m[1]), expand(copy[1])
+row = m[2]
+row[0] = -7
+show expand(row), expand(m[2])
+show screlu_dot(m[2], w[1], 255)
+try { m[3] = w[0] } else e { show "row", e }
+try { m[0] = compact([1, 2]) } else e { show "len", e }
+try { row[1] = 40000 } else e { show "big", e }
+try { row[1] = 2.5 } else e { show "frac", e }
+try { show w[1, 2] } else e { show "two", e }
+show expand(m[-1]), w[-1][-1]
+
+H = 16
+weights = compact(range(64 * H) - 500, 64, H)
+bias = compact(range(H) * 3)
+acc = compact(zeros(10 * H), 10, H)
+outw = compact(range(2 * H) - 10, 2, H)
+adds = zeros(4)
+subs = zeros(4)
+to step(d, s, a, r) {
+    adds[0] = a
+    subs[0] = r
+    acc[d] = update_rows(acc[s], weights, adds, 1, subs, 1)
+}
+acc[0] = update_rows(bias, weights, adds, 0, subs, 0)
+show expand(acc[0])
+step(1, 0, 5, 7)
+step(2, 1, 9, 3)
+adds[1] = 11
+subs[1] = 12
+acc[3] = update_rows(acc[2], weights, adds, 2, subs, 2)
+acc[4] = acc[3]
+acc[5] = update_rows(acc[5], weights, adds, 1, subs, 0)
+show expand(acc[1]), expand(acc[2])
+show expand(acc[3]), expand(acc[4]), expand(acc[5])
+show screlu_dot(acc[3], outw[0], 255), screlu_dot(acc[2], outw[1], 255), screlu_dot(bias, outw[1], 16)
+r = 3
+show screlu_dot(acc[r], outw[r - 3], 255)
+keep = acc
+acc[6] = update_rows(acc[1], weights, adds, 1, subs, 1)
+show expand(keep[6]), expand(acc[6])
+try { acc[11] = update_rows(acc[1], weights, adds, 1, subs, 1) } else e { show "d", e }
+try { acc[1] = update_rows(acc[12], weights, adds, 1, subs, 1) } else e { show "s", e }
+adds[0] = 99
+try { acc[7] = update_rows(acc[1], weights, adds, 1, subs, 1) } else e { show "rows", e }
+show expand(acc[7])
+try { acc[7] = update_rows(acc[1], weights, adds, 5, subs, 1) } else e { show "count", e }
+try { acc[1.5] = acc[2] } else e { show "frac", e }
+try { show screlu_dot(acc[20], outw[0], 255) } else e { show "screlu", e }
+show screlu_dot(acc[-1], outw[-1], 255)
+acc[-2] = acc[-10]
+show expand(acc[8])

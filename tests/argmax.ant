@@ -1,0 +1,47 @@
+# argmax(row, first, last): the first largest number in a range, and constants
+# worked out from other constants. Printed for tests/compare_compiled.py.
+# Run: antares tests/argmax.ant
+
+sc = zeros(40)
+k = 0
+while k < 40 {
+    sc[k] = (k * 17) % 11
+    k = k + 1
+}
+show argmax(sc, 0, 40), argmax(sc, 5, 9), argmax(sc, 3, 4), argmax(sc, 7, 7)
+sc[30] = 99
+sc[35] = 99
+show argmax(sc, 0, 40), argmax(sc, 31, 40), argmax(sc, int(31), int(36))
+neg = zeros(9) - 5
+neg[0] = 0 - 1000000000000000
+neg[6] = -2
+show argmax(neg, 0, 9), argmax(neg, 1, 6), argmax(neg, 0, 1)
+inf = zeros(5) - 1 / 0
+show argmax(inf, 0, 5), argmax(inf, 2, 5)
+nn = zeros(6)
+nn[0] = 0 / 0
+nn[3] = 4
+show argmax(nn, 0, 6), argmax(nn, 1, 6)
+nn[2] = 0 / 0
+show argmax(nn, 1, 6), argmax(nn, 2, 4)
+row = [3, 9, 9, 1]
+show argmax(row, 0, 4), argmax(row, 2, 4)
+try { show argmax(sc, 5, 41) } else e { show "high", e }
+try { show argmax(sc, -1, 3) } else e { show "low", e }
+try { show argmax(sc, 6, 5) } else e { show "order", e }
+try { show argmax(sc, 1.5, 3) } else e { show "frac", e }
+show argmax([[1, 5], [7, 2]])
+to pick(first, last) {
+    when first >= last { give int(-1) }
+    i = argmax(sc, first, last)
+    when sc[i] <= -900000000000000 { give int(-1) }
+    int(i)
+}
+show pick(0, 40), pick(int(36), int(40)), pick(4, 4)
+
+BASE = 40
+WIDE = BASE * 2 + 1
+HALF = WIDE / 2
+show WIDE, HALF, WIDE - BASE
+to uses() = WIDE * 3
+show uses()

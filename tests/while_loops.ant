@@ -1,0 +1,109 @@
+# Counting while loops over rows and fixed tables, which compiled programs
+# check once before they start. Printed for tests/compare_compiled.py.
+# Run: antares tests/while_loops.ant
+
+scores = zeros(64)
+codes = ints(64)
+k = 0
+while k < 64 {
+    scores[k] = (k * 37) % 23
+    codes[k] = int(k) * 3
+    k = k + 1
+}
+to pick(first, last) {
+    best_i = int(-1)
+    best_s = -1000
+    i = first
+    while i < last {
+        when scores[i] > best_s {
+            best_s = scores[i]
+            best_i = i
+        }
+        i = i + 1
+    }
+    best_i
+}
+show pick(0, 64), pick(int(10), int(20)), pick(5, 5)
+to sum_pairs(lo, hi) {
+    s = 0
+    i = lo
+    while i <= hi {
+        s = s + scores[i] * scores[i + 1] - codes[i - 1]
+        i = i + 1
+    }
+    s
+}
+show sum_pairs(1, 62)
+try { show sum_pairs(1, 63) } else e { show "high", e }
+try { show sum_pairs(0, 10) } else e { show "low", e }
+to with_skip(n) {
+    s = 0
+    i = 0
+    hits = 0
+    while i < n {
+        hits = hits + 1
+        when hits > 200 { stop }
+        when i == 3 and hits < 10 { skip }
+        s = s + scores[i]
+        i = i + 1
+    }
+    show s, hits
+}
+with_skip(10)
+to moving_end(n) {
+    s = 0
+    i = 0
+    e = n
+    while i < e {
+        s = s + scores[i]
+        when i == 2 { e = e + 1 }
+        i = i + 1
+    }
+    s
+}
+show moving_end(5)
+try { show moving_end(64) } else e { show "moving", e }
+to counter_changed(n) {
+    s = 0
+    i = 0
+    while i < n {
+        s = s + scores[i]
+        when i == 4 { i = i + 2 }
+        i = i + 1
+    }
+    s
+}
+show counter_changed(10)
+to writes(n) {
+    i = 0
+    while i < n {
+        scores[i] = scores[i] + 1
+        codes[i] = codes[i] + int(1)
+        i = i + 1
+    }
+}
+writes(64)
+show scores[0], scores[63], codes[63]
+try { writes(65) } else e { show "write", e }
+show scores[0], scores[63]
+to frac_end(x) {
+    s = 0
+    i = 0
+    while i < x {
+        s = s + scores[i]
+        i = i + 1
+    }
+    s
+}
+show frac_end(3.5), frac_end(0 / 0), frac_end(-2)
+local = zeros(10)
+to local_rows(n) {
+    row = zeros(n)
+    i = int(0)
+    while i < n {
+        row[i] = number(i) * 2
+        i = i + 1
+    }
+    row
+}
+show local_rows(5)
