@@ -41,6 +41,12 @@ pub struct Packed {
     pub max_abs: std::cell::Cell<i32>,
 }
 
+/// A compact row made from its numbers.
+pub fn packed_row(data: Vec<i16>) -> Value {
+    let cols = data.len();
+    Value::Packed(Rc::new(Packed { data: std::cell::RefCell::new(data), rows: 1, cols, matrix: false, max_abs: std::cell::Cell::new(-1) }))
+}
+
 /// A problem raised in a compiled program: the message and the line.
 pub type AErr = Box<(String, u32)>;
 

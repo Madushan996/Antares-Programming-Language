@@ -404,39 +404,8 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
         }
         _ => None,
     };
-    // Collect the rows to add and to remove, then do everything in one pass.
-    // (kept on the stack: allocating even a small list here costs more than the arithmetic)
-    let empty: &[i16] = &[];
-    let mut add_rows: [&[i16]; 32] = [empty; 32];
-    let mut sub_rows: [&[i16]; 32] = [empty; 32];
-    let (mut n_add, mut n_sub) = (0usize, 0usize);
-    for (rows_arg, count_arg, add) in [(&a[2], &a[3], true), (&a[4], &a[5], false)] {
-        let rows = ten(rows_arg, "update_rows")?;
-        let rd = rows.data.borrow();
-        let count = num(count_arg, "update_rows")? as usize;
-        if count > rd.len() {
-            return Err("update_rows was asked for more rows than row numbers were given".into());
-        }
-        for &r in &rd[..count] {
-            if r < 0.0 || r as usize >= m.rows {
-                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), m.rows));
-            }
-            let row = &md[r as usize * h..(r as usize + 1) * h];
-            if add {
-                if n_add == 32 {
-                    return Err("update_rows adds at most 32 rows at a time".into());
-                }
-                add_rows[n_add] = row;
-                n_add += 1;
-            } else {
-                if n_sub == 32 {
-                    return Err("update_rows removes at most 32 rows at a time".into());
-                }
-                sub_rows[n_sub] = row;
-                n_sub += 1;
-            }
-        }
-    }
+    let (adds, subs) = (ten(&a[2], "update_rows")?, ten(&a[4], "update_rows")?);
+    let (n_add, n_sub) = (num(&a[3], "update_rows")?, num(&a[5], "update_rows")?);
     let bd = base.data.borrow();
     let mut fresh_row: Vec<i16> = Vec::new();
     let mut held;
@@ -451,12 +420,62 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
             &mut fresh_row[..]
         }
     };
-    combine_rows(out, &bd, &add_rows[..n_add], &sub_rows[..n_sub]);
+    update_rows_into(out, &bd, m.rows, &md, &adds, n_add, &subs, n_sub)?;
     drop(bd);
     match &recycled {
         Some(t) => Ok(Value::Packed(t.clone())),
         None => Ok(packed(fresh_row, 1, h, false)),
     }
+}
+
+/// update_rows on compact numbers, into `out`: base plus the rows of the
+/// matrix `md` (`rows` rows) listed in `adds` (the first `n_add` of them), minus
+/// those listed in `subs`. Checks the row lists as update_rows does.
+pub fn update_rows_into(
+    out: &mut [i16],
+    base: &[i16],
+    rows: usize,
+    md: &[i16],
+    adds: &T,
+    n_add: f64,
+    subs: &T,
+    n_sub: f64,
+) -> Result<(), String> {
+    let h = base.len();
+    // Collect the rows to add and to remove, then do everything in one pass.
+    // (kept on the stack: allocating even a small list here costs more than the arithmetic)
+    let empty: &[i16] = &[];
+    let mut add_rows: [&[i16]; 32] = [empty; 32];
+    let mut sub_rows: [&[i16]; 32] = [empty; 32];
+    let (mut na, mut ns) = (0usize, 0usize);
+    for (list, count, add) in [(adds, n_add, true), (subs, n_sub, false)] {
+        let rd = list.data.borrow();
+        let count = count as usize;
+        if count > rd.len() {
+            return Err("update_rows was asked for more rows than row numbers were given".into());
+        }
+        for &r in &rd[..count] {
+            if r < 0.0 || r as usize >= rows {
+                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), rows));
+            }
+            let row = &md[r as usize * h..(r as usize + 1) * h];
+            if add {
+                if na == 32 {
+                    return Err("update_rows adds at most 32 rows at a time".into());
+                }
+                add_rows[na] = row;
+                na += 1;
+            } else {
+                if ns == 32 {
+                    return Err("update_rows removes at most 32 rows at a time".into());
+                }
+                sub_rows[ns] = row;
+                ns += 1;
+            }
+        }
+    }
+    combine_rows(out, base, &add_rows[..na], &sub_rows[..ns]);
+    Ok(())
 }
 
 /// out = base + every row in `adds` - every row in `subs`, wrapping in 16 bits.
@@ -569,7 +588,7 @@ unsafe fn combine_rows_avx2(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs
 }
 
 /// The largest size of any number in a compact row (remembered after the first time).
-fn max_abs(p: &Packed) -> i32 {
+pub fn max_abs(p: &Packed) -> i32 {
     let known = p.max_abs.get();
     if known >= 0 {
         return known;
@@ -644,6 +663,12 @@ fn screlu_dot_plain(x: &[i16], w: &[i16], cap: i32) -> i64 {
 
 fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
     let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    Ok(Value::Num(screlu_dot_rows(&xd, &wd, || max_abs(w), cap)?))
+}
+
+/// screlu_dot of two rows of compact numbers. `w_max` gives (an upper bound
+/// of) the largest size of a weight; it is only asked for when needed.
+pub fn screlu_dot_rows(xd: &[i16], wd: &[i16], w_max: impl FnOnce() -> i32, cap: f64) -> Result<f64, String> {
     if xd.len() != wd.len() {
         return Err("screlu_dot needs two rows of the same length".into());
     }
@@ -652,18 +677,22 @@ fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
         #[cfg(target_arch = "x86_64")]
         {
             // cap * weight must fit in 16 bits for the 16-bit steps to be exact
-            if std::arch::is_x86_feature_detected!("avx2") && cap * max_abs(w) <= 32767 {
-                return Ok(Value::Num(unsafe { screlu_dot_avx2_16(&xd, &wd, cap) } as f64));
+            if std::arch::is_x86_feature_detected!("avx2") && (cap * w_max() <= 32767 || cap * row_max_abs(wd) <= 32767) {
+                return Ok(unsafe { screlu_dot_avx2_16(xd, wd, cap) } as f64);
             }
         }
-        return Ok(Value::Num(screlu_dot_plain(&xd, &wd, cap) as f64));
+        return Ok(screlu_dot_plain(xd, wd, cap) as f64);
     }
     let mut total: i64 = 0;
     for (p, q) in xd.iter().zip(wd.iter()) {
         let c = (*p as i32).max(0).min(cap);
         total += (c as i64) * (c as i64) * (*q as i64);
     }
-    Ok(Value::Num(total as f64))
+    Ok(total as f64)
+}
+
+fn row_max_abs(d: &[i16]) -> i32 {
+    d.iter().map(|x| (*x as i32).abs()).max().unwrap_or(0)
 }
 
 /// rows(matrix): the rows of a matrix as a list, so one can be picked without copying.
@@ -984,6 +1013,13 @@ fn b_len(_: &mut Interp, a: Vec<Value>) -> Res {
         Value::Str(st) => st.chars().count(),
         Value::Map(m) => m.len(),
         Value::Tensor(t) if !t.shape.is_empty() => t.shape[0],
+        Value::Packed(p) => {
+            if p.matrix {
+                p.rows
+            } else {
+                p.cols
+            }
+        }
         other => return Err(format!("a {} has no length", other.kind())),
     } as f64))
 }

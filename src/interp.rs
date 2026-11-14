@@ -293,6 +293,19 @@ pub fn index_value(base: &Value, idx: &[Value]) -> Result<Value, String> {
             }
             Ok(Value::Int(l[to_index(&idx[0], l.len())?]))
         }
+        Value::Packed(p) => {
+            if idx.len() != 1 {
+                return Err("compact numbers take one index: a row of a compact matrix, or a number of a compact row".into());
+            }
+            let d = p.data.borrow();
+            if p.matrix {
+                // a row of a compact matrix (a copy, like any value read out)
+                let r = to_index(&idx[0], p.rows)?;
+                Ok(crate::value::packed_row(d[r * p.cols..(r + 1) * p.cols].to_vec()))
+            } else {
+                Ok(Value::Num(d[to_index(&idx[0], d.len())?] as f64))
+            }
+        }
         Value::Map(m) => {
             let key = map_key(idx)?;
             m.iter()
@@ -399,6 +412,50 @@ pub fn set_in(target: &mut Value, path: &[Key], v: Value) -> Result<(), String> 
                 }
                 None => Err(format!("this map has no '{}'", key)),
             }
+        }
+        Value::Packed(rc) => {
+            let idx = match k {
+                Key::Idx(i) if i.len() == 1 && rest.is_empty() => &i[0],
+                _ => return Err("compact numbers are changed by position, like m[0] = row".into()),
+            };
+            // what goes in, and where
+            let (start, new): (usize, Vec<i16>) = if rc.matrix {
+                let r = to_index(idx, rc.rows)?;
+                match &v {
+                    Value::Packed(row) if !row.matrix && row.cols == rc.cols => (r * rc.cols, row.data.borrow().clone()),
+                    Value::Packed(row) if !row.matrix => {
+                        return Err(format!("a row of this compact matrix has {} numbers, not {}", rc.cols, row.cols))
+                    }
+                    other => {
+                        return Err(format!(
+                            "a row of this compact matrix must be a compact row of {} numbers, not a {}",
+                            rc.cols,
+                            other.kind()
+                        ))
+                    }
+                }
+            } else {
+                let i = to_index(idx, rc.cols)?;
+                let x = v.scalar().ok_or_else(|| format!("a compact row holds numbers, not a {}", v.kind()))?;
+                if x != x.trunc() || !(-32768.0..=32767.0).contains(&x) {
+                    return Err(format!("compact numbers are whole numbers from -32768 to 32767, not {}", crate::value::fmt_num(x)));
+                }
+                (i, vec![x as i16])
+            };
+            // changed in place unless another variable shares it
+            if Rc::strong_count(rc) != 1 {
+                let copy = crate::value::Packed {
+                    data: std::cell::RefCell::new(rc.data.borrow().clone()),
+                    rows: rc.rows,
+                    cols: rc.cols,
+                    matrix: rc.matrix,
+                    max_abs: std::cell::Cell::new(-1),
+                };
+                *rc = Rc::new(copy);
+            }
+            rc.max_abs.set(-1);
+            rc.data.borrow_mut()[start..start + new.len()].copy_from_slice(&new);
+            Ok(())
         }
         Value::Ints(rc) => {
             let idx = match k {

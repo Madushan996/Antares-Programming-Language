@@ -816,6 +816,189 @@ pub fn tget_av(t: &[f64], key: Value, line: u32) -> R<Value> {
     at(interp::index_value(&Value::Tensor(arr_of(t.to_vec())), &[key]), line)
 }
 
+// ---------- compact rows and matrices ----------
+// A compact matrix's rows are read and written with plain row assignment
+// (m[d] = update_rows(m[s], ...), m[d] = m[s], screlu_dot(m[r], w[k], cap)).
+// Compiled programs do these in place on the matrix's memory; the results
+// and problems are the same as doing them step by step.
+
+pub use crate::value::Packed;
+/// Compact numbers known to be compact numbers.
+pub type PK = Rc<Packed>;
+
+pub fn pk0() -> PK {
+    Rc::new(Packed { data: RefCell::new(vec![]), rows: 1, cols: 0, matrix: false, max_abs: std::cell::Cell::new(-1) })
+}
+
+pub fn as_pk(v: Value, line: u32) -> R<PK> {
+    match v {
+        Value::Packed(p) => Ok(p),
+        other => wrong_kind(&other, "compact numbers", line),
+    }
+}
+
+/// A position into something with `n` parts: the fast case, otherwise the
+/// general rules (negative positions count from the end) and messages.
+#[inline(always)]
+fn pos_of(k: &Value, n: usize, line: u32) -> R<usize> {
+    let i = match k {
+        Value::Int(i) => *i,
+        Value::Num(x) => {
+            let w = whole(*x);
+            if w as f64 == *x { w } else { -1 }
+        }
+        _ => -1,
+    };
+    if (i as u64) < n as u64 {
+        return Ok(i as usize);
+    }
+    at(interp::to_index(k, n), line)
+}
+
+/// Makes a compact value unshared before it is changed in place.
+#[inline]
+fn pk_unique(m: &mut PK) {
+    if Rc::strong_count(m) != 1 {
+        let copy = Packed {
+            data: RefCell::new(m.data.borrow().clone()),
+            rows: m.rows,
+            cols: m.cols,
+            matrix: m.matrix,
+            max_abs: std::cell::Cell::new(-1),
+        };
+        *m = Rc::new(copy);
+    }
+    m.max_abs.set(-1);
+}
+
+/// m[k] read the general way.
+pub fn pk_index(m: &PK, k: Value, line: u32) -> R<Value> {
+    at(interp::index_value(&Value::Packed(m.clone()), &[k]), line)
+}
+
+/// m[k] = v the general way.
+pub fn pk_set(m: &mut PK, k: Value, v: Value, line: u32) -> R<()> {
+    let mut val = Value::Packed(std::mem::replace(m, pk0()));
+    let r = interp::set_index(&mut val, k, v);
+    *m = as_pk(val, line)?;
+    at(r, line)
+}
+
+fn bcall_update_rows(base: Value, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<Value> {
+    at(
+        crate::builtins::update_rows_slice(&[
+            base,
+            Value::Packed(w.clone()),
+            Value::Tensor(adds.clone()),
+            Value::Num(n_add),
+            Value::Tensor(subs.clone()),
+            Value::Num(n_sub),
+        ]),
+        line,
+    )
+}
+
+/// m[d] = update_rows(base, w, ...) done step by step.
+fn pk_update_general(m: &mut PK, d: Value, base: Value, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
+    let row = bcall_update_rows(base, w, adds, n_add, subs, n_sub, line)?;
+    pk_set(m, d, row, line)
+}
+
+/// m[d] = update_rows(m[s], w, adds, n_add, subs, n_sub)
+pub fn pk_update_from(m: &mut PK, d: Value, s: Value, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
+    if !m.matrix || Rc::ptr_eq(m, w) || !w.matrix || w.cols != m.cols {
+        let base = pk_index(m, s, line)?;
+        return pk_update_general(m, d, base, w, adds, n_add, subs, n_sub, line);
+    }
+    let si = pos_of(&s, m.rows, line)?;
+    let h = m.cols;
+    // Usual case: a different row of the same matrix, written in one pass with
+    // no row in between. Row lists are checked before anything is written.
+    if let Ok(di) = pos_of(&d, m.rows, line) {
+        if di != si {
+            pk_unique(m);
+            let wd = w.data.borrow();
+            let mut md = m.data.borrow_mut();
+            let (base, out): (&[i16], &mut [i16]) = if si < di {
+                let (lo, hi) = md.split_at_mut(di * h);
+                (&lo[si * h..(si + 1) * h], &mut hi[..h])
+            } else {
+                let (lo, hi) = md.split_at_mut(si * h);
+                (&hi[..h], &mut lo[di * h..(di + 1) * h])
+            };
+            return at(crate::builtins::update_rows_into(out, base, w.rows, &wd, adds, n_add, subs, n_sub), line);
+        }
+    }
+    let mut out = vec![0i16; h];
+    {
+        let (md, wd) = (m.data.borrow(), w.data.borrow());
+        at(crate::builtins::update_rows_into(&mut out, &md[si * h..(si + 1) * h], w.rows, &wd, adds, n_add, subs, n_sub), line)?;
+    }
+    let di = pos_of(&d, m.rows, line)?;
+    pk_unique(m);
+    m.data.borrow_mut()[di * h..(di + 1) * h].copy_from_slice(&out);
+    Ok(())
+}
+
+/// m[d] = update_rows(base, w, ...) with `base` a compact row.
+pub fn pk_update_with(m: &mut PK, d: Value, base: &PK, w: &PK, adds: &T, n_add: f64, subs: &T, n_sub: f64, line: u32) -> R<()> {
+    if !m.matrix || base.matrix || Rc::ptr_eq(m, w) || Rc::ptr_eq(m, base) || !w.matrix || w.cols != base.cols || base.cols != m.cols {
+        return pk_update_general(m, d, Value::Packed(base.clone()), w, adds, n_add, subs, n_sub, line);
+    }
+    let h = m.cols;
+    let mut out = vec![0i16; h];
+    {
+        let (bd, wd) = (base.data.borrow(), w.data.borrow());
+        at(crate::builtins::update_rows_into(&mut out, &bd, w.rows, &wd, adds, n_add, subs, n_sub), line)?;
+    }
+    let d = pos_of(&d, m.rows, line)?;
+    pk_unique(m);
+    m.data.borrow_mut()[d * h..(d + 1) * h].copy_from_slice(&out);
+    Ok(())
+}
+
+/// m[d] = m[s]
+pub fn pk_copy_row(m: &mut PK, d: Value, s: Value, line: u32) -> R<()> {
+    if !m.matrix {
+        let v = pk_index(m, s, line)?;
+        return pk_set(m, d, v, line);
+    }
+    let s = pos_of(&s, m.rows, line)?;
+    let d = pos_of(&d, m.rows, line)?;
+    pk_unique(m);
+    let h = m.cols;
+    m.data.borrow_mut().copy_within(s * h..(s + 1) * h, d * h);
+    Ok(())
+}
+
+/// screlu_dot(x, w, cap) where x and w are compact rows, or rows `xr` / `wr`
+/// of compact matrices.
+pub fn pk_screlu(x: &PK, xr: Option<Value>, w: &PK, wr: Option<Value>, cap: f64, line: u32) -> R<f64> {
+    if xr.is_some() != x.matrix || wr.is_some() != w.matrix {
+        // not the plain case: do it step by step
+        let xv = match xr {
+            Some(k) => pk_index(x, k, line)?,
+            None => Value::Packed(x.clone()),
+        };
+        let wv = match wr {
+            Some(k) => pk_index(w, k, line)?,
+            None => Value::Packed(w.clone()),
+        };
+        return as_num(at(crate::builtins::screlu_dot_slice(&[xv, wv, Value::Num(cap)]), line)?, line);
+    }
+    let xi = match &xr {
+        Some(k) => pos_of(k, x.rows, line)?,
+        None => 0,
+    };
+    let wi = match &wr {
+        Some(k) => pos_of(k, w.rows, line)?,
+        None => 0,
+    };
+    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    let (xs, ws) = (&xd[xi * x.cols..(xi + 1) * x.cols], &wd[wi * w.cols..(wi + 1) * w.cols]);
+    at(crate::builtins::screlu_dot_rows(xs, ws, || crate::builtins::max_abs(w), cap), line)
+}
+
 /// number(x) without the cost of a general built-in call.
 #[inline]
 pub fn to_number(v: &Value, line: u32) -> R<f64> {
