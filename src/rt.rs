@@ -678,6 +678,144 @@ pub fn iarr_unique(a: &mut IA) -> *mut i64 {
     }
 }
 
+// ---------- fixed-size tables ----------
+// Top-level rows that are never shared and never change length are kept as
+// plain arrays. Positions out of range (and negative ones, which count from the
+// end) go the general way, so they behave exactly as for any row.
+
+#[inline(always)]
+fn tkey(i: i64, num: bool) -> Value {
+    if num { Value::Num(i as f64) } else { Value::Int(i) }
+}
+
+#[cold]
+#[inline(never)]
+fn tget_slow_i(t: &[i64], k: Value, line: u32) -> R<i64> {
+    let v = at(interp::index_value(&Value::Ints(Rc::new(t.to_vec())), &[k]), line)?;
+    to_int(&v, line)
+}
+
+#[cold]
+#[inline(never)]
+fn tget_slow_a(t: &[f64], k: Value, line: u32) -> R<f64> {
+    let v = at(interp::index_value(&Value::Tensor(arr_of(t.to_vec())), &[k]), line)?;
+    as_num(v, line)
+}
+
+#[cold]
+#[inline(never)]
+fn tset_slow_i(t: &mut [i64], k: Value, x: i64, line: u32) -> R<()> {
+    let mut v = Value::Ints(Rc::new(t.to_vec()));
+    at(interp::set_index(&mut v, k, Value::Int(x)), line)?;
+    if let Value::Ints(a) = v {
+        t.copy_from_slice(&a);
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn tset_slow_a(t: &mut [f64], k: Value, x: f64, line: u32) -> R<()> {
+    let mut v = Value::Tensor(arr_of(t.to_vec()));
+    at(interp::set_index(&mut v, k, Value::Num(x)), line)?;
+    if let Value::Tensor(a) = v {
+        t.copy_from_slice(&a.data.borrow());
+    }
+    Ok(())
+}
+
+/// t[i] for an integer table; `num`: the position is an ordinary number.
+#[inline(always)]
+pub fn tget_i(t: &[i64], i: i64, num: bool, line: u32) -> R<i64> {
+    if (i as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(i as usize) }) } else { tget_slow_i(t, tkey(i, num), line) }
+}
+
+#[inline(always)]
+pub fn tget_if(t: &[i64], x: f64, line: u32) -> R<i64> {
+    let k = whole(x);
+    if k as f64 == x && (k as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(k as usize) }) } else { tget_slow_i(t, Value::Num(x), line) }
+}
+
+#[inline(always)]
+pub fn tget_a(t: &[f64], i: i64, num: bool, line: u32) -> R<f64> {
+    if (i as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(i as usize) }) } else { tget_slow_a(t, tkey(i, num), line) }
+}
+
+#[inline(always)]
+pub fn tget_af(t: &[f64], x: f64, line: u32) -> R<f64> {
+    let k = whole(x);
+    if k as f64 == x && (k as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(k as usize) }) } else { tget_slow_a(t, Value::Num(x), line) }
+}
+
+#[inline(always)]
+pub fn tset_i(t: &mut [i64], i: i64, num: bool, x: i64, line: u32) -> R<()> {
+    if (i as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(i as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_i(t, tkey(i, num), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_if(t: &mut [i64], i: f64, x: i64, line: u32) -> R<()> {
+    let k = whole(i);
+    if k as f64 == i && (k as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(k as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_i(t, Value::Num(i), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_a(t: &mut [f64], i: i64, num: bool, x: f64, line: u32) -> R<()> {
+    if (i as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(i as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_a(t, tkey(i, num), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_af(t: &mut [f64], i: f64, x: f64, line: u32) -> R<()> {
+    let k = whole(i);
+    if k as f64 == i && (k as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(k as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_a(t, Value::Num(i), x, line)
+    }
+}
+
+/// t[key] for a table with a position of any kind (the result as a value).
+#[inline]
+pub fn tget_iv(t: &[i64], key: Value, line: u32) -> R<Value> {
+    let k = match key {
+        Value::Int(k) => k,
+        Value::Num(x) if whole(x) as f64 == x => whole(x),
+        _ => -1,
+    };
+    if (k as u64) < t.len() as u64 {
+        return Ok(Value::Int(t[k as usize]));
+    }
+    at(interp::index_value(&Value::Ints(Rc::new(t.to_vec())), &[key]), line)
+}
+
+#[inline]
+pub fn tget_av(t: &[f64], key: Value, line: u32) -> R<Value> {
+    let k = match key {
+        Value::Int(k) => k,
+        Value::Num(x) if whole(x) as f64 == x => whole(x),
+        _ => -1,
+    };
+    if (k as u64) < t.len() as u64 {
+        return Ok(Value::Num(t[k as usize]));
+    }
+    at(interp::index_value(&Value::Tensor(arr_of(t.to_vec())), &[key]), line)
+}
+
 /// number(x) without the cost of a general built-in call.
 #[inline]
 pub fn to_number(v: &Value, line: u32) -> R<f64> {
