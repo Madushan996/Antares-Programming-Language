@@ -1,0 +1,12 @@
+# A tiny neural-network library. Bring it into a program with:  use "nn"
+
+to layer(inputs, outputs) {
+    learn w = randn(inputs, outputs) * 0.5
+    learn b = zeros(outputs)
+    give {w: w, b: b}
+}
+
+to forward(l, x) = x @ l.w + l.b
+
+# Squared error between a guess and the right answer
+to mse(guess, target) = mean((guess - target) ^ 2)

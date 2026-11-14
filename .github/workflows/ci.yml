@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Self-check suites
+        shell: bash
+        run: |
+          for t in check features engine integers; do
+            ./target/release/antares tests/$t.ant
+          done
+
+      - name: Examples
+        shell: bash
+        run: |
+          for e in hello line xor ask train_save; do
+            echo "== $e"
+            ./target/release/antares examples/$e.ant
+          done
+
+  compiled:
+    name: Compiled programs match the interpreter
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release
+      - run: python3 tests/compare_compiled.py

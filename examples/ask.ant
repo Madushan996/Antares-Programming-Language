@@ -1,0 +1,19 @@
+# Language models are part of the language.
+# "echo" is a pretend model that repeats the prompt, so this runs offline.
+# Swap in the real one (needs ANTHROPIC_API_KEY):
+#   model claude = "anthropic:claude-opus-5-5" with {system: "Be brief."}
+
+model claude = "echo"
+
+topic = "red giant stars"
+show ask claude "Explain {topic} in one sentence."
+
+# Ask for a typed answer and get a real value back
+legs = ask claude "How many legs does a spider have? (8)" as number
+show legs + 1
+
+sure = ask claude "yes" as yes/no
+when sure { show "The model said yes" }
+
+ideas = ask claude "apple\nbanana\ncherry" as list
+each idea in ideas { show " *", idea }

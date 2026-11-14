@@ -1,0 +1,4 @@
+# Used to check that a problem inside a `use`d file names that file.
+to broken_index(xs) {
+    give xs[99]
+}

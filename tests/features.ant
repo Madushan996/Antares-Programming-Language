@@ -1,0 +1,78 @@
+# Checks for imports, slices, axis sums, try/else and save/load.
+# Run from the project folder: antares tests/features.ant
+
+use "helper"
+use "helper"                 # a second `use` of the same file does nothing
+check(helper_double(21) == 42 and helper_loads == 1, "use runs a file once")
+
+# slices
+v = [10, 20, 30, 40, 50]
+check(v[1:3] == [20, 30], "middle")
+check(v[:2] == [10, 20] and v[3:] == [40, 50], "open ends")
+check(v[-2:] == [40, 50] and v[:-1] == [10, 20, 30, 40], "negative")
+check(len(v[4:2]) == 0 and v[2:99] == [30, 40, 50], "out of range is clipped")
+m = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+check(m[:, 0] == [1, 4, 7], "column")
+check(m[1:, :2] == [[4, 5], [7, 8]], "block")
+check(m[0, 1:] == [2, 3], "row part")
+check("antares"[:3] == "ant" and ["a", "b", "c"][1:] == ["b", "c"], "text and lists")
+
+# sums along a dimension
+check(sum(m, 0) == [12, 15, 18] and sum(m, 1) == [6, 15, 24], "sum axis")
+check(mean(m, -1) == [2, 5, 8], "mean axis")
+check(shape(sum(zeros(2, 3, 4), 1)) == [2, 4], "sum axis shape")
+
+# gradients flow through slices and axis sums
+learn w = [[1, 2], [3, 4]]
+check(grad(sum(w[:, 1] * 10), w) == [[0, 10], [0, 10]], "slice gradient")
+check(grad(sum(sum(w, 0) * [1, 100]), w) == [[1, 100], [1, 100]], "sum axis gradient")
+check(grad(sum(mean(w, 1)), w) == [[0.5, 0.5], [0.5, 0.5]], "mean axis gradient")
+
+# try / else
+got = "none"
+try {
+    fail("boom")
+    got = "not reached"
+} else problem {
+    got = problem
+}
+check(got == "boom", "try catches fail")
+
+try { x = [1, 2, 3][10] } else why { got = why }
+check(has(got, "out of range"), "try catches built-in errors: {got}")
+
+to risky(n) { when n > 2 { fail("too deep") } else { risky(n + 1) } }
+try { risky(0) } else e { got = e }
+check(got == "too deep", "try catches errors from inside functions")
+
+ok = "untouched"
+try { ok = "fine" } else { ok = "failed" }
+check(ok == "fine", "else is skipped when nothing fails")
+
+to safe_div(a, b) {
+    try { when b == 0 { fail("no") } else { a / b } } else { 0 }
+}
+check(safe_div(6, 3) == 2 and safe_div(1, 0) == 0, "try gives back a value")
+
+count = 0
+each n in [1, 2, 3, 4] {
+    try { when n == 3 { stop } } else { }
+    count = count + 1
+}
+check(count == 2, "stop passes through try")
+
+# save / load
+learn weights = [[0.1, -2.5], [3.25, 1e-9]]
+state = {weights: weights, bias: 0.5, name: "demo", tags: ["a", "b"], ready: yes}
+save(state, "test_state.json")
+check(exists("test_state.json"), "save writes a file")
+back = load("test_state.json")
+check(back.weights == weights and back.bias == 0.5 and back.name == "demo", "load restores values exactly")
+check(back.tags == ["a", "b"] and back.ready, "load restores lists and yes/no")
+learn again = back.weights
+descend sum(again ^ 2) by 0.1
+check(again[0, 0] < 0.1, "loaded values can be learned further")
+try { load("no_such_file.json") } else e { got = e }
+check(has(got, "couldn't load"), "missing file is a catchable problem")
+
+show "all feature checks passed"

@@ -1,0 +1,146 @@
+# Checks aimed at the fast engine: calls, loops, try, and their combinations.
+# Run: antares tests/engine.ant
+
+# give from inside nested loops
+to find_pair(limit, target) {
+    repeat limit as a {
+        repeat limit as b {
+            when a * b == target { give [a, b] }
+        }
+    }
+    nothing
+}
+check(find_pair(10, 42) == [6, 7], "give out of nested loops")
+check(find_pair(3, 100) == nothing, "falls through to last value")
+
+# stop and skip in each kind of loop
+total = 0
+each n in range(10) {
+    when n % 2 == 0 { skip }
+    when n > 7 { stop }
+    total = total + n
+}
+check(total == 1 + 3 + 5 + 7, "each with skip and stop")
+
+count = 0
+repeat 100 as i {
+    when i > 5 { stop }
+    count = count + 1
+}
+check(count == 5, "repeat with stop")
+
+n = 0
+outer = 0
+while n < 5 {
+    n = n + 1
+    inner = 0
+    while yes {
+        inner = inner + 1
+        when inner >= n { stop }
+    }
+    outer = outer + inner
+}
+check(outer == 15, "nested while, stop leaves only the inner loop")
+
+# errors unwind through several function calls to the nearest try
+to level3(x) { when x > 2 { fail("deep problem") } else { x } }
+to level2(x) = level3(x) + 1
+to level1(x) = level2(x) * 2
+caught = "none"
+try { level1(5) } else p { caught = p }
+check(caught == "deep problem", "error crosses function calls")
+check(level1(1) == 4, "calls still work after an error was caught")
+
+# try inside a function inside a loop, with stop and skip crossing the try
+to careful(x) {
+    try { when x == 3 { fail("three") } else { x * 10 } } else { -1 }
+}
+seen = []
+each x in [1, 2, 3, 4, 5, 6] {
+    try {
+        when x == 5 { stop }
+        when x == 2 { skip }
+        seen = push(seen, careful(x))
+    } else { seen = push(seen, -99) }
+}
+check(seen == [10, -1, 40], "try with stop and skip inside loops: {seen}")
+
+# a try that fails inside a loop leaves the loop state intact
+hits = 0
+repeat 5 as i {
+    try { when i % 2 == 0 { fail("even") } } else { hits = hits + 1 }
+}
+check(hits == 2, "loop continues after caught errors")
+
+# nested try
+log = ""
+try {
+    try { fail("inner") } else e { log = log + e + ">" }
+    fail("outer")
+} else e { log = log + e }
+check(log == "inner>outer", "nested try")
+
+# an error inside the else block goes to the outer try
+try {
+    try { fail("a") } else { fail("b") }
+} else e { log = e }
+check(log == "b", "error in else block")
+
+# recursion, mutual recursion, and closures
+to fact(n) { when n <= 1 { 1 } else { n * fact(n - 1) } }
+to is_even(n) { when n == 0 { yes } else { is_odd(n - 1) } }
+to is_odd(n) { when n == 0 { no } else { is_even(n - 1) } }
+check(fact(10) == 3628800 and is_even(10) and not is_even(7), "recursion")
+
+to make_counter() {
+    state = {n: 0}
+    give step => state.n + step
+}
+c = make_counter()
+check(c(5) == 5 and c(2) == 2, "closures keep their own variables")
+
+to compose(f, g) = x => g(f(x))
+inc_then_double = compose(x => x + 1, x => x * 2)
+check(inc_then_double(4) == 10, "functions that make functions")
+check(map([1, 2, 3], x => fact(x) + 1) == [2, 3, 7], "built-ins calling back into functions")
+check(reduce(range(5), (a, b) => a + fact(b), 0) == 34, "reduce with recursion inside")
+
+# deep recursion is fine, endless recursion is caught
+to depth(n) { when n == 0 { 0 } else { 1 + depth(n - 1) } }
+check(depth(5000) == 5000, "deep recursion")
+to forever(n) = forever(n + 1)
+try { forever(0) } else e { caught = e }
+check(has(caught, "without ending"), "endless recursion is a catchable problem")
+check(depth(100) == 100, "engine recovers after endless recursion")
+
+# wrong number of inputs, calling a non-function, unset values
+try { fact(1, 2) } else e { caught = e }
+check(has(caught, "takes 1 input"), "wrong input count: {caught}")
+five = 5
+try { five(1) } else e { caught = e }
+check(has(caught, "can't be called"), "calling a number: {caught}")
+
+# and / or stop early
+calls = 0
+to bump() {
+    calls = 1
+    give yes
+}
+check((no and fail("never")) == no, "and stops early")
+check((yes or fail("never")) == yes, "or stops early")
+
+# values in when-chains and blocks
+to sign(x) { when x < 0 { -1 } else when x == 0 { 0 } else { 1 } }
+check([sign(-5), sign(0), sign(9)] == [-1, 0, 1], "when chain gives values")
+to nothing_block(x) { when x { } }
+check(nothing_block(yes) == nothing, "empty block gives nothing")
+
+# tensors still take the general path
+m = [[1, 2], [3, 4]]
+check(m * 2 + 1 == [[3, 5], [7, 9]] and m[1][0] == 3 and -m == [[-1, -2], [-3, -4]], "tensor maths")
+xs = ["a", "b", "c"]
+check(xs[0] == "a" and xs[-1] == "c" and [10, 20, 30][1] == 20, "indexing")
+try { xs[7] } else e { caught = e }
+check(has(caught, "out of range"), "bad index")
+
+show "all engine checks passed"

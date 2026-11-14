@@ -1,0 +1,28 @@
+# Train a network once, save it, and reuse it on later runs.
+# Shows: use (imports), slices, try/else, save/load.
+
+use "nn"
+
+data = [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]]
+x = data[:, 0:2]          # every row, first two columns
+y = data[:, 2:]           # every row, last column
+
+to predict(net, input) = forward(net.hidden, input) -> tanh -> (h => forward(net.out, h)) -> sigmoid
+
+file = "xor_model.json"
+
+try {
+    net = load(file)
+    show "Loaded a trained model from {file}"
+} else {
+    show "No saved model yet, training one..."
+    seed(7)
+    net = {hidden: layer(2, 8), out: layer(8, 1)}
+    repeat 1000 {
+        descend mse(predict(net, x), y) by 0.05 using adam
+    }
+    save(net, file)
+    show "Trained and saved to {file}"
+}
+
+show "predictions:", predict(net, x)[:, 0] -> round

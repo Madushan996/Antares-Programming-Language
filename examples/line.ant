@@ -1,0 +1,17 @@
+# Learn the line y = 3x + 2 from noisy points
+
+seed(1)
+x = rand(50) * 4
+y = 3 * x + 2 + randn(50) * 0.1
+
+learn slope = 0
+learn offset = 0
+
+repeat 400 as step {
+    guess = slope * x + offset
+    loss = mean((guess - y) ^ 2)
+    descend loss by 0.05
+    when step % 100 == 0 { show "step {step}: loss {loss}" }
+}
+
+show "learned: y = {slope}x + {offset}"

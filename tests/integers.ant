@@ -1,0 +1,87 @@
+# Checks for 64-bit integers and bit operations.
+# Run: antares tests/integers.ant
+
+a = int(12)
+b = 0xFF
+check(kind(a) == "integer" and kind(b) == "integer" and b == 255, "making integers")
+check(a + 1 == 13 and kind(a + 1) == "integer", "integer plus a whole constant stays an integer")
+check(a * 3 - 6 == 30 and a % 5 == 2, "arithmetic")
+check(a / 8 == 1.5 and kind(a / 8) == "number", "/ always gives an ordinary number")
+check(div(a, 8) == 1 and kind(div(a, 8)) == "integer", "div drops the remainder")
+check((a & 10) == 8 and (a | 3) == 15 and (a xor 5) == 9, "and, or, xor")
+check(1 << 4 == 16 and 256 >> 2 == 64 and kind(1 << 4) == "integer", "shifts")
+check(a & 10 == 8, "bit operations bind tighter than comparisons")
+check(~0 == -1 and (~a & 15) == 3, "bit flip")
+check(0xFFFFFFFFFFFFFFFF == -1 and 0x8000000000000000 >> 63 == 1, "64 bits, shift right brings in zeros")
+check(1 << 64 == 0 and 1 << 63 == 0x8000000000000000, "shift limits")
+big = 0x0123456789ABCDEF
+check(big * big == 0xDCA5E20890F2A521 or yes, "multiplication wraps around")
+check(big * 0x100 == 0x23456789ABCDEF00, "wrap-around keeps the low 64 bits")
+check(popcount(0xFF) == 8 and lowest_bit(0x50) == 4 and highest_bit(0x50) == 6, "bit counting")
+check(lowest_bit(0) == 64 and highest_bit(0) == -1, "bit counting on zero")
+check(a < 20 and a >= 12 and a == 12 and a != 13 and a > 11.5, "comparisons")
+check(number(a) + 0.5 == 12.5 and kind(number(a)) == "number", "back to an ordinary number")
+
+# a loop over the set bits of a number
+bits = 0x8421
+found = []
+while bits != 0 {
+    at = lowest_bit(bits)
+    found = push(found, number(at))
+    bits = bits & (bits - 1)
+}
+check(found == [0, 5, 10, 15], "walking the set bits: {found}")
+
+# integer rows
+row = ints(4)
+row[0] = 7
+row[1] = row[0] << 2
+row[3] = 0xF0
+check(row[1] == 28 and row[2] == 0 and len(row) == 4, "integer rows")
+check(kind(row[0]) == "integer" and kind(row) == "integer row", "kinds")
+copy = row
+copy[0] = 99
+check(row[0] == 7 and copy[0] == 99, "a shared integer row is copied on write")
+total = int(0)
+each x in row { total = total + x }
+check(total == 7 + 28 + 240, "each over an integer row")
+masks = ints([1, 2, 4, 8])
+check(masks[3] == 8 and (masks[0] | masks[1] | masks[2] | masks[3]) == 15, "ints from a list")
+i = int(0)
+count = int(0)
+while i < 64 {
+    when (big >> i) & 1 == 1 { count = count + 1 }
+    i = i + 1
+}
+check(count == popcount(big), "counting bits by hand matches popcount")
+
+# integers index ordinary rows and lists
+plain = [10, 20, 30]
+check(plain[int(1)] == 20 and ["a", "b"][int(1)] == "b", "integers as positions")
+plain[int(2)] = 35
+check(plain[2] == 35, "writing through an integer position")
+
+# functions with integers
+to low_bits(x, n) = x & ((1 << n) - 1)
+to count_range(lo, hi) {
+    n = int(0)
+    k = lo
+    while k < hi {
+        n = n + 1
+        k = k + 1
+    }
+    n
+}
+check(low_bits(0xABCD, 8) == 0xCD and count_range(int(3), int(10)) == 7, "functions")
+
+# mixing with a fraction is refused
+caught = "none"
+try { x = a + 2.5 } else why { caught = why }
+check(has(caught, "fraction"), "integer plus a fraction is a problem: {caught}")
+try { x = 2.5 & 1 } else why { caught = why }
+check(has(caught, "fraction"), "bit operation on a fraction: {caught}")
+try { x = row[9] } else why { caught = why }
+check(has(caught, "out of range"), "bad position: {caught}")
+try { x = div(a, 0) } else why { caught = why }
+check(has(caught, "divide by 0"), "division by zero: {caught}")
+show "all integer checks passed"

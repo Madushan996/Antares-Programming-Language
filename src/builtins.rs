@@ -1,0 +1,1508 @@
+//! The functions every Antares program starts with.
+
+use crate::interp::{iter_items, Interp};
+use crate::json::{self, J};
+use crate::tensor::{self, UFn, T};
+use crate::value::{fmt_num, pack_list, wrap, NativeFn, Packed, Value};
+use std::cell::Cell;
+use std::io::Write;
+use std::rc::Rc;
+
+type Res = Result<Value, String>;
+
+// ---------- random numbers ----------
+
+thread_local! {
+    static RNG: Cell<u64> = Cell::new(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(42)
+    );
+}
+
+fn next_u64() -> u64 {
+    RNG.with(|r| {
+        let mut z = r.get().wrapping_add(0x9E3779B97F4A7C15);
+        r.set(z);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    })
+}
+
+fn uniform() -> f64 {
+    (next_u64() >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn normal() -> f64 {
+    let u1 = uniform().max(1e-300);
+    let u2 = uniform();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
+}
+
+// ---------- argument helpers ----------
+
+fn want(a: &[Value], n: usize, name: &str) -> Result<(), String> {
+    if a.len() != n {
+        Err(format!("{} takes {} input{} but was given {}", name, n, if n == 1 { "" } else { "s" }, a.len()))
+    } else {
+        Ok(())
+    }
+}
+
+fn num(v: &Value, name: &str) -> Result<f64, String> {
+    v.scalar().ok_or_else(|| format!("{} needs a number, not a {}", name, v.kind()))
+}
+
+fn ten(v: &Value, name: &str) -> Result<T, String> {
+    v.as_tensor().ok_or_else(|| format!("{} needs numbers, not a {}", name, v.kind()))
+}
+
+fn text(v: &Value, name: &str) -> Result<Rc<str>, String> {
+    match v {
+        Value::Str(s) => Ok(s.clone()),
+        other => Err(format!("{} needs text, not a {}", name, other.kind())),
+    }
+}
+
+fn s(x: impl AsRef<str>) -> Value {
+    Value::Str(x.as_ref().into())
+}
+
+fn dims(a: &[Value], name: &str) -> Result<Vec<usize>, String> {
+    let vals: Vec<f64> = match a {
+        [Value::Tensor(t)] if t.shape.len() == 1 => t.data.borrow().clone(),
+        _ => {
+            let mut v = vec![];
+            for x in a {
+                v.push(num(x, name)?);
+            }
+            v
+        }
+    };
+    let mut out = vec![];
+    for x in vals {
+        if x < 0.0 || x != x.trunc() {
+            return Err(format!("{} needs whole, non-negative sizes", name));
+        }
+        out.push(x as usize);
+    }
+    Ok(out)
+}
+
+fn filled(a: Vec<Value>, name: &str, mut f: impl FnMut() -> f64) -> Res {
+    let shape = dims(&a, name)?;
+    let n: usize = shape.iter().product();
+    let data: Vec<f64> = (0..n).map(|_| f()).collect();
+    Ok(wrap(tensor::new(shape, data)))
+}
+
+fn unary(a: Vec<Value>, name: &str, f: UFn) -> Res {
+    want(&a, 1, name)?;
+    match &a[0] {
+        Value::Num(x) => Ok(Value::Num(tensor::apply(f, *x))),
+        Value::Tensor(t) => Ok(wrap(tensor::unary(f, t))),
+        other => Err(format!("{} needs a number or tensor, not a {}", name, other.kind())),
+    }
+}
+
+fn elementwise(a: Vec<Value>, name: &str, f: fn(f64) -> f64) -> Res {
+    want(&a, 1, name)?;
+    let t = ten(&a[0], name)?;
+    let d: Vec<f64> = t.data.borrow().iter().map(|x| f(*x)).collect();
+    Ok(wrap(tensor::new(t.shape.clone(), d)))
+}
+
+macro_rules! un {
+    ($fname:ident, $name:expr, $f:expr) => {
+        fn $fname(_: &mut Interp, a: Vec<Value>) -> Res {
+            unary(a, $name, $f)
+        }
+    };
+}
+
+un!(b_exp, "exp", UFn::Exp);
+un!(b_log, "log", UFn::Log);
+un!(b_tanh, "tanh", UFn::Tanh);
+un!(b_sigmoid, "sigmoid", UFn::Sigmoid);
+un!(b_relu, "relu", UFn::Relu);
+un!(b_sqrt, "sqrt", UFn::Sqrt);
+un!(b_abs, "abs", UFn::Abs);
+un!(b_sin, "sin", UFn::Sin);
+un!(b_cos, "cos", UFn::Cos);
+
+// ---------- tensors ----------
+
+fn b_zeros(_: &mut Interp, a: Vec<Value>) -> Res {
+    filled(a, "zeros", || 0.0)
+}
+
+fn b_ones(_: &mut Interp, a: Vec<Value>) -> Res {
+    filled(a, "ones", || 1.0)
+}
+
+fn b_rand(_: &mut Interp, a: Vec<Value>) -> Res {
+    filled(a, "rand", uniform)
+}
+
+fn b_randn(_: &mut Interp, a: Vec<Value>) -> Res {
+    filled(a, "randn", normal)
+}
+
+fn b_seed(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "seed")?;
+    let n = num(&a[0], "seed")?;
+    RNG.with(|r| r.set(n.to_bits() ^ 0xA076_1D64_78BD_642F));
+    Ok(Value::Nothing)
+}
+
+fn b_range(_: &mut Interp, a: Vec<Value>) -> Res {
+    let (start, end, step) = match a.len() {
+        1 => (0.0, num(&a[0], "range")?, 1.0),
+        2 => (num(&a[0], "range")?, num(&a[1], "range")?, 1.0),
+        3 => (num(&a[0], "range")?, num(&a[1], "range")?, num(&a[2], "range")?),
+        _ => return Err("range takes 1 to 3 inputs: range(end), range(start, end) or range(start, end, step)".into()),
+    };
+    if step == 0.0 {
+        return Err("range can't count in steps of 0".into());
+    }
+    let mut data = vec![];
+    let mut x = start;
+    while (step > 0.0 && x < end) || (step < 0.0 && x > end) {
+        data.push(x);
+        x += step;
+    }
+    Ok(Value::Tensor(tensor::new(vec![data.len()], data)))
+}
+
+fn b_shape(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "shape")?;
+    let t = ten(&a[0], "shape")?;
+    let d: Vec<f64> = t.shape.iter().map(|x| *x as f64).collect();
+    Ok(Value::Tensor(tensor::new(vec![d.len()], d)))
+}
+
+fn b_reshape(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() < 2 {
+        return Err("reshape needs a tensor and the new sizes, like reshape(x, 2, 3)".into());
+    }
+    let t = ten(&a[0], "reshape")?;
+    Ok(wrap(tensor::reshape(&t, dims(&a[1..], "reshape")?)?))
+}
+
+fn b_t(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "t")?;
+    Ok(wrap(tensor::transpose(&ten(&a[0], "t")?)?))
+}
+
+fn reduce_axis(a: Vec<Value>, name: &str, all: fn(&T) -> T, along: fn(&T, i64) -> Result<T, String>) -> Res {
+    match a.len() {
+        1 => Ok(wrap(all(&ten(&a[0], name)?))),
+        2 => {
+            let ax = num(&a[1], name)?;
+            if ax != ax.trunc() {
+                return Err(format!("{}: the dimension must be a whole number", name));
+            }
+            Ok(wrap(along(&ten(&a[0], name)?, ax as i64)?))
+        }
+        n => Err(format!("{} takes a tensor and, optionally, a dimension to work along, but was given {} inputs", name, n)),
+    }
+}
+
+fn b_sum(_: &mut Interp, a: Vec<Value>) -> Res {
+    reduce_axis(a, "sum", tensor::sum, tensor::sum_axis)
+}
+
+fn b_mean(_: &mut Interp, a: Vec<Value>) -> Res {
+    reduce_axis(a, "mean", tensor::mean, tensor::mean_axis)
+}
+
+fn b_softmax(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "softmax")?;
+    Ok(wrap(tensor::softmax(&ten(&a[0], "softmax")?)))
+}
+
+fn extreme(a: Vec<Value>, name: &str, better: fn(f64, f64) -> bool) -> Res {
+    let mut best: Option<f64> = None;
+    for v in &a {
+        let t = ten(v, name)?;
+        for &x in t.data.borrow().iter() {
+            if best.map_or(true, |b| better(x, b)) {
+                best = Some(x);
+            }
+        }
+    }
+    best.map(Value::Num).ok_or_else(|| format!("{} needs at least one number", name))
+}
+
+fn b_max(_: &mut Interp, a: Vec<Value>) -> Res {
+    extreme(a, "max", |x, b| x > b)
+}
+
+fn b_min(_: &mut Interp, a: Vec<Value>) -> Res {
+    extreme(a, "min", |x, b| x < b)
+}
+
+fn b_argmax(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "argmax")?;
+    let t = ten(&a[0], "argmax")?;
+    let d = t.shape.last().copied().unwrap_or(1).max(1);
+    let data = t.data.borrow();
+    let picks: Vec<f64> = data
+        .chunks(d)
+        .map(|row| {
+            let mut bi = 0;
+            for (i, x) in row.iter().enumerate() {
+                if *x > row[bi] {
+                    bi = i;
+                }
+            }
+            bi as f64
+        })
+        .collect();
+    let shape = if t.shape.is_empty() { vec![] } else { t.shape[..t.shape.len() - 1].to_vec() };
+    Ok(wrap(tensor::new(shape, picks)))
+}
+
+fn b_onehot(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "onehot")?;
+    let labels = ten(&a[0], "onehot")?;
+    let n = num(&a[1], "onehot")? as usize;
+    let ld = labels.data.borrow();
+    let mut data = vec![0.0; ld.len() * n];
+    for (i, &l) in ld.iter().enumerate() {
+        if l < 0.0 || l as usize >= n {
+            return Err(format!("onehot: label {} doesn't fit in {} classes", fmt_num(l), n));
+        }
+        data[i * n + l as usize] = 1.0;
+    }
+    let mut shape = labels.shape.clone();
+    shape.push(n);
+    Ok(Value::Tensor(tensor::new(shape, data)))
+}
+
+fn b_grad(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "grad")?;
+    let loss = ten(&a[0], "grad")?;
+    let wrt = ten(&a[1], "grad")?;
+    let g = tensor::grad_of(&loss, &wrt);
+    Ok(wrap(tensor::new(wrt.shape.clone(), g)))
+}
+
+fn b_floor(_: &mut Interp, a: Vec<Value>) -> Res {
+    elementwise(a, "floor", f64::floor)
+}
+
+fn b_round(_: &mut Interp, a: Vec<Value>) -> Res {
+    elementwise(a, "round", f64::round)
+}
+
+fn b_trunc(_: &mut Interp, a: Vec<Value>) -> Res {
+    elementwise(a, "trunc", f64::trunc)
+}
+
+/// clip(x, low, high): every number forced into the range low..high.
+fn b_clip(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 3, "clip")?;
+    let t = ten(&a[0], "clip")?;
+    if t.requires {
+        return Err("clip can't be learned through; use relu or your own formula on `learn` values".into());
+    }
+    let (lo, hi) = (num(&a[1], "clip")?, num(&a[2], "clip")?);
+    let d: Vec<f64> = t.data.borrow().iter().map(|x| x.max(lo).min(hi)).collect();
+    Ok(wrap(tensor::new(t.shape.clone(), d)))
+}
+
+/// sum_rows(matrix, rows, count?): adds up the chosen rows of a matrix.
+fn b_sum_rows(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() < 2 || a.len() > 3 {
+        return Err("sum_rows takes a matrix, the row numbers, and optionally how many of them to use".into());
+    }
+    let m = ten(&a[0], "sum_rows")?;
+    let rows = ten(&a[1], "sum_rows")?;
+    if m.shape.len() != 2 {
+        return Err("sum_rows needs a matrix (rows and columns)".into());
+    }
+    let (n, h) = (m.shape[0], m.shape[1]);
+    let rd = rows.data.borrow();
+    let count = if a.len() == 3 { num(&a[2], "sum_rows")? as usize } else { rd.len() };
+    if count > rd.len() {
+        return Err(format!("sum_rows was asked for {} rows but only {} row numbers were given", count, rd.len()));
+    }
+    let md = m.data.borrow();
+    let mut out = vec![0.0; h];
+    for &r in &rd[..count] {
+        if r < 0.0 || r as usize >= n {
+            return Err(format!("sum_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), n));
+        }
+        let row = &md[r as usize * h..(r as usize + 1) * h];
+        for (o, x) in out.iter_mut().zip(row) {
+            *o += x;
+        }
+    }
+    Ok(Value::Tensor(tensor::new(vec![h], out)))
+}
+
+fn packed(data: Vec<i16>, rows: usize, cols: usize, matrix: bool) -> Value {
+    Value::Packed(Rc::new(Packed { data: std::cell::RefCell::new(data), rows, cols, matrix, max_abs: std::cell::Cell::new(-1) }))
+}
+
+/// compact(x) or compact(x, rows, cols): whole numbers stored in 2 bytes each
+/// instead of 8. Much faster for the row built-ins on large tables.
+fn b_compact(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() != 1 && a.len() != 3 {
+        return Err("compact takes a row or matrix of numbers, and optionally the rows and columns to arrange it in".into());
+    }
+    let t = plain(&a[0], "compact")?;
+    let d = t.data.borrow();
+    let (rows, cols, matrix) = if a.len() == 3 {
+        (num(&a[1], "compact")? as usize, num(&a[2], "compact")? as usize, true)
+    } else {
+        match t.shape.len() {
+            1 => (1, t.shape[0], false),
+            2 => (t.shape[0], t.shape[1], true),
+            _ => return Err("compact works on a row or a matrix".into()),
+        }
+    };
+    if rows * cols != d.len() {
+        return Err(format!("compact: {} numbers can't be arranged as {} rows of {}", d.len(), rows, cols));
+    }
+    let mut out = Vec::with_capacity(d.len());
+    for &x in d.iter() {
+        if x != x.trunc() || !(-32768.0..=32767.0).contains(&x) {
+            return Err(format!("compact needs whole numbers from -32768 to 32767, but found {}", fmt_num(x)));
+        }
+        out.push(x as i16);
+    }
+    Ok(packed(out, rows, cols, matrix))
+}
+
+/// expand(c): compact numbers back as an ordinary row or matrix.
+fn b_expand(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "expand")?;
+    match &a[0] {
+        Value::Packed(p) => {
+            let d: Vec<f64> = p.data.borrow().iter().map(|x| *x as f64).collect();
+            let shape = if p.matrix { vec![p.rows, p.cols] } else { vec![p.cols] };
+            Ok(Value::Tensor(tensor::new(shape, d)))
+        }
+        other => Err(format!("expand needs compact numbers, not a {}", other.kind())),
+    }
+}
+
+/// The compact versions of update_rows and screlu_dot.
+fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
+    if !m.matrix || base.matrix || base.cols != m.cols {
+        return Err("update_rows needs a compact matrix whose rows are as long as the compact base row".into());
+    }
+    let h = m.cols;
+    let md = m.data.borrow();
+    let recycled: Option<Rc<Packed>> = match a.get(6) {
+        Some(Value::Packed(t)) if !t.matrix && t.cols == h && Rc::strong_count(t) == 2 && !Rc::ptr_eq(t, base) => {
+            Some(t.clone())
+        }
+        _ => None,
+    };
+    // Collect the rows to add and to remove, then do everything in one pass.
+    // (kept on the stack: allocating even a small list here costs more than the arithmetic)
+    let empty: &[i16] = &[];
+    let mut add_rows: [&[i16]; 32] = [empty; 32];
+    let mut sub_rows: [&[i16]; 32] = [empty; 32];
+    let (mut n_add, mut n_sub) = (0usize, 0usize);
+    for (rows_arg, count_arg, add) in [(&a[2], &a[3], true), (&a[4], &a[5], false)] {
+        let rows = ten(rows_arg, "update_rows")?;
+        let rd = rows.data.borrow();
+        let count = num(count_arg, "update_rows")? as usize;
+        if count > rd.len() {
+            return Err("update_rows was asked for more rows than row numbers were given".into());
+        }
+        for &r in &rd[..count] {
+            if r < 0.0 || r as usize >= m.rows {
+                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), m.rows));
+            }
+            let row = &md[r as usize * h..(r as usize + 1) * h];
+            if add {
+                if n_add == 32 {
+                    return Err("update_rows adds at most 32 rows at a time".into());
+                }
+                add_rows[n_add] = row;
+                n_add += 1;
+            } else {
+                if n_sub == 32 {
+                    return Err("update_rows removes at most 32 rows at a time".into());
+                }
+                sub_rows[n_sub] = row;
+                n_sub += 1;
+            }
+        }
+    }
+    let bd = base.data.borrow();
+    let mut fresh_row: Vec<i16> = Vec::new();
+    let mut held;
+    let out: &mut [i16] = match &recycled {
+        Some(t) => {
+            t.max_abs.set(-1);
+            held = t.data.borrow_mut();
+            &mut held[..]
+        }
+        None => {
+            fresh_row = vec![0i16; h];
+            &mut fresh_row[..]
+        }
+    };
+    combine_rows(out, &bd, &add_rows[..n_add], &sub_rows[..n_sub]);
+    drop(bd);
+    match &recycled {
+        Some(t) => Ok(Value::Packed(t.clone())),
+        None => Ok(packed(fresh_row, 1, h, false)),
+    }
+}
+
+/// out = base + every row in `adds` - every row in `subs`, wrapping in 16 bits.
+fn combine_rows(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") {
+            unsafe { combine_rows_avx2(out, base, adds, subs) };
+            return;
+        }
+    }
+    for i in 0..out.len() {
+        let mut v = base[i];
+        for r in adds {
+            v = v.wrapping_add(r[i]);
+        }
+        for r in subs {
+            v = v.wrapping_sub(r[i]);
+        }
+        out[i] = v;
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn combine_rows_avx2(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]]) {
+    unsafe {
+        use std::arch::x86_64::*;
+        let n = out.len() / 16 * 16;
+        let mut i = 0;
+        while i < n {
+            let mut v = _mm256_loadu_si256(base.as_ptr().add(i) as *const __m256i);
+            for r in adds {
+                v = _mm256_add_epi16(v, _mm256_loadu_si256(r.as_ptr().add(i) as *const __m256i));
+            }
+            for r in subs {
+                v = _mm256_sub_epi16(v, _mm256_loadu_si256(r.as_ptr().add(i) as *const __m256i));
+            }
+            _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, v);
+            i += 16;
+        }
+        for k in n..out.len() {
+            let mut v = base[k];
+            for r in adds {
+                v = v.wrapping_add(r[k]);
+            }
+            for r in subs {
+                v = v.wrapping_sub(r[k]);
+            }
+            out[k] = v;
+        }
+    }
+}
+
+/// The largest size of any number in a compact row (remembered after the first time).
+fn max_abs(p: &Packed) -> i32 {
+    let known = p.max_abs.get();
+    if known >= 0 {
+        return known;
+    }
+    let m = p.data.borrow().iter().map(|x| (*x as i32).abs()).max().unwrap_or(0);
+    p.max_abs.set(m);
+    m
+}
+
+/// screlu_dot in 16-bit steps, as the C++ engine does it: sixteen numbers per
+/// step. Exact when cap * (largest weight) fits in 16 bits, which the caller checks.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn screlu_dot_avx2_16(x: &[i16], w: &[i16], cap: i32) -> i64 {
+    unsafe {
+        use std::arch::x86_64::*;
+        let n = x.len() / 16 * 16;
+        let zero = _mm256_setzero_si256();
+        let capv = _mm256_set1_epi16(cap as i16);
+        let mut total = 0i64;
+        let mut i = 0;
+        while i < n {
+            // at most 512 numbers per block keeps each 32-bit running total in range
+            let end = (i + 512).min(n);
+            let mut acc = zero;
+            while i < end {
+                let xv = _mm256_loadu_si256(x.as_ptr().add(i) as *const __m256i);
+                let wv = _mm256_loadu_si256(w.as_ptr().add(i) as *const __m256i);
+                let c = _mm256_min_epi16(_mm256_max_epi16(xv, zero), capv);
+                let t = _mm256_mullo_epi16(c, wv);
+                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(t, c));
+                i += 16;
+            }
+            let mut parts = [0i32; 8];
+            _mm256_storeu_si256(parts.as_mut_ptr() as *mut __m256i, acc);
+            total += parts.iter().map(|v| *v as i64).sum::<i64>();
+        }
+        total + screlu_dot_plain(&x[n..], &w[n..], cap)
+    }
+}
+
+/// The 32-bit form of screlu_dot for one stretch: each product c * c * w fits
+/// in 32 bits when cap <= 255; its upper and lower halves are added separately
+/// so every running total stays in 32 bits.
+fn screlu_dot_plain(x: &[i16], w: &[i16], cap: i32) -> i64 {
+    let mut total: i64 = 0;
+    for (xc, wc) in x.chunks(1024).zip(w.chunks(1024)) {
+        let (mut lo, mut hi) = (0i32, 0i32);
+        for (p, q) in xc.iter().zip(wc.iter()) {
+            let c = (*p as i32).max(0).min(cap);
+            let t = c * c * (*q as i32);
+            lo += t & 0xFFFF;
+            hi += t >> 16;
+        }
+        total += (hi as i64) * 65536 + lo as i64;
+    }
+    total
+}
+
+fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
+    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    if xd.len() != wd.len() {
+        return Err("screlu_dot needs two rows of the same length".into());
+    }
+    let cap = cap.max(0.0).min(32767.0) as i32;
+    if cap <= 255 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            // cap * weight must fit in 16 bits for the 16-bit steps to be exact
+            if std::arch::is_x86_feature_detected!("avx2") && cap * max_abs(w) <= 32767 {
+                return Ok(Value::Num(unsafe { screlu_dot_avx2_16(&xd, &wd, cap) } as f64));
+            }
+        }
+        return Ok(Value::Num(screlu_dot_plain(&xd, &wd, cap) as f64));
+    }
+    let mut total: i64 = 0;
+    for (p, q) in xd.iter().zip(wd.iter()) {
+        let c = (*p as i32).max(0).min(cap);
+        total += (c as i64) * (c as i64) * (*q as i64);
+    }
+    Ok(Value::Num(total as f64))
+}
+
+/// rows(matrix): the rows of a matrix as a list, so one can be picked without copying.
+fn b_rows(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "rows")?;
+    if let Value::Packed(p) = &a[0] {
+        let d = p.data.borrow();
+        let out: Vec<Value> = d.chunks(p.cols.max(1)).map(|c| packed(c.to_vec(), 1, p.cols, false)).collect();
+        return Ok(Value::List(Rc::new(out)));
+    }
+    let m = ten(&a[0], "rows")?;
+    if m.shape.len() < 2 {
+        return Err("rows needs a matrix (rows and columns)".into());
+    }
+    let mut out = Vec::with_capacity(m.shape[0]);
+    for i in 0..m.shape[0] {
+        out.push(Value::Tensor(tensor::index(&m, &[i as i64])?));
+    }
+    Ok(Value::List(Rc::new(out)))
+}
+
+fn plain(v: &Value, name: &str) -> Result<T, String> {
+    let t = ten(v, name)?;
+    if t.requires {
+        return Err(format!("{} works on plain numbers, not on values being learned", name));
+    }
+    Ok(t)
+}
+
+/// screlu(x, cap): every number forced into 0..cap and then squared (an activation function).
+fn b_screlu(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "screlu")?;
+    let t = plain(&a[0], "screlu")?;
+    let cap = num(&a[1], "screlu")?;
+    let d: Vec<f64> = t
+        .data
+        .borrow()
+        .iter()
+        .map(|x| {
+            let c = x.max(0.0).min(cap);
+            c * c
+        })
+        .collect();
+    Ok(wrap(tensor::new(t.shape.clone(), d)))
+}
+
+/// sum_product(a, b, ...): multiplies the rows position by position and adds
+/// everything up, without building the rows in between.
+fn b_sum_product(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.is_empty() {
+        return Err("sum_product needs at least one row of numbers".into());
+    }
+    let ts: Vec<T> = a.iter().map(|v| plain(v, "sum_product")).collect::<Result<_, _>>()?;
+    let n = ts[0].len();
+    if ts.iter().any(|t| t.len() != n) {
+        return Err("sum_product needs rows of the same length".into());
+    }
+    let total = match &ts[..] {
+        [x] => x.data.borrow().iter().sum(),
+        [x, y] => {
+            let (x, y) = (x.data.borrow(), y.data.borrow());
+            let mut lanes = [0.0f64; 8];
+            let mut xc = x.chunks_exact(8);
+            let mut yc = y.chunks_exact(8);
+            for (px, py) in (&mut xc).zip(&mut yc) {
+                for k in 0..8 {
+                    lanes[k] += px[k] * py[k];
+                }
+            }
+            let rest: f64 = xc.remainder().iter().zip(yc.remainder()).map(|(p, q)| p * q).sum();
+            lanes.iter().sum::<f64>() + rest
+        }
+        _ => {
+            let ds: Vec<_> = ts.iter().map(|t| t.data.borrow()).collect();
+            let mut total = 0.0;
+            for i in 0..n {
+                let mut p = 1.0;
+                for d in &ds {
+                    p *= d[i];
+                }
+                total += p;
+            }
+            total
+        }
+    };
+    Ok(Value::Num(total))
+}
+
+/// screlu_dot(x, weights, cap): each number of x forced into 0..cap and squared,
+/// times the matching weight, all added up. The same as
+/// sum_product(screlu(x, cap), weights) without building the row in between.
+fn b_screlu_dot(_: &mut Interp, a: Vec<Value>) -> Res {
+    screlu_dot_slice(&a)
+}
+
+pub fn screlu_dot_slice(a: &[Value]) -> Res {
+    want(&a, 3, "screlu_dot")?;
+    if let (Value::Packed(x), Value::Packed(w)) = (&a[0], &a[1]) {
+        return screlu_dot_packed(x, w, num(&a[2], "screlu_dot")?);
+    }
+    let x = plain(&a[0], "screlu_dot")?;
+    let w = plain(&a[1], "screlu_dot")?;
+    let cap = num(&a[2], "screlu_dot")?;
+    if x.len() != w.len() {
+        return Err("screlu_dot needs two rows of the same length".into());
+    }
+    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    // Eight running totals, so the processor can work on eight numbers at once.
+    let mut lanes = [0.0f64; 8];
+    let mut xc = xd.chunks_exact(8);
+    let mut wc = wd.chunks_exact(8);
+    for (px, pw) in (&mut xc).zip(&mut wc) {
+        for k in 0..8 {
+            let c = px[k].max(0.0).min(cap);
+            lanes[k] += c * c * pw[k];
+        }
+    }
+    let mut total: f64 = lanes.iter().sum();
+    for (p, q) in xc.remainder().iter().zip(wc.remainder()) {
+        let c = p.max(0.0).min(cap);
+        total += c * c * q;
+    }
+    Ok(Value::Num(total))
+}
+
+/// update_rows(base, matrix, add, n_add, remove, n_remove, old?):
+/// base plus the chosen rows of the matrix, minus other chosen rows, in one step.
+/// `old` is optional: a row that is about to be replaced by the result. If
+/// nothing else is using it, its memory is reused instead of making a new row.
+fn b_update_rows(_: &mut Interp, a: Vec<Value>) -> Res {
+    update_rows_slice(&a)
+}
+
+pub fn update_rows_slice(a: &[Value]) -> Res {
+    if a.len() != 6 && a.len() != 7 {
+        return Err(format!("update_rows takes 6 or 7 inputs but was given {}", a.len()));
+    }
+    if let (Value::Packed(base), Value::Packed(m)) = (&a[0], &a[1]) {
+        return update_rows_packed(&a, base, m);
+    }
+    let base = plain(&a[0], "update_rows")?;
+    let m = plain(&a[1], "update_rows")?;
+    if m.shape.len() != 2 || base.len() != m.shape[1] {
+        return Err("update_rows needs a matrix whose rows are as long as the base row".into());
+    }
+    let (n, h) = (m.shape[0], m.shape[1]);
+    let md = m.data.borrow();
+    // Reuse the old row when the only holders are the variable it came from and this call.
+    let recycled: Option<T> = match a.get(6) {
+        Some(Value::Tensor(t))
+            if !t.requires
+                && t.shape == base.shape
+                && Rc::strong_count(t) == 2
+                && !Rc::ptr_eq(t, &base)
+                && !Rc::ptr_eq(t, &m) =>
+        {
+            Some(t.clone())
+        }
+        _ => None,
+    };
+    let mut fresh_row: Vec<f64> = Vec::new();
+    let mut held;
+    let out: &mut Vec<f64> = match &recycled {
+        Some(t) => {
+            held = t.data.borrow_mut();
+            held.copy_from_slice(&base.data.borrow());
+            &mut held
+        }
+        None => {
+            fresh_row = base.data.borrow().clone();
+            &mut fresh_row
+        }
+    };
+    for (rows_arg, count_arg, sign) in [(&a[2], &a[3], 1.0), (&a[4], &a[5], -1.0)] {
+        let rows = ten(rows_arg, "update_rows")?;
+        let rd = rows.data.borrow();
+        let count = num(count_arg, "update_rows")? as usize;
+        if count > rd.len() {
+            return Err("update_rows was asked for more rows than row numbers were given".into());
+        }
+        for &r in &rd[..count] {
+            if r < 0.0 || r as usize >= n {
+                return Err(format!("update_rows: row {} doesn't exist (the matrix has {} rows)", fmt_num(r), n));
+            }
+            let row = &md[r as usize * h..(r as usize + 1) * h];
+            if sign > 0.0 {
+                for (o, x) in out.iter_mut().zip(row) {
+                    *o += x;
+                }
+            } else {
+                for (o, x) in out.iter_mut().zip(row) {
+                    *o -= x;
+                }
+            }
+        }
+    }
+    match &recycled {
+        Some(t) => Ok(Value::Tensor(t.clone())),
+        None => Ok(Value::Tensor(tensor::new(base.shape.clone(), fresh_row))),
+    }
+}
+
+/// read_binary(file, kind, start, count): whole numbers stored in a binary file.
+fn b_read_binary(_: &mut Interp, a: Vec<Value>) -> Res {
+    use std::io::{Read, Seek, SeekFrom};
+    want(&a, 4, "read_binary")?;
+    let path = text(&a[0], "read_binary")?;
+    let kind = text(&a[1], "read_binary")?;
+    let start = num(&a[2], "read_binary")? as u64;
+    let count = num(&a[3], "read_binary")? as usize;
+    let size = match &*kind {
+        "u8" | "i8" => 1,
+        "u16" | "i16" => 2,
+        "u32" | "i32" => 4,
+        other => return Err(format!("read_binary knows the kinds u8, i8, u16, i16, u32 and i32, not \"{}\"", other)),
+    };
+    let too_short = || format!("\"{}\" is too short: it doesn't hold {} numbers from position {}", path, count, start);
+    let mut owned = Vec::new();
+    let buf: &[u8] = match embedded_file(&path) {
+        Some(Some(bytes)) => {
+            let from = start as usize;
+            bytes.get(from..from + count * size).ok_or_else(too_short)?
+        }
+        Some(None) => return Err(format!("no file was embedded as \"{}\"", path)),
+        None => {
+            let mut f = std::fs::File::open(&*path).map_err(|e| format!("couldn't open \"{}\": {}", path, e))?;
+            f.seek(SeekFrom::Start(start)).map_err(|e| format!("couldn't read \"{}\": {}", path, e))?;
+            owned.resize(count * size, 0u8);
+            f.read_exact(&mut owned).map_err(|_| too_short())?;
+            &owned
+        }
+    };
+    let data: Vec<f64> = buf
+        .chunks_exact(size)
+        .map(|c| match &*kind {
+            "u8" => c[0] as f64,
+            "i8" => c[0] as i8 as f64,
+            "u16" => u16::from_le_bytes([c[0], c[1]]) as f64,
+            "i16" => i16::from_le_bytes([c[0], c[1]]) as f64,
+            "u32" => u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64,
+            _ => i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as f64,
+        })
+        .collect();
+    Ok(Value::Tensor(tensor::new(vec![data.len()], data)))
+}
+
+// ---------- collections ----------
+
+// ---------- 64-bit whole numbers ----------
+
+fn whole_arg(v: &Value, name: &str) -> Result<i64, String> {
+    v.as_int().ok_or_else(|| format!("{} needs a whole number, not {}", name, v.show()))
+}
+
+/// int(x): x as a 64-bit whole number.
+fn b_int(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "int")?;
+    Ok(Value::Int(whole_arg(&a[0], "int")?))
+}
+
+/// ints(n): a row of n integers, all 0. ints(list): the same numbers as integers.
+fn b_ints(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "ints")?;
+    if let Some(n) = a[0].as_int() {
+        if n < 0 {
+            return Err("ints needs a size that is zero or more".into());
+        }
+        return Ok(Value::Ints(Rc::new(vec![0; n as usize])));
+    }
+    let mut out = vec![];
+    for v in iter_items(&a[0])? {
+        out.push(whole_arg(&v, "ints")?);
+    }
+    Ok(Value::Ints(Rc::new(out)))
+}
+
+/// popcount(x): how many of the 64 bits are set.
+fn b_popcount(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "popcount")?;
+    Ok(Value::Int(whole_arg(&a[0], "popcount")?.count_ones() as i64))
+}
+
+/// lowest_bit(x): the position of the lowest set bit (64 if there is none).
+fn b_lowest_bit(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "lowest_bit")?;
+    Ok(Value::Int(whole_arg(&a[0], "lowest_bit")?.trailing_zeros() as i64))
+}
+
+/// highest_bit(x): the position of the highest set bit (-1 if there is none).
+fn b_highest_bit(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "highest_bit")?;
+    Ok(Value::Int(63 - whole_arg(&a[0], "highest_bit")?.leading_zeros() as i64))
+}
+
+/// div(a, b): a divided by b, dropping any remainder.
+fn b_div(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "div")?;
+    let (x, y) = (whole_arg(&a[0], "div")?, whole_arg(&a[1], "div")?);
+    if y == 0 {
+        return Err("can't divide by 0".into());
+    }
+    Ok(Value::Int(x.wrapping_div(y)))
+}
+
+/// rand_bits(): 64 random bits as an integer.
+fn b_rand_bits(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "rand_bits")?;
+    Ok(Value::Int(next_u64() as i64))
+}
+
+fn b_len(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "len")?;
+    if let Value::Ints(l) = &a[0] {
+        return Ok(Value::Num(l.len() as f64));
+    }
+    Ok(Value::Num(match &a[0] {
+        Value::List(l) => l.len(),
+        Value::Str(st) => st.chars().count(),
+        Value::Map(m) => m.len(),
+        Value::Tensor(t) if !t.shape.is_empty() => t.shape[0],
+        other => return Err(format!("a {} has no length", other.kind())),
+    } as f64))
+}
+
+fn b_push(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "push")?;
+    let mut items = iter_items(&a[0])?;
+    items.push(a[1].clone());
+    Ok(pack_list(items))
+}
+
+fn b_map(it: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "map")?;
+    let mut out = vec![];
+    for item in iter_items(&a[0])? {
+        out.push(it.call_native(&a[1], vec![item])?);
+    }
+    Ok(pack_list(out))
+}
+
+fn b_filter(it: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "filter")?;
+    let mut out = vec![];
+    for item in iter_items(&a[0])? {
+        match it.call_native(&a[1], vec![item.clone()])? {
+            Value::Bool(true) => out.push(item),
+            Value::Bool(false) | Value::Nothing => {}
+            other => return Err(format!("the function given to filter must answer yes or no, not a {}", other.kind())),
+        }
+    }
+    Ok(pack_list(out))
+}
+
+fn b_reduce(it: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 3, "reduce")?;
+    let mut total = a[2].clone();
+    for item in iter_items(&a[0])? {
+        total = it.call_native(&a[1], vec![total, item])?;
+    }
+    Ok(total)
+}
+
+fn b_keys(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "keys")?;
+    match &a[0] {
+        Value::Map(m) => Ok(Value::List(Rc::new(m.iter().map(|(k, _)| Value::Str(k.clone())).collect()))),
+        other => Err(format!("keys needs a map, not a {}", other.kind())),
+    }
+}
+
+fn b_values(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "values")?;
+    match &a[0] {
+        Value::Map(m) => Ok(pack_list(m.iter().map(|(_, v)| v.clone()).collect())),
+        other => Err(format!("values needs a map, not a {}", other.kind())),
+    }
+}
+
+fn b_has(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "has")?;
+    Ok(Value::Bool(match (&a[0], &a[1]) {
+        (Value::Str(hay), Value::Str(needle)) => hay.contains(&**needle),
+        (Value::Map(m), Value::Str(k)) => m.iter().any(|(k2, _)| k2 == k),
+        (coll, x) => iter_items(coll)?.iter().any(|v| v.equals(x)),
+    }))
+}
+
+fn b_join(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.is_empty() || a.len() > 2 {
+        return Err("join takes a list and, optionally, the text to put between items".into());
+    }
+    let sep = if a.len() == 2 { text(&a[1], "join")? } else { "".into() };
+    let parts: Vec<String> = iter_items(&a[0])?.iter().map(|v| v.show()).collect();
+    Ok(s(parts.join(&sep)))
+}
+
+fn b_split(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.is_empty() || a.len() > 2 {
+        return Err("split takes text and, optionally, the separator".into());
+    }
+    let src = text(&a[0], "split")?;
+    let parts: Vec<Value> = if a.len() == 2 {
+        let sep = text(&a[1], "split")?;
+        src.split(&*sep).map(s).collect()
+    } else {
+        src.split_whitespace().map(s).collect()
+    };
+    Ok(Value::List(Rc::new(parts)))
+}
+
+fn b_sort(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "sort")?;
+    let mut items = iter_items(&a[0])?;
+    if items.iter().all(|v| v.scalar().is_some()) {
+        items.sort_by(|x, y| x.scalar().partial_cmp(&y.scalar()).unwrap_or(std::cmp::Ordering::Equal));
+    } else if items.iter().all(|v| matches!(v, Value::Str(_))) {
+        items.sort_by(|x, y| x.show().cmp(&y.show()));
+    } else {
+        return Err("sort needs all numbers or all text".into());
+    }
+    Ok(pack_list(items))
+}
+
+fn b_reverse(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "reverse")?;
+    if let Value::Str(st) = &a[0] {
+        return Ok(s(st.chars().rev().collect::<String>()));
+    }
+    let mut items = iter_items(&a[0])?;
+    items.reverse();
+    Ok(pack_list(items))
+}
+
+fn b_slice(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() < 2 || a.len() > 3 {
+        return Err("slice takes a list or text, a start, and optionally an end".into());
+    }
+    let items = iter_items(&a[0])?;
+    let n = items.len() as i64;
+    let fix = |x: f64| -> usize {
+        let i = x as i64;
+        (if i < 0 { i + n } else { i }).clamp(0, n) as usize
+    };
+    let start = fix(num(&a[1], "slice")?);
+    let end = if a.len() == 3 { fix(num(&a[2], "slice")?) } else { n as usize };
+    let part: Vec<Value> = if start < end { items[start..end].to_vec() } else { vec![] };
+    if let Value::Str(_) = &a[0] {
+        return Ok(s(part.iter().map(|v| v.show()).collect::<String>()));
+    }
+    Ok(pack_list(part))
+}
+
+// ---------- text ----------
+
+fn b_upper(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "upper")?;
+    Ok(s(text(&a[0], "upper")?.to_uppercase()))
+}
+
+fn b_lower(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "lower")?;
+    Ok(s(text(&a[0], "lower")?.to_lowercase()))
+}
+
+fn b_trim(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "trim")?;
+    Ok(s(text(&a[0], "trim")?.trim()))
+}
+
+fn b_replace(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 3, "replace")?;
+    let (src, from, to) = (text(&a[0], "replace")?, text(&a[1], "replace")?, text(&a[2], "replace")?);
+    Ok(s(src.replace(&*from, &to)))
+}
+
+fn b_lines(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "lines")?;
+    Ok(Value::List(Rc::new(text(&a[0], "lines")?.lines().map(s).collect())))
+}
+
+fn b_text(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "text")?;
+    Ok(s(a[0].show()))
+}
+
+fn b_number(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "number")?;
+    match &a[0] {
+        Value::Str(st) => st
+            .trim()
+            .replace('_', "")
+            .parse::<f64>()
+            .map(Value::Num)
+            .map_err(|_| format!("\"{}\" isn't a number", st)),
+        Value::Bool(b) => Ok(Value::Num(if *b { 1.0 } else { 0.0 })),
+        v => num(v, "number").map(Value::Num),
+    }
+}
+
+fn b_kind(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "kind")?;
+    Ok(s(a[0].kind()))
+}
+
+// ---------- the outside world ----------
+
+thread_local! {
+    /// Files packed into a compiled program with `antares build --embed`.
+    static EMBEDDED: std::cell::RefCell<Vec<(&'static str, &'static [u8])>> = std::cell::RefCell::new(Vec::new());
+}
+
+/// Makes embedded files available under the names "embedded:<file name>".
+pub fn set_embedded(files: &[(&'static str, &'static [u8])]) {
+    EMBEDDED.with(|e| *e.borrow_mut() = files.to_vec());
+}
+
+/// The bytes of "embedded:<name>", if the path has that form and the file was embedded.
+fn embedded_file(path: &str) -> Option<Option<&'static [u8]>> {
+    let name = path.strip_prefix("embedded:")?;
+    Some(EMBEDDED.with(|e| e.borrow().iter().find(|(n, _)| *n == name).map(|(_, b)| *b)))
+}
+
+thread_local! {
+    static PROGRAM_FOLDER: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
+/// Records where the running program lives (the script, or the compiled executable).
+pub fn set_program_folder(file: &std::path::Path) {
+    let dir = std::fs::canonicalize(file)
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut text = dir.to_string_lossy().replace('\\', "/");
+    if let Some(rest) = text.strip_prefix("//?/") {
+        text = rest.to_string();
+    }
+    PROGRAM_FOLDER.with(|f| *f.borrow_mut() = Some(text));
+}
+
+/// program_folder(): the folder the running program is in, so it can find
+/// files that sit next to it wherever it is started from.
+fn b_program_folder(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "program_folder")?;
+    Ok(s(PROGRAM_FOLDER.with(|f| f.borrow().clone()).unwrap_or_else(|| ".".into())))
+}
+
+fn b_read(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "read")?;
+    let p = text(&a[0], "read")?;
+    std::fs::read_to_string(&*p).map(s).map_err(|e| format!("couldn't read the file \"{}\": {}", p, e))
+}
+
+fn b_write(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "write")?;
+    let p = text(&a[0], "write")?;
+    std::fs::write(&*p, a[1].show()).map_err(|e| format!("couldn't write the file \"{}\": {}", p, e))?;
+    Ok(Value::Nothing)
+}
+
+fn b_input(_: &mut Interp, a: Vec<Value>) -> Res {
+    if let Some(p) = a.first() {
+        print!("{}", p.show());
+        let _ = std::io::stdout().flush();
+    }
+    let mut line = String::new();
+    let n = std::io::stdin().read_line(&mut line).map_err(|e| format!("couldn't read input: {}", e))?;
+    if n == 0 {
+        return Ok(Value::Nothing);
+    }
+    Ok(s(line.trim_end_matches(&['\n', '\r'][..])))
+}
+
+fn b_clock(_: &mut Interp, _: Vec<Value>) -> Res {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    Ok(Value::Num(t))
+}
+
+fn b_fail(_: &mut Interp, a: Vec<Value>) -> Res {
+    Err(a.first().map(|v| v.show()).unwrap_or_else(|| "the program asked to stop".into()))
+}
+
+fn b_check(_: &mut Interp, a: Vec<Value>) -> Res {
+    match a.first() {
+        Some(Value::Bool(true)) => Ok(Value::Nothing),
+        Some(Value::Bool(false)) => Err(a.get(1).map(|v| v.show()).unwrap_or_else(|| "a check failed".into())),
+        _ => Err("check needs a yes/no value, like check(x > 0, \"x must be positive\")".into()),
+    }
+}
+
+// ---------- games and live screens ----------
+
+#[cfg(windows)]
+mod console {
+    use std::ffi::c_void;
+    unsafe extern "C" {
+        fn _kbhit() -> i32;
+        fn _getch() -> i32;
+    }
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+        fn PeekNamedPipe(
+            handle: *mut c_void,
+            buf: *mut c_void,
+            size: u32,
+            read: *mut u32,
+            avail: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+    }
+
+    /// Whether input is waiting to be read (a pipe from another program, or keys typed in a console).
+    pub fn input_waiting() -> bool {
+        unsafe {
+            let h = GetStdHandle(-10i32 as u32);
+            let mut avail = 0u32;
+            if PeekNamedPipe(h, std::ptr::null_mut(), 0, std::ptr::null_mut(), &mut avail, std::ptr::null_mut()) != 0 {
+                return avail > 0;
+            }
+            _kbhit() != 0
+        }
+    }
+
+    /// Lets the Windows console understand cursor-movement codes.
+    pub fn enable_ansi() {
+        unsafe {
+            let h = GetStdHandle(-11i32 as u32);
+            let mut mode = 0u32;
+            if GetConsoleMode(h, &mut mode) != 0 {
+                SetConsoleMode(h, mode | 0x0004);
+            }
+        }
+    }
+
+    /// The key waiting to be read, if any, without pausing the program.
+    pub fn poll_key() -> Option<String> {
+        unsafe {
+            if _kbhit() == 0 {
+                return None;
+            }
+            let c = _getch();
+            if c == 0 || c == 224 {
+                return Some(
+                    match _getch() {
+                        72 => "up",
+                        80 => "down",
+                        75 => "left",
+                        77 => "right",
+                        _ => "other",
+                    }
+                    .to_string(),
+                );
+            }
+            Some(match c {
+                13 => "enter".to_string(),
+                27 => "escape".to_string(),
+                32 => "space".to_string(),
+                8 => "backspace".to_string(),
+                c if (33..127).contains(&c) => (c as u8 as char).to_ascii_lowercase().to_string(),
+                _ => "other".to_string(),
+            })
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod console {
+    pub fn enable_ansi() {}
+    pub fn poll_key() -> Option<String> {
+        None
+    }
+    pub fn input_waiting() -> bool {
+        false
+    }
+}
+
+fn ansi_ready() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(console::enable_ansi);
+}
+
+fn b_key(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "key")?;
+    Ok(match console::poll_key() {
+        Some(k) => s(k),
+        None => Value::Nothing,
+    })
+}
+
+fn b_input_waiting(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "input_waiting")?;
+    Ok(Value::Bool(console::input_waiting()))
+}
+
+fn b_wait(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "wait")?;
+    let secs = num(&a[0], "wait")?;
+    if secs > 0.0 && secs.is_finite() {
+        std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+    }
+    Ok(Value::Nothing)
+}
+
+fn b_clear(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "clear")?;
+    ansi_ready();
+    print!("\x1b[2J\x1b[H");
+    let _ = std::io::stdout().flush();
+    Ok(Value::Nothing)
+}
+
+/// Redraws the screen in place: writes the text from the top-left corner
+/// in one go, so animation doesn't flicker.
+fn b_draw(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "draw")?;
+    ansi_ready();
+    let mut out = String::from("\x1b[H");
+    for line in a[0].show().lines() {
+        out.push_str(line);
+        out.push_str("\x1b[K\n");
+    }
+    out.push_str("\x1b[J");
+    let mut so = std::io::stdout().lock();
+    let _ = so.write_all(out.as_bytes());
+    let _ = so.flush();
+    Ok(Value::Nothing)
+}
+
+// ---------- JSON ----------
+
+fn from_json(j: &J) -> Value {
+    match j {
+        J::Null => Value::Nothing,
+        J::Bool(b) => Value::Bool(*b),
+        J::Num(n) => Value::Num(*n),
+        J::Str(st) => s(st),
+        J::Arr(a) => pack_list(a.iter().map(from_json).collect()),
+        J::Obj(m) => Value::Map(Rc::new(m.iter().map(|(k, v)| (k.as_str().into(), from_json(v))).collect())),
+    }
+}
+
+fn json_num(x: f64) -> String {
+    if x.is_finite() {
+        format!("{}", x)
+    } else {
+        "null".into()
+    }
+}
+
+fn json_tensor(shape: &[usize], data: &[f64]) -> String {
+    if shape.is_empty() {
+        return json_num(data[0]);
+    }
+    if shape[0] == 0 {
+        return "[]".into();
+    }
+    let sub = (data.len() / shape[0]).max(1);
+    let parts: Vec<String> = data.chunks(sub).map(|c| json_tensor(&shape[1..], c)).collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn to_json(v: &Value) -> Result<String, String> {
+    Ok(match v {
+        Value::Unset | Value::Nothing => "null".into(),
+        Value::Bool(b) => b.to_string(),
+        Value::Num(n) => json_num(*n),
+        Value::Tensor(t) => json_tensor(&t.shape, &t.data.borrow()),
+        Value::Str(st) => json::escape(st),
+        Value::List(l) => {
+            let mut parts = vec![];
+            for x in l.iter() {
+                parts.push(to_json(x)?);
+            }
+            format!("[{}]", parts.join(","))
+        }
+        Value::Map(m) => {
+            let mut parts = vec![];
+            for (k, x) in m.iter() {
+                parts.push(format!("{}:{}", json::escape(k), to_json(x)?));
+            }
+            format!("{{{}}}", parts.join(","))
+        }
+        other => return Err(format!("a {} can't be written as JSON", other.kind())),
+    })
+}
+
+fn b_save(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "save")?;
+    let p = text(&a[1], "save").map_err(|_| "save takes the value first and the file name second, like save(weights, \"weights.json\")".to_string())?;
+    std::fs::write(&*p, to_json(&a[0])?).map_err(|e| format!("couldn't save to \"{}\": {}", p, e))?;
+    Ok(Value::Nothing)
+}
+
+fn b_load(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "load")?;
+    let p = text(&a[0], "load")?;
+    let src = std::fs::read_to_string(&*p).map_err(|e| format!("couldn't load \"{}\": {}", p, e))?;
+    let j = json::parse(&src).map_err(|e| format!("\"{}\" isn't a file made by save: {}", p, e))?;
+    Ok(from_json(&j))
+}
+
+fn b_exists(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "exists")?;
+    let p = text(&a[0], "exists")?;
+    if let Some(found) = embedded_file(&p) {
+        return Ok(Value::Bool(found.is_some()));
+    }
+    Ok(Value::Bool(std::path::Path::new(&*p).exists()))
+}
+
+fn b_json(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "json")?;
+    Ok(from_json(&json::parse(&text(&a[0], "json")?)?))
+}
+
+fn b_to_json(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "to_json")?;
+    Ok(s(to_json(&a[0])?))
+}
+
+pub fn all() -> Vec<(&'static str, NativeFn)> {
+    vec![
+        ("zeros", b_zeros as NativeFn),
+        ("ones", b_ones),
+        ("rand", b_rand),
+        ("randn", b_randn),
+        ("seed", b_seed),
+        ("range", b_range),
+        ("shape", b_shape),
+        ("reshape", b_reshape),
+        ("t", b_t),
+        ("sum", b_sum),
+        ("mean", b_mean),
+        ("max", b_max),
+        ("min", b_min),
+        ("argmax", b_argmax),
+        ("softmax", b_softmax),
+        ("onehot", b_onehot),
+        ("grad", b_grad),
+        ("exp", b_exp),
+        ("log", b_log),
+        ("tanh", b_tanh),
+        ("sigmoid", b_sigmoid),
+        ("relu", b_relu),
+        ("sqrt", b_sqrt),
+        ("abs", b_abs),
+        ("sin", b_sin),
+        ("cos", b_cos),
+        ("floor", b_floor),
+        ("round", b_round),
+        ("trunc", b_trunc),
+        ("clip", b_clip),
+        ("sum_rows", b_sum_rows),
+        ("rows", b_rows),
+        ("compact", b_compact),
+        ("expand", b_expand),
+        ("screlu", b_screlu),
+        ("sum_product", b_sum_product),
+        ("screlu_dot", b_screlu_dot),
+        ("update_rows", b_update_rows),
+        ("read_binary", b_read_binary),
+        ("input_waiting", b_input_waiting),
+        ("len", b_len),
+        ("int", b_int),
+        ("ints", b_ints),
+        ("popcount", b_popcount),
+        ("lowest_bit", b_lowest_bit),
+        ("highest_bit", b_highest_bit),
+        ("div", b_div),
+        ("rand_bits", b_rand_bits),
+        ("push", b_push),
+        ("map", b_map),
+        ("filter", b_filter),
+        ("reduce", b_reduce),
+        ("keys", b_keys),
+        ("values", b_values),
+        ("has", b_has),
+        ("join", b_join),
+        ("split", b_split),
+        ("sort", b_sort),
+        ("reverse", b_reverse),
+        ("slice", b_slice),
+        ("upper", b_upper),
+        ("lower", b_lower),
+        ("trim", b_trim),
+        ("replace", b_replace),
+        ("lines", b_lines),
+        ("text", b_text),
+        ("number", b_number),
+        ("kind", b_kind),
+        ("read", b_read),
+        ("write", b_write),
+        ("input", b_input),
+        ("clock", b_clock),
+        ("fail", b_fail),
+        ("check", b_check),
+        ("json", b_json),
+        ("to_json", b_to_json),
+        ("save", b_save),
+        ("load", b_load),
+        ("exists", b_exists),
+        ("program_folder", b_program_folder),
+        ("key", b_key),
+        ("wait", b_wait),
+        ("clear", b_clear),
+        ("draw", b_draw),
+    ]
+}

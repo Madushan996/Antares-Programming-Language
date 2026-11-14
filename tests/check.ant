@@ -1,0 +1,74 @@
+# Self-checks: run with `antares tests/check.ant`
+
+# gradients match the maths
+learn w = [1, 2, 3]
+loss = sum(w ^ 2 * 3)
+check(grad(loss, w) == [6, 12, 18], "power gradient")
+
+learn m = [[1, 2], [3, 4]]
+v = [1, 1]
+check(grad(sum(m @ v), m) == [[1, 1], [1, 1]], "matmul gradient")
+check(grad(sum(t(m) * [[1, 2], [3, 4]]), m) == [[1, 3], [2, 4]], "transpose gradient")
+check(grad(m[1, 0] * 5, m) == [[0, 0], [5, 0]], "index gradient")
+
+# numeric gradient check through a small network
+seed(3)
+learn a = randn(3, 4)
+xs = randn(5, 3)
+to f() = mean(softmax(tanh(xs @ a)) * range(4)) + mean(sigmoid(a) / (1 + exp(a)))
+g = grad(f(), a)
+base = f()
+# a is learnable so we can't poke it; compare against a descend step instead
+before = f() + 0
+descend f() by 0.01
+after = f() + 0
+predicted = before - 0.01 * sum(g * g)
+check(abs(after - predicted) < 1e-5, "descend follows the gradient: {after} vs {predicted}")
+
+# broadcasting
+check([[1, 2], [3, 4]] + [10, 20] == [[11, 22], [13, 24]], "broadcast rows")
+check(shape(zeros(2, 3) + ones(3)) == [2, 3], "broadcast shape")
+check(2 ^ 3 ^ 2 == 512, "power is right-associative")
+check(-2 ^ 2 == -4, "minus binds looser than power")
+check(7 % 3 == 1 and 10 / 4 == 2.5, "arithmetic")
+
+# classification with softmax learns
+seed(5)
+pts = randn(60, 2)
+labels = map(pts, p => when_pos(p[0] + p[1]))
+to when_pos(s) { when s > 0 { 1 } else { 0 } }
+target = onehot(labels, 2)
+learn cw = zeros(2, 2)
+repeat 200 {
+    ce = -sum(target * log(softmax(pts @ cw))) / 60
+    descend ce by 0.5
+}
+right = sum(map(range(60), i => same(argmax(pts[i] @ cw), labels[i])))
+to same(x, y) { when x == y { 1 } else { 0 } }
+check(right >= 57, "classifier accuracy {right}/60")
+
+# closures, collections, text
+to adder(n) = x => x + n
+add5 = adder(5)
+check(add5(10) == 15, "closures")
+check(reduce([1, 2, 3, 4], (acc, x) => acc + x, 0) == 10, "reduce")
+check(filter(range(10), x => x % 2 == 0) == [0, 2, 4, 6, 8], "filter")
+check(join(split("a,b,c", ","), "-") == "a-b-c", "split/join")
+check(slice("antares", 0, 3) == "ant" and reverse([1, 2, 3]) == [3, 2, 1], "slice/reverse")
+data = json("\{\"n\": [1, 2, 3], \"ok\": true, \"who\": \"me\"}")
+check(sum(data.n) == 6 and data.ok and data.who == "me", "json in")
+check(json(to_json(data)) == data, "json round trip")
+words = ["b", "a"]
+words = push(words, "c")
+check(sort(words) == ["a", "b", "c"] and has(words, "c") and not has(words, "z"), "lists")
+grid = [[1, 2], [3, 4]]
+grid[0, 1] = 9
+check(grid == [[1, 9], [3, 4]], "tensor set")
+n = 0
+while yes {
+    n = n + 1
+    when n % 2 == 0 { skip }
+    when n > 6 { stop }
+}
+check(n == 7, "while/skip/stop")
+show "all checks passed"

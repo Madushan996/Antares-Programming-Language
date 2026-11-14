@@ -1,0 +1,7 @@
+/target
+*.exe
+
+# files written by the tests and examples
+test_state.json
+xor_model.json
+__pycache__/

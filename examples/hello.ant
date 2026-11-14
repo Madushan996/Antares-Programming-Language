@@ -1,0 +1,44 @@
+# The basics of Antares
+
+name = "world"
+show "Hello, {name}!"
+
+# Numbers and tensors are the same thing
+a = [1, 2, 3]
+b = [[1, 2], [3, 4]]
+show a * 2 + 1
+show b @ b
+show "mean of a is {mean(a)}"
+
+# Functions are defined with `to`
+to square(x) = x * x
+
+to describe(n) {
+    when n < 0 { give "negative" }
+    when n == 0 { "zero" } else { "positive" }
+}
+
+show square(7), describe(-3), describe(0), describe(5)
+
+# Pipelines read left to right
+[3, 1, 2]
+    -> sort
+    -> map(x => x * 10)
+    -> show_it
+
+to show_it(x) { show "piped:", x }
+
+# Lists, maps, loops
+person = {name: "Ada", skills: ["maths", "engines"]}
+person.age = 36
+person.skills[0] = "mathematics"
+show person
+
+each skill in person.skills { show " -", upper(skill) }
+
+total = 0
+repeat 5 as i { total = total + i }
+show "1+2+3+4+5 =", total
+
+to fib(n) { when n < 2 { n } else { fib(n - 1) + fib(n - 2) } }
+show "fib(20) =", fib(20)
