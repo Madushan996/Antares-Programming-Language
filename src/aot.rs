@@ -35,6 +35,11 @@ enum Ty {
     Int,
     /// A row of 64-bit integers.
     IArr,
+    /// An ordinary number that only ever holds whole numbers counted in small
+    /// steps (loop counters and the like), kept as a machine integer. It
+    /// behaves exactly like `Num`: it is turned into one wherever it is used,
+    /// except as a position in a row, in comparisons and with `%`.
+    Whole,
 }
 
 fn join(a: Ty, b: Ty) -> Ty {
@@ -51,7 +56,7 @@ fn join(a: Ty, b: Ty) -> Ty {
 fn rust_ty(t: Ty) -> &'static str {
     match t {
         Ty::Unit => "()",
-        Ty::Int => "i64",
+        Ty::Int | Ty::Whole => "i64",
         Ty::IArr => "IA",
         Ty::Num | Ty::ILit => "f64",
         Ty::Bool => "bool",
@@ -63,7 +68,7 @@ fn rust_ty(t: Ty) -> &'static str {
 fn zero_of(t: Ty) -> &'static str {
     match t {
         Ty::Num | Ty::ILit => "0.0f64",
-        Ty::Int => "0i64",
+        Ty::Int | Ty::Whole => "0i64",
         Ty::IArr => "iarr0()",
         Ty::Bool => "false",
         Ty::Arr => "arr0()",
@@ -79,9 +84,13 @@ fn conv(code: String, from: Ty, to: Ty) -> String {
     match (from, to) {
         (Ty::Int, Ty::Num) => return format!("(({}) as f64)", code),
         (Ty::Num, Ty::Int) => return format!("n2i({}, 0)?", code),
+        (Ty::Whole, Ty::Num) => return format!("(({}) as f64)", code),
+        (Ty::Whole, Ty::Int) => return code,
+        (Ty::Num, Ty::Whole) => return format!("(({}) as i64)", code),
         _ => {}
     }
     let as_dyn = match from {
+        Ty::Whole => format!("Value::Num(({}) as f64)", code),
         Ty::Int => format!("Value::Int({})", code),
         Ty::IArr => format!("Value::Ints({})", code),
         Ty::Unit => format!("{{ let _ = {}; Value::Nothing }}", code),
@@ -96,6 +105,7 @@ fn conv(code: String, from: Ty, to: Ty) -> String {
         Ty::Arr => format!("as_arr({}, 0)?", as_dyn),
         Ty::Int => format!("as_int({}, 0)?", as_dyn),
         Ty::IArr => format!("as_iarr({}, 0)?", as_dyn),
+        Ty::Whole => format!("(as_num({}, 0)? as i64)", as_dyn),
         _ => as_dyn,
     }
 }
@@ -298,6 +308,16 @@ struct Cx<'a> {
     plain: bool,
 }
 
+/// Where a variable gets a value from (for finding whole-number variables).
+enum Src {
+    /// An assignment, or an input of a function called by name.
+    Expr(*const Expr, usize),
+    /// The variable of an `each` loop over this.
+    Each(*const Expr, usize),
+    /// Anything else.
+    Other,
+}
+
 /// What a function body does, for deciding how to call it.
 #[derive(Default)]
 struct Scan {
@@ -407,7 +427,10 @@ impl<'a> Cx<'a> {
                 if t == 0 && (self.is_builtin(i) || self.static_fn.contains_key(&i)) {
                     return Dyn;
                 }
-                self.var_ty(t, i)
+                match self.var_ty(t, i) {
+                    Whole => Num,
+                    other => other,
+                }
             }
             Expr::List(items) => {
                 if items.is_empty() {
@@ -904,6 +927,7 @@ impl<'a> Cx<'a> {
             Ty::Bool => (p, Ty::Bool),
             Ty::Arr => (format!("{}.clone()", p), Ty::Arr),
             Ty::Int => (p, Ty::Int),
+            Ty::Whole => (format!("({} as f64)", p), Ty::Num),
             Ty::IArr => (format!("{}.clone()", p), Ty::IArr),
             _ => (format!("get(&{}, {:?}, {})?", p, name, line), Ty::Dyn),
         }
@@ -915,6 +939,9 @@ impl<'a> Cx<'a> {
             if c == c.trunc() && c.abs() < 9.0e15 {
                 return format!("({}i64)", c as i64);
             }
+        }
+        if let Some(c) = self.icode(e, sc, false) {
+            return c;
         }
         let (c, t) = self.expr(e, sc);
         match t {
@@ -1060,6 +1087,27 @@ impl<'a> Cx<'a> {
                         }
                     }
                 }
+                if ta0 == Ty::Num && tb0 == Ty::Num {
+                    let sym = match op {
+                        BinOp::Lt => "<",
+                        BinOp::Gt => ">",
+                        BinOp::Le => "<=",
+                        BinOp::Ge => ">=",
+                        BinOp::Eq => "==",
+                        BinOp::Ne => "!=",
+                        _ => "",
+                    };
+                    if !sym.is_empty() {
+                        if let (Some(x), Some(y)) = (self.icode(a, sc, false), self.icode(b, sc, false)) {
+                            return (format!("({} {} {})", x, sym, y), Ty::Bool);
+                        }
+                    }
+                    if *op == BinOp::Mod {
+                        if let Some(x) = self.icode(e, sc, false) {
+                            return (format!("(({}) as f64)", x), Ty::Num);
+                        }
+                    }
+                }
                 let (ca, ta) = self.expr(a, sc);
                 let (cb, tb) = self.expr(b, sc);
                 if ta == Ty::Num && tb == Ty::Num {
@@ -1188,6 +1236,10 @@ impl<'a> Cx<'a> {
                     }
                     let mut parts = vec![];
                     for (i, a) in args.iter().enumerate() {
+                        if self.var_ty_param(s, i) == Ty::Whole {
+                            parts.push(self.whole_code(a, sc));
+                            continue;
+                        }
                         let (c, t) = self.expr(a, sc);
                         parts.push(conv(c, t, self.var_ty_param(s, i)));
                     }
@@ -1230,10 +1282,13 @@ impl<'a> Cx<'a> {
                 if want == Ty::Num || want == Ty::Int {
                     let it = self.ty(&idx[0], sc);
                     // which reader: (row kind, position kind)
+                    let at = self.icode(&idx[0], sc, true);
                     let (ic, reader) = if want == Ty::Int {
-                        (self.int_code(&idx[0], sc, *line), "iget")
+                        (at.unwrap_or_else(|| self.int_code(&idx[0], sc, *line)), "iget")
                     } else if it == Ty::Int {
                         (self.int_code(&idx[0], sc, *line), "aget_i")
+                    } else if let Some(c) = at {
+                        (c, "aget_i")
                     } else {
                         (self.expr(&idx[0], sc).0, "aget")
                     };
@@ -1290,6 +1345,322 @@ impl<'a> Cx<'a> {
 
     fn var_ty_param(&self, s: usize, i: usize) -> Ty {
         self.var_ty(s, i)
+    }
+
+    /// `range(...)` with number inputs and a constant step: its start (if
+    /// given), end and step.
+    fn range_parts<'e>(&self, iter: &'e Expr, sc: usize) -> Option<(Option<&'e Expr>, &'e Expr, f64)> {
+        let Expr::Call(f, args, _) = iter else { return None };
+        let Callee::Builtin(i) = self.callee(f, sc) else { return None };
+        if self.bnames[i] != "range" || !args.iter().all(|a| matches!(self.ty(a, sc), Ty::Num | Ty::Int)) {
+            return None;
+        }
+        match &args[..] {
+            [z] => Some((None, z, 1.0)),
+            [a, z] => Some((Some(a), z, 1.0)),
+            [a, z, st] => {
+                let c = self.const_of(st, sc)?;
+                if c == 0.0 || !c.is_finite() {
+                    None
+                } else {
+                    Some((Some(a), z, c))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The place of a variable kept as a machine integer (`Ty::Whole`).
+    fn whole_place(&self, sc: usize, depth: u32, idx: usize) -> Option<String> {
+        let t = self.resolve(sc, depth);
+        if t == 0 && (self.consts.contains_key(&idx) || self.is_builtin(idx)) {
+            return None;
+        }
+        (self.scopes[t].vars.get(idx) == Some(&Ty::Whole) && !self.scopes[t].captured[idx]).then(|| self.place(t, idx))
+    }
+
+    /// Integer code for an ordinary-number expression whose value is certainly
+    /// whole, giving exactly the number the ordinary calculation would.
+    /// Without `linear` that is only constants, whole-number variables, such a
+    /// variable plus or minus a constant, and `% constant` of these: whole-number
+    /// variables count in small steps, so these stay far below 2^53, where
+    /// ordinary numbers stop being exact. With `linear` (for positions in a
+    /// row) it also allows sums and constant multiples, whose results are
+    /// exact unless far too large to be a position anyway.
+    fn icode(&self, e: &Expr, sc: usize, linear: bool) -> Option<String> {
+        let lit = |c: f64, lim: f64| c == c.trunc() && c.abs() <= lim;
+        if let Some(c) = self.const_of(e, sc) {
+            return lit(c, 9.0e15).then(|| format!("({}i64)", c as i64));
+        }
+        match e {
+            Expr::Var { depth, idx, .. } => self.whole_place(sc, *depth, *idx as usize),
+            Expr::Neg(a, _) if linear => Some(format!("({}).wrapping_neg()", self.icode(a, sc, true)?)),
+            Expr::Binary(op @ (BinOp::Add | BinOp::Sub), a, b, _) => {
+                if !linear {
+                    let small = |x: &Expr| self.const_of(x, sc).is_some_and(|c| lit(c, 4294967296.0));
+                    let var = |x: &Expr| matches!(x, Expr::Var { .. });
+                    if !((var(a) && small(b)) || (*op == BinOp::Add && small(a) && var(b))) {
+                        return None;
+                    }
+                }
+                let f = if *op == BinOp::Add { "wrapping_add" } else { "wrapping_sub" };
+                Some(format!("({}).{}({})", self.icode(a, sc, linear)?, f, self.icode(b, sc, linear)?))
+            }
+            Expr::Binary(BinOp::Mul, a, b, _) if linear => {
+                let small = |x: &Expr| self.const_of(x, sc).is_some_and(|c| lit(c, 1048576.0));
+                if !(small(a) || small(b)) {
+                    return None;
+                }
+                Some(format!("({}).wrapping_mul({})", self.icode(a, sc, true)?, self.icode(b, sc, true)?))
+            }
+            Expr::Binary(BinOp::Mod, a, b, _) => {
+                let c = self.const_of(b, sc)?;
+                if c == 0.0 || !lit(c, 4294967296.0) {
+                    return None;
+                }
+                Some(format!("({}).wrapping_rem_euclid({}i64)", self.icode(a, sc, linear)?, c as i64))
+            }
+            _ => None,
+        }
+    }
+
+    /// Code for a value given to a whole-number variable (one of the forms
+    /// `counts` accepts).
+    fn whole_code(&self, e: &Expr, sc: usize) -> String {
+        self.icode(e, sc, false).expect("a whole-number variable is only given whole-number counts")
+    }
+
+    /// Whether `e` is a whole number counted in small steps, given the
+    /// variables `w` that are: a constant, one of those variables, or one of
+    /// them plus or minus a small constant.
+    fn counts(&self, e: &Expr, sc: usize, w: &std::collections::HashSet<(usize, usize)>) -> bool {
+        let lit = |c: f64, lim: f64| c == c.trunc() && c.abs() <= lim;
+        if let Some(c) = self.const_of(e, sc) {
+            return lit(c, 4294967296.0);
+        }
+        let var = |x: &Expr| match x {
+            Expr::Var { depth, idx, .. } => {
+                let t = self.resolve(sc, *depth);
+                !(t == 0 && self.consts.contains_key(&(*idx as usize))) && w.contains(&(t, *idx as usize))
+            }
+            _ => false,
+        };
+        let step = |x: &Expr| self.const_of(x, sc).is_some_and(|c| lit(c, 64.0));
+        match e {
+            Expr::Var { .. } => var(e),
+            Expr::Binary(op @ (BinOp::Add | BinOp::Sub), a, b, _) => {
+                (var(a) && step(b)) || (*op == BinOp::Add && step(a) && var(b))
+            }
+            _ => false,
+        }
+    }
+
+    fn whole_sources(&self, stmts: &[Stmt], sc: usize, out: &mut Vec<((usize, usize), Src)>) {
+        for st in stmts {
+            match st {
+                Stmt::Assign { idx, value } => {
+                    let i = *idx as usize;
+                    if let (Expr::Lambda(def), 0) = (value, sc) {
+                        let fs = self.by_def.get(&Rc::as_ptr(def)).copied();
+                        if fs.is_some() && self.static_fn.get(&i).copied() == fs {
+                            self.whole_sources(&def.body, fs.unwrap(), out);
+                            continue;
+                        }
+                    }
+                    out.push(((sc, i), Src::Expr(value, sc)));
+                    self.whole_sources_expr(value, sc, out);
+                }
+                Stmt::AssignOuter { depth, idx, value } => {
+                    out.push(((self.resolve(sc, *depth), *idx as usize), Src::Expr(value, sc)));
+                    self.whole_sources_expr(value, sc, out);
+                }
+                Stmt::Learn { idx, value, .. } => {
+                    out.push(((sc, *idx as usize), Src::Other));
+                    self.whole_sources_expr(value, sc, out);
+                }
+                Stmt::SetPath { depth, idx, path, value, .. } => {
+                    out.push(((self.resolve(sc, *depth), *idx as usize), Src::Other));
+                    self.whole_sources_expr(value, sc, out);
+                    for a in path {
+                        if let Access::Index(es) = a {
+                            for e in es {
+                                self.whole_sources_expr(e, sc, out);
+                            }
+                        }
+                    }
+                }
+                Stmt::Show(es) => {
+                    for e in es {
+                        self.whole_sources_expr(e, sc, out);
+                    }
+                }
+                Stmt::Give(e) => {
+                    if let Some(e) = e {
+                        self.whole_sources_expr(e, sc, out);
+                    }
+                }
+                Stmt::Repeat { count, body, .. } => {
+                    // the counter of `repeat ... as i` counts in steps of 1
+                    self.whole_sources_expr(count, sc, out);
+                    self.whole_sources(body, sc, out);
+                }
+                Stmt::Each { var, iter, body, .. } => {
+                    out.push(((sc, *var as usize), Src::Each(iter, sc)));
+                    self.whole_sources_expr(iter, sc, out);
+                    self.whole_sources(body, sc, out);
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.whole_sources_expr(cond, sc, out);
+                    self.whole_sources(body, sc, out);
+                }
+                Stmt::When { arms, otherwise } => {
+                    for (c, b, _) in arms {
+                        self.whole_sources_expr(c, sc, out);
+                        self.whole_sources(b, sc, out);
+                    }
+                    if let Some(b) = otherwise {
+                        self.whole_sources(b, sc, out);
+                    }
+                }
+                Stmt::Descend { loss, rate, .. } => {
+                    self.whole_sources_expr(loss, sc, out);
+                    self.whole_sources_expr(rate, sc, out);
+                }
+                Stmt::Try { body, var, handler } => {
+                    if let Some(v) = var {
+                        out.push(((sc, *v as usize), Src::Other));
+                    }
+                    self.whole_sources(body, sc, out);
+                    self.whole_sources(handler, sc, out);
+                }
+                Stmt::Expr(e) => self.whole_sources_expr(e, sc, out),
+                Stmt::Stop(_) | Stmt::Skip(_) => {}
+            }
+        }
+    }
+
+    fn whole_sources_expr(&self, e: &Expr, sc: usize, out: &mut Vec<((usize, usize), Src)>) {
+        match e {
+            Expr::Interp(p) | Expr::List(p) => {
+                for x in p {
+                    self.whole_sources_expr(x, sc, out);
+                }
+            }
+            Expr::Map(m) => {
+                for (_, x) in m {
+                    self.whole_sources_expr(x, sc, out);
+                }
+            }
+            Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => {
+                self.whole_sources_expr(a, sc, out)
+            }
+            Expr::Binary(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+                self.whole_sources_expr(a, sc, out);
+                self.whole_sources_expr(b, sc, out);
+            }
+            Expr::Call(f, args, _) => {
+                for a in args {
+                    self.whole_sources_expr(a, sc, out);
+                }
+                match self.callee(f, sc) {
+                    Callee::Static(s) => {
+                        if args.len() == self.scopes[s].nparams && !self.scopes[s].escapes {
+                            for (i, a) in args.iter().enumerate() {
+                                out.push(((s, i), Src::Expr(a, sc)));
+                            }
+                        }
+                    }
+                    Callee::Builtin(_) => {}
+                    Callee::Dynamic => self.whole_sources_expr(f, sc, out),
+                }
+            }
+            Expr::Index(b, idx, _) => {
+                self.whole_sources_expr(b, sc, out);
+                for x in idx {
+                    self.whole_sources_expr(x, sc, out);
+                }
+            }
+            Expr::Range(a, z, _) => {
+                for x in [a, z].into_iter().flatten() {
+                    self.whole_sources_expr(x, sc, out);
+                }
+            }
+            Expr::Lambda(def) => {
+                if let Some(&s) = self.by_def.get(&Rc::as_ptr(def)) {
+                    self.whole_sources(&def.body, s, out);
+                }
+            }
+            Expr::Ask { model, prompt, .. } => {
+                self.whole_sources_expr(model, sc, out);
+                self.whole_sources_expr(prompt, sc, out);
+            }
+            Expr::ModelNew { spec, opts, .. } => {
+                self.whole_sources_expr(spec, sc, out);
+                if let Some(o) = opts {
+                    self.whole_sources_expr(o, sc, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Finds the number variables that only ever hold whole numbers counted
+    /// in small steps, and keeps them as machine integers.
+    fn infer_whole(&mut self, top: &[Stmt]) {
+        let statics: Vec<usize> = self.static_fn.values().copied().collect();
+        let mut w = std::collections::HashSet::new();
+        for t in 0..self.scopes.len() {
+            let sc = &self.scopes[t];
+            let named = statics.contains(&t) && !sc.escapes;
+            for i in 0..sc.vars.len() {
+                if sc.vars[i] != Ty::Num || sc.captured[i] {
+                    continue;
+                }
+                if t == 0 && (self.is_builtin(i) || self.static_fn.contains_key(&i) || self.consts.contains_key(&i)) {
+                    continue;
+                }
+                // inputs are known only for functions called by name
+                if t != 0 && i < sc.nparams && !named {
+                    continue;
+                }
+                w.insert((t, i));
+            }
+        }
+        let mut srcs = vec![];
+        self.whole_sources(top, 0, &mut srcs);
+        loop {
+            let mut changed = false;
+            for (v, src) in &srcs {
+                if !w.contains(v) {
+                    continue;
+                }
+                let ok = match *src {
+                    Src::Expr(e, sc) => self.counts(unsafe { &*e }, sc, &w),
+                    Src::Each(iter, sc) => match self.range_parts(unsafe { &*iter }, sc) {
+                        Some((start, _, step)) => {
+                            step == step.trunc() && step.abs() <= 64.0 && start.is_none_or(|x| self.counts(x, sc, &w))
+                        }
+                        None => false,
+                    },
+                    Src::Other => false,
+                };
+                if !ok {
+                    w.remove(v);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let explain = std::env::var("ANTARES_EXPLAIN").is_ok();
+        for &(t, i) in &w {
+            self.scopes[t].vars[i] = Ty::Whole;
+            if explain {
+                let name = if t == 0 { self.gnames.get(i).cloned().unwrap_or_default() } else { format!("variable {}", i) };
+                eprintln!("explain: in {}, {} counts in whole steps, so it is kept as a machine integer", self.scopes[t].name, name);
+            }
+        }
     }
 
     /// The depth to give a function called by name.
@@ -1709,11 +2080,19 @@ impl<'a> Cx<'a> {
                         return String::new();
                     }
                 }
+                if self.var_ty(sc, i) == Ty::Whole {
+                    let c = self.whole_code(value, sc);
+                    return self.assign(sc, i, c);
+                }
                 let (c, t) = self.expr(value, sc);
                 self.assign(sc, i, conv(c, t, self.var_ty(sc, i)))
             }
             Stmt::AssignOuter { depth, idx, value } => {
                 let t = self.resolve(sc, *depth);
+                if self.var_ty(t, *idx as usize) == Ty::Whole {
+                    let c = self.whole_code(value, sc);
+                    return self.assign(t, *idx as usize, c);
+                }
                 let (c, ty) = self.expr(value, sc);
                 self.assign(t, *idx as usize, conv(c, ty, self.var_ty(t, *idx as usize)))
             }
@@ -1730,6 +2109,8 @@ impl<'a> Cx<'a> {
                         let vc = self.num_code(value, sc);
                         let (ic, writer) = if self.ty(ie, sc) == Ty::Int {
                             (self.int_code(ie, sc, *line), "aset_i")
+                        } else if let Some(c) = self.icode(ie, sc, true) {
+                            (c, "aset_i")
                         } else {
                             (self.num_code(ie, sc), "aset")
                         };
@@ -1746,7 +2127,10 @@ impl<'a> Cx<'a> {
                 if self.var_ty(t, i) == Ty::IArr {
                     if let Some(ie) = self.fast_set(path) {
                         let vc = self.int_code(value, sc, *line);
-                        let ic = self.int_code(ie, sc, *line);
+                        let ic = match self.icode(ie, sc, true) {
+                            Some(c) => c,
+                            None => self.int_code(ie, sc, *line),
+                        };
                         return format!(
                             "{{ let v_ = {}; let i_ = {}; iset(&mut {}, i_, v_, {})?; }}\n",
                             vc,
@@ -1809,22 +2193,58 @@ impl<'a> Cx<'a> {
                     format!("repeat_dyn(&{}, {})?", conv(c, t, Ty::Dyn), line)
                 };
                 let set = match var {
-                    Some(v) => {
-                        let vt = self.var_ty(sc, *v as usize);
-                        self.assign(sc, *v as usize, conv(format!("i{}", k), Ty::Num, vt))
-                    }
+                    Some(v) => match self.var_ty(sc, *v as usize) {
+                        Ty::Whole => self.assign(sc, *v as usize, format!("(i{} as i64)", k)),
+                        vt => self.assign(sc, *v as usize, conv(format!("(i{} as f64)", k), Ty::Num, vt)),
+                    },
                     None => String::new(),
                 };
                 self.loops.push((k, self.try_depth));
                 let b = self.block(body, sc, false);
                 self.loops.pop();
+                // (the count is a whole number below 2^64, so this counts the same)
                 format!(
-                    "{{ let n{k} = {n}; let mut i{k} = 0.0f64;\n'l{k}: while i{k} < n{k} {{\ni{k} += 1.0;\n{set}{b}}} }}\n",
+                    "{{ let n{k} = ({n}) as u64; let mut i{k} = 0u64;\n'l{k}: while i{k} < n{k} {{\ni{k} += 1;\n{set}{b}}} }}\n",
                     k = k,
                     n = n,
                     set = set,
                     b = b
                 )
+            }
+            Stmt::Each { var, iter, body, line } if self.range_parts(iter, sc).is_some() => {
+                let (start, end, step) = self.range_parts(iter, sc).unwrap();
+                let k = self.fresh();
+                let v = *var as usize;
+                let whole = self.var_ty(sc, v) == Ty::Whole;
+                let s = match (start, whole) {
+                    (Some(x), true) => self.whole_code(x, sc),
+                    (Some(x), false) => self.num_code(x, sc),
+                    (None, true) => "0i64".into(),
+                    (None, false) => "0.0f64".into(),
+                };
+                let e = self.num_code(end, sc);
+                let set = if whole {
+                    self.assign(sc, v, format!("c{}", k))
+                } else {
+                    let vt = self.var_ty(sc, v);
+                    self.assign(sc, v, conv(format!("c{}", k), Ty::Num, vt))
+                };
+                self.loops.push((k, self.try_depth));
+                let b = self.block(body, sc, false);
+                self.loops.pop();
+                let cmp = if step > 0.0 { "<" } else { ">" };
+                // the same numbers range() would list, one at a time
+                if whole {
+                    format!(
+                        "{{ let mut x{k}: i64 = {s}; let e{k}: f64 = {e};\n'l{k}: while (x{k} as f64) {cmp} e{k} {{\nlet c{k} = x{k}; x{k} += {st}i64;\n{set}{b}}} }}\n",
+                        k = k, s = s, e = e, cmp = cmp, st = step as i64, set = set, b = b
+                    )
+                } else {
+                    format!(
+                        "{{ let mut x{k}: f64 = {s}; let e{k}: f64 = {e};\n'l{k}: while x{k} {cmp} e{k} {{\nlet c{k} = x{k}; x{k} += {st:?}f64;\n{set}{b}}} }}\n",
+                        k = k, s = s, e = e, cmp = cmp, st = step, set = set, b = b
+                    )
+                }
             }
             Stmt::Each { var, iter, body, line } => {
                 let k = self.fresh();
@@ -2172,6 +2592,7 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         plain: false,
     };
     cx.infer(&stmts);
+    cx.infer_whole(&stmts);
     let mut code = cx.program(&stmts, parser.files(), &src);
     // Embedded files become part of the executable.
     let mut entries = vec![];
