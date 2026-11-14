@@ -106,6 +106,86 @@ pub fn embed(files: &[(&'static str, &'static [u8])]) {
     crate::builtins::set_embedded(files);
 }
 
+/// The current call depth (compiled functions called by name receive their
+/// depth as an input instead; this is for closures and the program body).
+#[inline(always)]
+pub fn depth() -> usize {
+    unsafe { DEPTH }
+}
+
+/// Puts a function's depth into the shared counter while it calls something
+/// that may call back into closures (and restores it afterwards).
+pub struct AtDepth(usize);
+
+impl Drop for AtDepth {
+    #[inline(always)]
+    fn drop(&mut self) {
+        unsafe { DEPTH = self.0 }
+    }
+}
+
+#[inline(always)]
+pub fn at_depth(d: usize) -> AtDepth {
+    unsafe {
+        let saved = DEPTH;
+        DEPTH = d;
+        AtDepth(saved)
+    }
+}
+
+/// The deepest a function called by name may be (see `too_deep_at`).
+pub const MAX_CALL_DEPTH: usize = MAX_DEPTH;
+
+/// Endless recursion in a function that otherwise returns a `Result`.
+#[cold]
+pub fn too_deep_at<X>(name: &str) -> R<X> {
+    fail(format!("'{}' keeps calling itself without ending ({} levels deep)", name, MAX_DEPTH), 0)
+}
+
+// Functions that can't fail apart from endless recursion return plain values.
+// When one of them goes too deep it records the problem here and returns a
+// placeholder; while a problem is recorded every such function returns at
+// once, and the first caller that can report problems (`checked`) does so.
+// Only loop-free functions without side effects work this way, so the
+// placeholders are never seen.
+static mut LIMIT: usize = MAX_DEPTH;
+static mut FAULT_NAME: &str = "";
+
+#[inline(always)]
+pub fn limit() -> usize {
+    unsafe { LIMIT }
+}
+
+#[cold]
+#[inline(never)]
+pub fn fault<X>(name: &'static str, placeholder: X) -> X {
+    unsafe {
+        if LIMIT != 0 {
+            LIMIT = 0;
+            FAULT_NAME = name;
+        }
+    }
+    placeholder
+}
+
+#[cold]
+#[inline(never)]
+fn faulted<X>() -> R<X> {
+    unsafe {
+        LIMIT = MAX_DEPTH;
+        too_deep_at(FAULT_NAME)
+    }
+}
+
+/// The result of a function that may have gone too deep (see `fault`).
+#[inline(always)]
+pub fn checked<X>(x: X) -> R<X> {
+    if unsafe { LIMIT } == 0 {
+        return faulted();
+    }
+    Ok(x)
+}
+
 pub struct Depth;
 
 impl Drop for Depth {
@@ -174,14 +254,53 @@ pub fn scall(f: fn(&[Value]) -> Result<Value, String>, args: &[Value], line: u32
 
 /// name[key] = v for one index. Lists are changed in place without building a path.
 pub fn set1(target: &mut Value, key: Value, v: Value, name: &str, line: u32) -> R<()> {
-    if let (Value::List(rc), Value::Num(i)) = (&mut *target, &key) {
-        let k = whole(*i);
-        if k as f64 == *i && (k as u64) < rc.len() as u64 {
+    if let Value::List(rc) = &mut *target {
+        let k = match key {
+            Value::Num(i) => {
+                let k = whole(i);
+                if k as f64 == i { k } else { -1 }
+            }
+            Value::Int(k) => k,
+            _ => -1,
+        };
+        if (k as u64) < rc.len() as u64 {
             Rc::make_mut(rc)[k as usize] = v;
             return Ok(());
         }
     }
     set_path(target, vec![Key::Idx(vec![key])], v, name, line)
+}
+
+/// Fails if a variable hasn't been given a value yet.
+#[inline(always)]
+pub fn has_value(v: &Value, name: &str, line: u32) -> R<()> {
+    if let Value::Unset = v {
+        return unset(name, line).map(|_| ());
+    }
+    Ok(())
+}
+
+/// b[key] for one position, reading a variable in place (no copy of a list is
+/// made). `name` is the variable's name, for the "doesn't have a value" problem.
+#[inline]
+pub fn index1(b: &Value, key: Value, name: &str, line: u32) -> R<Value> {
+    if let Value::List(l) = b {
+        let k = match key {
+            Value::Num(i) => {
+                let k = whole(i);
+                if k as f64 == i { k } else { -1 }
+            }
+            Value::Int(k) => k,
+            _ => -1,
+        };
+        if (k as u64) < l.len() as u64 {
+            return Ok(l[k as usize].clone());
+        }
+    }
+    if let Value::Unset = b {
+        return unset(name, line);
+    }
+    index(b, &[key], line)
 }
 
 /// Calls any function value.
@@ -522,6 +641,179 @@ pub fn aset_i(a: &mut T, i: i64, x: f64, line: u32) -> R<()> {
         }
     }
     aset_slow(a, i as f64, x, line)
+}
+
+// ---------- direct access for loops that checked positions up front ----------
+
+/// The numbers of a row, for a loop that only reads them.
+#[inline(always)]
+pub fn arr_ptr(a: &T) -> *mut f64 {
+    unsafe { (&mut *a.data.as_ptr()).as_mut_ptr() }
+}
+
+/// The numbers of a row for a loop that writes them: a row another variable
+/// shares is copied first (as the first write would do anyway).
+#[inline]
+pub fn arr_unique(a: &mut T) -> *mut f64 {
+    if Rc::strong_count(a) != 1 {
+        let copy = tensor::new(a.shape.clone(), a.data.borrow().clone());
+        *a = copy;
+    }
+    arr_ptr(a)
+}
+
+#[inline(always)]
+pub fn iarr_ptr(a: &IA) -> *mut i64 {
+    a.as_ptr() as *mut i64
+}
+
+#[inline]
+pub fn iarr_unique(a: &mut IA) -> *mut i64 {
+    if Rc::get_mut(a).is_none() {
+        *a = Rc::new((**a).clone());
+    }
+    match Rc::get_mut(a) {
+        Some(v) => v.as_mut_ptr(),
+        None => std::ptr::null_mut(),
+    }
+}
+
+// ---------- fixed-size tables ----------
+// Top-level rows that are never shared and never change length are kept as
+// plain arrays. Positions out of range (and negative ones, which count from the
+// end) go the general way, so they behave exactly as for any row.
+
+#[inline(always)]
+fn tkey(i: i64, num: bool) -> Value {
+    if num { Value::Num(i as f64) } else { Value::Int(i) }
+}
+
+#[cold]
+#[inline(never)]
+fn tget_slow_i(t: &[i64], k: Value, line: u32) -> R<i64> {
+    let v = at(interp::index_value(&Value::Ints(Rc::new(t.to_vec())), &[k]), line)?;
+    to_int(&v, line)
+}
+
+#[cold]
+#[inline(never)]
+fn tget_slow_a(t: &[f64], k: Value, line: u32) -> R<f64> {
+    let v = at(interp::index_value(&Value::Tensor(arr_of(t.to_vec())), &[k]), line)?;
+    as_num(v, line)
+}
+
+#[cold]
+#[inline(never)]
+fn tset_slow_i(t: &mut [i64], k: Value, x: i64, line: u32) -> R<()> {
+    let mut v = Value::Ints(Rc::new(t.to_vec()));
+    at(interp::set_index(&mut v, k, Value::Int(x)), line)?;
+    if let Value::Ints(a) = v {
+        t.copy_from_slice(&a);
+    }
+    Ok(())
+}
+
+#[cold]
+#[inline(never)]
+fn tset_slow_a(t: &mut [f64], k: Value, x: f64, line: u32) -> R<()> {
+    let mut v = Value::Tensor(arr_of(t.to_vec()));
+    at(interp::set_index(&mut v, k, Value::Num(x)), line)?;
+    if let Value::Tensor(a) = v {
+        t.copy_from_slice(&a.data.borrow());
+    }
+    Ok(())
+}
+
+/// t[i] for an integer table; `num`: the position is an ordinary number.
+#[inline(always)]
+pub fn tget_i(t: &[i64], i: i64, num: bool, line: u32) -> R<i64> {
+    if (i as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(i as usize) }) } else { tget_slow_i(t, tkey(i, num), line) }
+}
+
+#[inline(always)]
+pub fn tget_if(t: &[i64], x: f64, line: u32) -> R<i64> {
+    let k = whole(x);
+    if k as f64 == x && (k as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(k as usize) }) } else { tget_slow_i(t, Value::Num(x), line) }
+}
+
+#[inline(always)]
+pub fn tget_a(t: &[f64], i: i64, num: bool, line: u32) -> R<f64> {
+    if (i as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(i as usize) }) } else { tget_slow_a(t, tkey(i, num), line) }
+}
+
+#[inline(always)]
+pub fn tget_af(t: &[f64], x: f64, line: u32) -> R<f64> {
+    let k = whole(x);
+    if k as f64 == x && (k as u64) < t.len() as u64 { Ok(unsafe { *t.get_unchecked(k as usize) }) } else { tget_slow_a(t, Value::Num(x), line) }
+}
+
+#[inline(always)]
+pub fn tset_i(t: &mut [i64], i: i64, num: bool, x: i64, line: u32) -> R<()> {
+    if (i as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(i as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_i(t, tkey(i, num), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_if(t: &mut [i64], i: f64, x: i64, line: u32) -> R<()> {
+    let k = whole(i);
+    if k as f64 == i && (k as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(k as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_i(t, Value::Num(i), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_a(t: &mut [f64], i: i64, num: bool, x: f64, line: u32) -> R<()> {
+    if (i as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(i as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_a(t, tkey(i, num), x, line)
+    }
+}
+
+#[inline(always)]
+pub fn tset_af(t: &mut [f64], i: f64, x: f64, line: u32) -> R<()> {
+    let k = whole(i);
+    if k as f64 == i && (k as u64) < t.len() as u64 {
+        unsafe { *t.get_unchecked_mut(k as usize) = x };
+        Ok(())
+    } else {
+        tset_slow_a(t, Value::Num(i), x, line)
+    }
+}
+
+/// t[key] for a table with a position of any kind (the result as a value).
+#[inline]
+pub fn tget_iv(t: &[i64], key: Value, line: u32) -> R<Value> {
+    let k = match key {
+        Value::Int(k) => k,
+        Value::Num(x) if whole(x) as f64 == x => whole(x),
+        _ => -1,
+    };
+    if (k as u64) < t.len() as u64 {
+        return Ok(Value::Int(t[k as usize]));
+    }
+    at(interp::index_value(&Value::Ints(Rc::new(t.to_vec())), &[key]), line)
+}
+
+#[inline]
+pub fn tget_av(t: &[f64], key: Value, line: u32) -> R<Value> {
+    let k = match key {
+        Value::Int(k) => k,
+        Value::Num(x) if whole(x) as f64 == x => whole(x),
+        _ => -1,
+    };
+    if (k as u64) < t.len() as u64 {
+        return Ok(Value::Num(t[k as usize]));
+    }
+    at(interp::index_value(&Value::Tensor(arr_of(t.to_vec())), &[key]), line)
 }
 
 /// number(x) without the cost of a general built-in call.

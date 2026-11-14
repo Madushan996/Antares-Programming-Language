@@ -1,0 +1,58 @@
+# Counting loops, positions and whole-number arithmetic. Compiled programs
+# keep counters as machine integers; this prints enough for
+# tests/compare_compiled.py to check they behave exactly like ordinary numbers.
+# Run: antares tests/counters.ant
+
+xs = [10, 20, 30, 40, 50]
+out = []
+each i in range(5) { out = push(out, xs[i]) }
+show out
+each i in range(0.5, 3) { show "half", i }
+each i in range(10, 0, -3) { show "down", i, xs[i % 5] }
+each i in range(0, 1, 0.25) { show "quarter", i }
+each i in range(1, 10, 2) {
+    when i == 5 { skip }
+    when i == 9 { stop }
+    show "odd", i
+}
+each i in range(3) { i = i + 0.5
+    show "changed", i }
+each i in range(int(2), int(5)) { show "intrange", i, i / 2 }
+n = 4.7
+each i in range(n) { show "frac end", i }
+repeat 2.9 as k { show "rep", k, k / 3, k * 0.5 }
+j = 0
+while j < 3 {
+    show "neg index", xs[j - 1], j % 2, (j - 2) % 3, -j % 4
+    j = j + 1
+}
+c = 0
+repeat 7 as k { c = c + 1 }
+show c, c / 2, c > 6.5, c == 7, c != 7.0, number(c), kind(c)
+big = 4000000000
+big = big + 64
+show big, big * big, big + 0.5
+to idx(a, i) = a[i * 2 + 1]
+show idx(xs, 0), idx(xs, 1)
+to tri(n) { t = 0
+    k = 0
+    while k < n {
+        k = k + 1
+        t = t + k
+    }
+    t }
+show tri(100), tri(int(5))
+rows = zeros(10)
+each r in range(10) { rows[r] = r * r }
+show rows
+irow = ints(6)
+repeat 6 as k { irow[k - 1] = int(k) << 2 }
+show irow, irow[2] + 1
+each i in range(-2, 2) { show "negstart", i, xs[i] }
+try { show xs[j + 10] } else e { show "err", e }
+try { each i in range(3) { show xs[i * 100] } } else e { show "err2", e }
+ws = range(4)
+each w in ws { show "list", w }
+q = 0
+each i in range(3) { q = i }
+show "last", q

@@ -1,0 +1,62 @@
+# Top-level rows given once and then only used by position. Compiled programs
+# keep these as fixed-size tables; this prints enough for
+# tests/compare_compiled.py to check they behave exactly like ordinary rows.
+# Run: antares tests/tables.ant
+
+SIZE = 8
+BIG = SIZE * 4 + 2
+counts = ints(SIZE)
+scores = zeros(BIG)
+to bump(i) {
+    counts[i] = counts[i] + 1
+    scores[i * 2] = scores[i * 2] + 0.5
+}
+repeat 20 as k { bump(k % SIZE) }
+show counts[0], counts[7], scores[0], scores[14], scores[33]
+show counts[-1], scores[-2]
+counts[-1] = 100
+scores[-1] = 2.25
+show counts[7], scores[33]
+try { show counts[8] } else e { show "read", e }
+try { counts[99] = 1 } else e { show "write", e }
+try { show scores[1.5] } else e { show "frac", e }
+try { scores[2.5] = 1 } else e { show "frac write", e }
+try { show counts[int(-9)] } else e { show "neg", e }
+try { counts[int(9)] = 1 } else e { show "int write", e }
+h = 0
+while h < 3 {
+    scores[h + 0.0] = h * 1.5
+    h = h + 1
+}
+show scores[0], scores[1], scores[2]
+masked = ints(16)
+x = int(12345)
+repeat 100 as k {
+    x = (x * 1103515245 + 12345) & 0xFFFF
+    masked[x & 15] = masked[x & 15] + 1
+}
+total = int(0)
+k = 0
+while k < 16 {
+    total = total + masked[k]
+    k = k + 1
+}
+show total
+to early() = late[0]
+late = ints(4)
+late[0] = 5
+show early()
+whole_use = ints(3)
+whole_use[1] = 7
+show whole_use, len(whole_use)
+again = zeros(2)
+again = zeros(3)
+again[2] = 1
+show again[2]
+when yes { inner = ints(2) }
+inner[1] = 3
+show inner[1]
+picks = [1, "two", 2.5, -1, int(3)]
+each p in picks {
+    try { show "any", counts[p], scores[p] } else e { show "any", e }
+}

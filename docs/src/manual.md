@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.1.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.2.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.1.0 — type a line and press Enter. `exit` to leave.
+Antares 0.2.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -124,6 +124,7 @@ Options for `build`:
 | `--cpu x86-64-v2` | Processors with SSE4.2 |
 | `--cpu x86-64-v3` | Processors with AVX2 |
 | `--embed file` | Pack a file into the executable (may be repeated) |
+| `--icon file.ico` | The icon Windows shows for the executable (see below) |
 
 ## Your first program
 
@@ -1221,9 +1222,16 @@ antares build program.ant out.exe --cpu x86-64
 
 `--embed file` packs a file into the executable. The program reads it under the name `"embedded:<file name>"` with `read_binary`, and `exists` says whether it is there, so the same source can fall back to a file on disk when run interpreted. The chess engine embeds its 25 MB neural network this way.
 
+## Icons
+
+`--icon file.ico` gives a Windows executable its icon, the one Explorer and the taskbar show. With Microsoft's Rust toolchain nothing else is needed; with the GNU toolchain it needs `windres` (part of MinGW binutils). If that isn't there the program is still built, without the icon, and `antares build` says so. On other systems the option is ignored.
+
 ## Writing fast compiled code
 
 - **Constants.** A global given one literal number at the top level and never changed (`SIZE = 64`) is treated as a constant, and a list made only of such numbers is built once. Both make arithmetic like `x % SIZE` much cheaper.
+- **Counters are integers.** Whole-number counters (`repeat ... as i`, `each i in range(...)`, and variables only ever changed by `i = i + 1` and the like) are machine integers, so positions like `row[i + 1]` cost only a range check. They still behave and print exactly like ordinary numbers.
+- **Fixed tables.** A top-level row made once with `ints(n)` or `zeros(n)`, with a size known when compiling (a number, or arithmetic on such constants), and afterwards only used as `t[i]` and `t[i] = v`, becomes a fixed table: the fastest kind of row. Using the row as a whole anywhere (`len(t)`, passing `t` to a function, `each x in t`) turns this off.
+- **Simple loops.** The innermost `each i in range(...)` or `repeat ... as i` loop that uses rows only as `row[i + c]` checks positions once, before it starts, and then reads and writes the rows directly.
 - **Say what is a number.** One value of unknown kind can slow down everything it touches. If a number comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler knows it is a number. In the chess engine, one such lookup made the whole board slow until it was wrapped.
 - **Set before reading.** A number variable that is read before it is given a value reads as 0 in a compiled program, where the interpreter reports a problem.
 - **Find the slow spots.** Build with the environment variable `ANTARES_EXPLAIN=1`. The compiler then names every variable that ended up as a general value and what it was given. A common cause is two files using the same global name for different things.

@@ -1,0 +1,138 @@
+# Loops that read and write rows at counter + constant. Compiled programs give
+# such loops a version that checks positions and sharing once, before the loop;
+# this prints enough for tests/compare_compiled.py to check both versions
+# behave exactly like the interpreter, including when the check fails.
+# Run: antares tests/rows.ant
+
+to shift(n) {
+    a = zeros(n)
+    each i in range(n) { a[i] = i * 2 }
+    each i in range(1, n) { a[i] = a[i - 1] + a[i] }
+    a
+}
+show shift(6)
+to shared() {
+    a = zeros(4)
+    b = a
+    each i in range(4) { a[i] = i + 1 }
+    show "a", a, "b", b
+    c = a
+    repeat 4 as k { c[k - 1] = c[k - 1] * 10 }
+    show "a", a, "c", c
+}
+shared()
+to too_far(n) {
+    a = zeros(3)
+    out = 0
+    try {
+        each i in range(n) {
+            out = out + 1
+            a[i] = i
+        }
+    } else e { show "caught after", out, ":", e }
+    show a
+}
+too_far(3)
+too_far(5)
+to too_low() {
+    a = [1, 2, 3, 4]
+    s = 0
+    try { each i in range(0, 4) { s = s + a[i - 1] } } else e { show "low", e }
+    show "s", s
+}
+too_low()
+to reads(n) {
+    a = [5, 6, 7, 8, 9]
+    s = 0
+    each i in range(1, n) { s = s + a[i + 1] * a[i - 1] }
+    s
+}
+show reads(4)
+try { show reads(5) } else e { show "reads", e }
+to with_stop() {
+    a = zeros(10)
+    each i in range(10) {
+        when i == 3 { skip }
+        when i == 7 { stop }
+        a[i] = 1
+    }
+    a
+}
+show with_stop()
+to frac_end() {
+    a = zeros(5)
+    each i in range(0, 4.5) { a[i] = 9 }
+    each i in range(2.5) { a[i] = a[i] + 1 }
+    a
+}
+show frac_end()
+to steps() {
+    a = zeros(9)
+    each i in range(0, 9, 2) { a[i] = i }
+    each i in range(1, 9, 3) { a[i] = a[i] + 100 }
+    a
+}
+show steps()
+to ints_row() {
+    r = ints(5)
+    each i in range(5) { r[i] = int(i) << 3 }
+    s = int(0)
+    repeat 4 as k { s = s + (r[k] & r[k - 1]) }
+    show r, s
+    q = r
+    each i in range(5) { q[i] = q[i] + 1 }
+    show r, q
+}
+ints_row()
+to zero_trip() {
+    a = zeros(2)
+    each i in range(5, 3) { a[i] = 1 }
+    each i in range(0, 0 / 0) { a[i] = 2 }
+    repeat 0 as k { a[k + 100] = 3 }
+    a
+}
+show zero_trip()
+to with_len() {
+    a = zeros(4)
+    each i in range(4) { a[i] = len(a) + i }
+    a
+}
+show with_len()
+to rep_off() {
+    a = zeros(6)
+    repeat 5 as k { a[k] = k * k }
+    try { repeat 6 as k { a[k] = 1 } } else e { show "rep", e }
+    a
+}
+show rep_off()
+to inner_try() {
+    a = zeros(3)
+    each i in range(3) {
+        try { a[i] = 10 / (i - 1) } else e { a[i] = -1 }
+    }
+    a
+}
+show inner_try()
+g = zeros(5)
+each i in range(5) { g[i] = i * i }
+show g
+to bump() { g[0] = 99 }
+each i in range(5) {
+    bump()
+    g[i] = g[i] + 1
+}
+show g
+to keepvar() {
+    a = zeros(3)
+    each i in range(3) { a[i] = i }
+    show "after", i, a
+}
+keepvar()
+to mixed(n) {
+    a = zeros(n)
+    b = ones(n)
+    each i in range(1, n - 1) { a[i] = b[i - 1] + b[i + 1] + a[i - 1] }
+    a
+}
+show mixed(6)
+try { show mixed(1) } else e { show "mixed", e }

@@ -1,0 +1,39 @@
+# Reading and writing one position of lists and rows, with integer and
+# ordinary positions. Printed so tests/compare_compiled.py can check compiled
+# programs behave exactly like the interpreter.
+# Run: antares tests/lists.ant
+
+xs = [10, 20, 30, 40]
+xs[int(1)] = 21
+xs[2] = 31
+xs[int(-1)] = 41
+show xs, xs[int(0)], xs[-1], xs[int(-2)]
+try { xs[int(9)] = 1 } else e { show "set", e }
+try { show xs[int(9)] } else e { show "get", e }
+try { show xs[1.5] } else e { show "frac", e }
+ys = xs
+ys[int(0)] = 0
+show xs, ys
+to f() {
+    change xs = [1, 2, 3]
+    0
+}
+show xs[f()]
+show xs
+m = {a: 1}
+try { show m[int(0)] } else e { show "map", e }
+s = "hello"
+show s[int(1)], s[1]
+r = ints([5, 6, 7])
+lst = [r, r]
+show lst[int(1)][int(2)]
+to g(k) {
+    acc = [nothing, nothing, nothing]
+    acc[k] = k * 2
+    acc[k]
+}
+show g(int(1)), g(2)
+z = 0
+try { show later[z] } else e { show "unset2", e }
+later = ["a", "b"]
+show later[z]

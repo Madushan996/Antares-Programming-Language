@@ -128,7 +128,7 @@ fn real_main() -> i32 {
             println!("  antares program.ant     run a program");
             println!("  antares run program.ant the same");
             println!("  antares build program.ant   compile it to a fast native program");
-            println!("      [output.exe] [--cpu native|x86-64|x86-64-v2|x86-64-v3] [--embed file]");
+            println!("      [output.exe] [--cpu native|x86-64|x86-64-v2|x86-64-v3] [--embed file] [--icon file.ico]");
             println!("  antares version         show the version");
             0
         }
@@ -138,10 +138,14 @@ fn real_main() -> i32 {
                 let mut out = None;
                 let mut cpu = None;
                 let mut embed: Vec<String> = vec![];
+                let mut icon = None;
                 let mut i = 2;
                 while i < args.len() {
                     if args[i] == "--cpu" {
                         cpu = args.get(i + 1).map(|s| s.as_str());
+                        i += 2;
+                    } else if args[i] == "--icon" {
+                        icon = args.get(i + 1).map(|s| s.as_str());
                         i += 2;
                     } else if args[i] == "--embed" {
                         if let Some(f) = args.get(i + 1) {
@@ -153,7 +157,7 @@ fn real_main() -> i32 {
                         i += 1;
                     }
                 }
-                aot::build(p, out, cpu, &embed)
+                aot::build(p, out, cpu, &embed, icon)
             }
             None => {
                 eprintln!("Which file? Try: antares build program.ant");
