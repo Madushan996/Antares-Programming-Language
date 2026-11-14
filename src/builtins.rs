@@ -443,10 +443,11 @@ pub fn update_rows_into(
 ) -> Result<(), String> {
     let h = base.len();
     // Collect the rows to add and to remove, then do everything in one pass.
-    // (kept on the stack: allocating even a small list here costs more than the arithmetic)
-    let empty: &[i16] = &[];
-    let mut add_rows: [&[i16]; 32] = [empty; 32];
-    let mut sub_rows: [&[i16]; 32] = [empty; 32];
+    // (kept on the stack, and not filled in advance: allocating or clearing even
+    // a small list here costs more than the arithmetic)
+    use std::mem::MaybeUninit;
+    let mut add_rows: [MaybeUninit<&[i16]>; 32] = [const { MaybeUninit::uninit() }; 32];
+    let mut sub_rows: [MaybeUninit<&[i16]>; 32] = [const { MaybeUninit::uninit() }; 32];
     let (mut na, mut ns) = (0usize, 0usize);
     for (list, count, add) in [(adds, n_add, true), (subs, n_sub, false)] {
         let rd = list.data.borrow();
@@ -463,18 +464,25 @@ pub fn update_rows_into(
                 if na == 32 {
                     return Err("update_rows adds at most 32 rows at a time".into());
                 }
-                add_rows[na] = row;
+                add_rows[na].write(row);
                 na += 1;
             } else {
                 if ns == 32 {
                     return Err("update_rows removes at most 32 rows at a time".into());
                 }
-                sub_rows[ns] = row;
+                sub_rows[ns].write(row);
                 ns += 1;
             }
         }
     }
-    combine_rows(out, base, &add_rows[..na], &sub_rows[..ns]);
+    // only the first na and ns entries were written, and only those are read
+    let (adds, subs) = unsafe {
+        (
+            std::slice::from_raw_parts(add_rows.as_ptr() as *const &[i16], na),
+            std::slice::from_raw_parts(sub_rows.as_ptr() as *const &[i16], ns),
+        )
+    };
+    combine_rows(out, base, adds, subs);
     Ok(())
 }
 
@@ -500,7 +508,7 @@ fn combine_rows(out: &mut [i16], base: &[i16], adds: &[&[i16]], subs: &[&[i16]])
                         return;
                     }};
                 }
-                if adds.iter().chain(subs.iter()).all(|r| r.len() == out.len()) {
+                if adds.len() + subs.len() <= 4 && adds.iter().chain(subs.iter()).all(|r| r.len() == out.len()) {
                     match (adds.len(), subs.len()) {
                         (1, 1) => fixed!(1, 1),
                         (1, 2) => fixed!(1, 2),
