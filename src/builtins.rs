@@ -1158,8 +1158,13 @@ fn b_input(_: &mut Interp, a: Vec<Value>) -> Res {
         print!("{}", p.show());
         let _ = std::io::stdout().flush();
     }
+    // A whole line needs the terminal's normal mode, even if key() switched it.
+    let was_raw = console::is_raw();
+    console::leave_raw();
     let mut line = String::new();
-    let n = std::io::stdin().read_line(&mut line).map_err(|e| format!("couldn't read input: {}", e))?;
+    let got = std::io::stdin().read_line(&mut line);
+    console::resume_raw(was_raw);
+    let n = got.map_err(|e| format!("couldn't read input: {}", e))?;
     if n == 0 {
         return Ok(Value::Nothing);
     }
@@ -1207,6 +1212,12 @@ mod console {
             avail: *mut u32,
             left: *mut u32,
         ) -> i32;
+    }
+
+    pub fn leave_raw() {}
+    pub fn resume_raw(_: bool) {}
+    pub fn is_raw() -> bool {
+        false
     }
 
     /// Whether input is waiting to be read (a pipe from another program, or keys typed in a console).
@@ -1263,13 +1274,251 @@ mod console {
     }
 }
 
-#[cfg(not(windows))]
+/// macOS and Linux: the terminal is switched to key-at-a-time mode (no
+/// waiting for Enter, no echo) the first time `key()` is called, and put back
+/// the way it was when the program ends, fails, or is stopped with Ctrl+C.
+#[cfg(any(
+    target_os = "macos",
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86", target_arch = "arm", target_arch = "riscv64"))
+))]
+mod console {
+    use std::cell::RefCell;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[cfg(target_os = "linux")]
+    mod sys {
+        pub type Flag = u32;
+        pub type Nfds = u64;
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct Termios {
+            pub c_iflag: Flag,
+            pub c_oflag: Flag,
+            pub c_cflag: Flag,
+            pub c_lflag: Flag,
+            pub c_line: u8,
+            pub c_cc: [u8; 32],
+            pub c_ispeed: u32,
+            pub c_ospeed: u32,
+        }
+        pub const ICANON: Flag = 0o2;
+        pub const ECHO: Flag = 0o10;
+        pub const VTIME: usize = 5;
+        pub const VMIN: usize = 6;
+    }
+
+    #[cfg(target_os = "macos")]
+    mod sys {
+        pub type Flag = u64;
+        pub type Nfds = u32;
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct Termios {
+            pub c_iflag: Flag,
+            pub c_oflag: Flag,
+            pub c_cflag: Flag,
+            pub c_lflag: Flag,
+            pub c_cc: [u8; 20],
+            pub c_ispeed: u64,
+            pub c_ospeed: u64,
+        }
+        pub const ICANON: Flag = 0x100;
+        pub const ECHO: Flag = 0x8;
+        pub const VMIN: usize = 16;
+        pub const VTIME: usize = 17;
+    }
+
+    use sys::*;
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    unsafe extern "C" {
+        fn tcgetattr(fd: i32, t: *mut Termios) -> i32;
+        fn tcsetattr(fd: i32, when: i32, t: *const Termios) -> i32;
+        fn isatty(fd: i32) -> i32;
+        fn poll(fds: *mut PollFd, n: Nfds, timeout: i32) -> i32;
+        fn atexit(f: extern "C" fn()) -> i32;
+        fn signal(sig: i32, handler: usize) -> usize;
+        fn raise(sig: i32) -> i32;
+    }
+
+    const TCSANOW: i32 = 0;
+    const SIGINT: i32 = 2;
+    const SIGTERM: i32 = 15;
+
+    /// The terminal settings from before the program changed them.
+    static mut SAVED: Option<Termios> = None;
+    /// Whether key-at-a-time mode is on right now.
+    static RAW: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        /// Bytes read from the terminal but not yet turned into keys.
+        static PENDING: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    }
+
+    extern "C" fn restore_at_exit() {
+        leave_raw();
+    }
+
+    extern "C" fn restore_on_signal(sig: i32) {
+        // tcsetattr is safe to call from a signal handler.
+        leave_raw();
+        unsafe {
+            signal(sig, 0);
+            raise(sig);
+        }
+    }
+
+    fn saved() -> Option<Termios> {
+        unsafe { *std::ptr::addr_of!(SAVED) }
+    }
+
+    /// Switches to key-at-a-time mode. Returns false if input is not a terminal.
+    fn enter_raw() -> bool {
+        if RAW.load(Ordering::SeqCst) {
+            return true;
+        }
+        unsafe {
+            if isatty(0) == 0 {
+                return false;
+            }
+            let first = saved().is_none();
+            if first {
+                let mut t: Termios = std::mem::zeroed();
+                if tcgetattr(0, &mut t) != 0 {
+                    return false;
+                }
+                *std::ptr::addr_of_mut!(SAVED) = Some(t);
+            }
+            let mut raw = saved().unwrap();
+            raw.c_lflag &= !(ICANON | ECHO);
+            raw.c_cc[VMIN] = 0;
+            raw.c_cc[VTIME] = 0;
+            if tcsetattr(0, TCSANOW, &raw) != 0 {
+                return false;
+            }
+            RAW.store(true, Ordering::SeqCst);
+            if first {
+                atexit(restore_at_exit);
+                let handler = restore_on_signal as extern "C" fn(i32) as usize;
+                signal(SIGINT, handler);
+                signal(SIGTERM, handler);
+            }
+        }
+        true
+    }
+
+    /// Puts the terminal back the way it was (does nothing if it was never changed).
+    pub fn leave_raw() {
+        if RAW.swap(false, Ordering::SeqCst) {
+            if let Some(t) = saved() {
+                unsafe {
+                    tcsetattr(0, TCSANOW, &t);
+                }
+            }
+        }
+    }
+
+    /// Turns key-at-a-time mode back on after `leave_raw`, if it was on before.
+    pub fn resume_raw(was_raw: bool) {
+        if was_raw {
+            enter_raw();
+        }
+    }
+
+    pub fn is_raw() -> bool {
+        RAW.load(Ordering::SeqCst)
+    }
+
+    pub fn enable_ansi() {}
+
+    /// Whether input is waiting to be read (a pipe from another program, or keys typed in a terminal).
+    pub fn input_waiting() -> bool {
+        if PENDING.with(|p| !p.borrow().is_empty()) {
+            return true;
+        }
+        let mut fd = PollFd { fd: 0, events: 1, revents: 0 };
+        unsafe { poll(&mut fd, 1, 0) > 0 && (fd.revents & 1) != 0 }
+    }
+
+    /// Reads whatever bytes the terminal has ready, without waiting.
+    fn fill() {
+        use std::io::Read;
+        use std::os::unix::io::FromRawFd;
+        // Read straight from the terminal (not through stdin's buffer), and
+        // never close it: ManuallyDrop keeps the File from closing fd 0.
+        let mut tty = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(0) });
+        let mut buf = [0u8; 64];
+        if let Ok(n) = tty.read(&mut buf) {
+            PENDING.with(|p| p.borrow_mut().extend_from_slice(&buf[..n]));
+        }
+    }
+
+    /// The key waiting to be read, if any, without pausing the program.
+    pub fn poll_key() -> Option<String> {
+        if !enter_raw() {
+            return None;
+        }
+        fill();
+        PENDING.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.is_empty() {
+                return None;
+            }
+            // Arrow keys arrive as ESC [ A..D (or ESC O A..D).
+            if p[0] == 27 {
+                if p.len() >= 3 && (p[1] == b'[' || p[1] == b'O') {
+                    let name = match p[2] {
+                        b'A' => "up",
+                        b'B' => "down",
+                        b'C' => "right",
+                        b'D' => "left",
+                        _ => "other",
+                    };
+                    // Skip the rest of a longer sequence such as ESC [ 3 ~.
+                    let end = p[2..]
+                        .iter()
+                        .position(|b| (0x40..=0x7e).contains(b))
+                        .map_or(p.len(), |i| i + 3);
+                    p.drain(..end);
+                    return Some(name.to_string());
+                }
+                p.drain(..1);
+                return Some("escape".to_string());
+            }
+            let c = p.remove(0);
+            Some(match c {
+                b'\r' | b'\n' => "enter".to_string(),
+                b' ' => "space".to_string(),
+                8 | 127 => "backspace".to_string(),
+                33..=126 => (c as char).to_ascii_lowercase().to_string(),
+                _ => "other".to_string(),
+            })
+        })
+    }
+}
+
+#[cfg(not(any(
+    windows,
+    target_os = "macos",
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86", target_arch = "arm", target_arch = "riscv64"))
+)))]
 mod console {
     pub fn enable_ansi() {}
     pub fn poll_key() -> Option<String> {
         None
     }
     pub fn input_waiting() -> bool {
+        false
+    }
+    pub fn leave_raw() {}
+    pub fn resume_raw(_: bool) {}
+    pub fn is_raw() -> bool {
         false
     }
 }

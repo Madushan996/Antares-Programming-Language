@@ -36,24 +36,254 @@ model claude = "anthropic:claude-opus-5-5"
 count = ask claude "How many moons does Mars have?" as number
 ```
 
-## Build and run
+## Contents
+
+- [Install](#install)
+- [Your first program](#your-first-program)
+- [Building something: a step-by-step example](#building-something-a-step-by-step-example)
+- [Everyday commands](#everyday-commands)
+- [Making a fast executable to share](#making-a-fast-executable-to-share)
+- [Troubleshooting](#troubleshooting)
+- [The language in five minutes](#the-language-in-five-minutes)
+- [Machine learning](#machine-learning) · [Language models](#language-models) · [Built-in functions](#built-in-functions)
+
+## Install
+
+You don't need Rust or any other tools to write and run Antares programs.
+Pick one of these three ways.
+
+### Option 1: one-line installer (easiest)
+
+**Windows**: open **PowerShell** and run:
+
+```powershell
+irm https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.ps1 | iex
+```
+
+**macOS or Linux**: open **Terminal** and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.sh | sh
+```
+
+The installer downloads the latest release, puts `antares` in your user
+folder (`%LOCALAPPDATA%\Programs\Antares` on Windows, `~/.antares/bin` on
+macOS and Linux), and adds it to your PATH. **Close the terminal and open a
+new one**, then check it works:
+
+```bash
+antares version
+```
+
+You should see `Antares 0.1.0`.
+
+### Option 2: download it yourself
+
+1. Open the [latest release](https://github.com/Madushan996/Antares-Programming-Language/releases/latest).
+2. Download the file for your computer:
+
+   | Your computer | File to download |
+   |---|---|
+   | Windows (64-bit) | `antares-windows-x86_64.zip` |
+   | Mac with Apple Silicon (M1, M2, M3, M4…) | `antares-macos-arm64.tar.gz` |
+   | Mac with an Intel processor | `antares-macos-x86_64.tar.gz` |
+   | Linux, most PCs | `antares-linux-x86_64.tar.gz` |
+   | Linux on ARM (Raspberry Pi 4/5 with 64-bit OS, ARM servers) | `antares-linux-arm64.tar.gz` |
+
+   Not sure which Mac you have? Apple menu → **About This Mac**: "Chip: Apple M…"
+   means Apple Silicon; "Processor: Intel…" means Intel.
+3. Unpack it (double-click the file). Inside is the `antares` program
+   (`antares.exe` on Windows), with the README and license.
+4. Move the program somewhere permanent and add that folder to your PATH, so
+   you can type `antares` in any folder:
+   - **Windows:** move `antares.exe` to e.g. `C:\Antares`. Press Start, type
+     "environment variables", open **Edit environment variables for your
+     account**, select **Path** → **Edit** → **New**, and add `C:\Antares`.
+   - **macOS / Linux:** run `mkdir -p ~/.antares/bin && mv antares ~/.antares/bin/`,
+     then add `export PATH="$HOME/.antares/bin:$PATH"` to `~/.zshrc` (Mac) or
+     `~/.bashrc` (Linux).
+5. **macOS only:** the first time, macOS may say the app "can't be opened
+   because Apple cannot check it". Run this once to allow it:
+   `xattr -d com.apple.quarantine ~/.antares/bin/antares`
+6. Open a new terminal and run `antares version`.
+
+### Option 3: build from source
+
+<a id="build-from-source"></a>
+For contributors, or computers without a ready-made download. You need
+[Rust](https://rustup.rs) and Git.
+
+```bash
+git clone https://github.com/Madushan996/Antares-Programming-Language.git
+```
+
+```bash
+cd Antares-Programming-Language
+```
 
 ```bash
 cargo build --release
 ```
 
-```bash
-./target/release/antares examples/hello.ant
+The program is now at `target/release/antares` (`antares.exe` on Windows).
+Add that folder to your PATH as in Option 2, or run it by its full path.
+
+## Your first program
+
+1. Make a folder for your work and open a terminal in it.
+2. Create a file called `hello.ant` with any text editor (Notepad, TextEdit
+   in plain-text mode, VS Code…) and type:
+
+   ```
+   name = "world"
+   show "Hello, {name}!"
+
+   to square(x) = x * x
+   show "7 squared is", square(7)
+   ```
+
+3. Run it:
+
+   ```bash
+   antares hello.ant
+   ```
+
+   ```
+   Hello, world!
+   7 squared is 49
+   ```
+
+To try lines one at a time, run `antares` on its own. This opens an
+interactive session; type `exit` to leave.
+
+To see more, download the [examples folder](examples) (or clone the repository)
+and run them: `antares examples/xor.ant` trains a small neural network, and
+`antares examples/snake.ant` is a game you play in the terminal.
+
+## Building something: a step-by-step example
+
+A real program usually has several files: a main program, some helper
+functions in their own file, and data. Here is a complete small project, a
+model that learns to predict house prices, to show how the pieces fit.
+
+**1. Create a project folder:**
+
+```
+house-prices/
+├── main.ant        the program you run
+├── helpers.ant     functions used by main.ant
+└── houses.json     the data
 ```
 
-To compile a program to a fast native executable (see "Compiling" below):
+**2. `houses.json`** holds the data (size in hundreds of square metres, price in
+thousands):
 
-```bash
-antares build program.ant
+```json
+{"size": [0.5, 0.8, 1.0, 1.2, 1.5, 2.0], "price": [150, 210, 250, 290, 350, 450]}
 ```
 
-Run `antares` with no file for an interactive session. Programs use the
-`.ant` extension. `tests/check.ant`, `tests/features.ant`, `tests/engine.ant` and `tests/integers.ant` are self-check suites.
+**3. `helpers.ant`** holds reusable functions:
+
+```
+# Squared error between a guess and the right answers
+to mse(guess, target) = mean((guess - target) ^ 2)
+
+to rounded(x) = round(x * 100) / 100
+```
+
+**4. `main.ant`** brings in the helpers with `use`, loads the data, learns,
+saves what it learned, and answers a question:
+
+```
+use "helpers"                         # runs helpers.ant from this folder
+
+data = load(program_folder() + "/houses.json")
+size = data.size
+price = data.price
+
+learn per_unit = 0
+learn base = 0
+
+repeat 2000 {
+    descend mse(size * per_unit + base, price) by 2 using adam
+}
+
+show "price = {rounded(per_unit)} x size + {rounded(base)}"
+save({per_unit: per_unit, base: base}, program_folder() + "/model.json")
+
+answer = input("Size of your house (e.g. 1.3): ")
+show "Estimated price:", rounded(number(answer) * per_unit + base), "thousand"
+```
+
+**5. Run it** from inside the folder:
+
+```bash
+antares main.ant
+```
+
+```
+price = 200 x size + 50
+Size of your house (e.g. 1.3): 1.3
+Estimated price: 310 thousand
+```
+
+**6. Share it.** Send the folder to anyone with Antares installed, or turn it
+into a single program that runs without Antares (next sections).
+
+Tips for bigger projects:
+
+- `use "name"` loads `name.ant` from the same folder, once. All files share
+  one set of global names, so give helper files distinctive names.
+- `program_folder()` gives the folder of the running program, so data files
+  are found even when the program is started from elsewhere.
+- Wrap anything that can fail (files, model calls) in `try { … } else problem { … }`.
+- The full manual, [docs/Antares_Language_Reference.pdf](docs/Antares_Language_Reference.pdf),
+  explains every feature and built-in function.
+
+## Everyday commands
+
+| Command | What it does |
+|---|---|
+| `antares program.ant` | Run a program |
+| `antares` | Interactive session (type `exit` to leave) |
+| `antares build program.ant` | Make a fast stand-alone executable |
+| `antares version` | Show the installed version |
+| `antares help` | List the commands |
+
+To use language models, set your Anthropic API key first:
+`setx ANTHROPIC_API_KEY "your-key"` on Windows (then open a new terminal), or
+`export ANTHROPIC_API_KEY="your-key"` on macOS/Linux.
+
+## Making a fast executable to share
+
+`antares build` turns a program into a native executable that runs on
+computers **without** Antares installed, and much faster than the interpreter:
+
+```bash
+antares build main.ant
+```
+
+This creates `main.exe` (Windows) or `main` (macOS/Linux) next to `main.ant`.
+
+- This one step needs **Rust**: install it from [rustup.rs](https://rustup.rs)
+  (just accept the defaults). Running programs normally does not.
+- The first build downloads the Antares source code for your version and takes
+  a minute or two; later builds take about 30 to 40 seconds.
+- Files the program reads (like `houses.json`) must be shipped next to the
+  executable, or packed inside it with `--embed houses.json`.
+- To share the executable with people who have older computers, add
+  `--cpu x86-64`. See [Compiling](#compiling) for details.
+
+## Troubleshooting
+
+| Problem | What to do |
+|---|---|
+| `antares: command not found` / `'antares' is not recognized` | Open a **new** terminal after installing. If it still fails, the install folder isn't on your PATH; see Option 2, step 4 |
+| macOS: "cannot be opened because Apple cannot check it" | Run `xattr -d com.apple.quarantine "$(which antares)"` |
+| `Couldn't open "program.ant"` | You're in a different folder. Use `cd` to go to the folder with the file, or give the full path |
+| `antares build` says it needs Rust | Install Rust from [rustup.rs](https://rustup.rs), open a new terminal, try again |
+| A model call says to set `ANTHROPIC_API_KEY` | Set your API key as shown in [Everyday commands](#everyday-commands) |
+| Something else | Open an [issue](https://github.com/Madushan996/Antares-Programming-Language/issues) with the program and the full message |
 
 ## The language in five minutes
 
@@ -320,9 +550,13 @@ interpreter uses.
 
 Things to know:
 
-- It needs Rust (`cargo`) installed and the Antares source folder, because
-  the compiler writes Rust code and builds it. A build takes about 30 to 40
-  seconds.
+- It needs Rust (`cargo`) installed, because the compiler writes Rust code and
+  builds it. A build takes about 30 to 40 seconds.
+- The compiled program is built against the Antares source code. `antares
+  build` uses the folder named by the `ANTARES_HOME` environment variable if
+  set, then the folder this copy of Antares was built from if it is still
+  there; otherwise it downloads the source of the matching release from
+  GitHub once and keeps it in your cache folder.
 - By default the program is built for the processor of the machine that
   compiles it, so it may not run on an older one. Choose another target with
   `antares build program.ant out.exe --cpu x86-64` (any 64-bit PC),
@@ -373,13 +607,6 @@ the original C++ generic build.
 This is version 0.1. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
 than Anthropic, and GPU support.
-
-Known platform gaps:
-
-- `key()` and `input_waiting()` only work on Windows so far; on macOS and
-  Linux they always report no key, so live terminal games cannot be steered.
-- `antares build` must be run with an `antares` binary built from a source
-  folder on the same machine, because it compiles against that folder.
 
 ## Rebuilding the documentation
 

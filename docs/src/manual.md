@@ -52,9 +52,27 @@ Hello, world!
 
 # Getting Started {#start}
 
-## Building Antares
+## Installing Antares
 
-Antares is built from source with Rust's `cargo` tool. From the Antares folder:
+Ready-made downloads for Windows, macOS and Linux are published on the project's GitHub releases page, github.com/Madushan996/Antares-Programming-Language. The quickest way to install is the one-line installer.
+
+On Windows, in PowerShell:
+
+```shell
+irm https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.ps1 | iex
+```
+
+On macOS or Linux:
+
+```shell
+curl -fsSL https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.sh | sh
+```
+
+The installer puts `antares` in your user folder and adds it to your PATH. Open a new terminal afterwards and check it with `antares version`. The README on GitHub also explains how to download and install by hand.
+
+## Building from source
+
+Antares can also be built from source with Rust's `cargo` tool. From the Antares folder:
 
 ```shell
 cargo build --release
@@ -1191,7 +1209,8 @@ The compiler looks at the whole program and works out which variables only ever 
 
 ## Requirements and targets
 
-- The compiler needs Rust (`cargo`) installed and the Antares source folder, because it writes Rust code and builds it. A build takes about 30 to 40 seconds.
+- The compiler needs Rust (`cargo`) installed, because it writes Rust code and builds it. A build takes about 30 to 40 seconds. Install Rust from rustup.rs.
+- Compiled programs are built against the Antares source code. `antares build` uses the folder named by the `ANTARES_HOME` environment variable if it is set, then the folder this copy of Antares was built from if it still exists. Otherwise it downloads the source of the matching release from GitHub once and keeps it in your cache folder, so a downloaded copy of Antares can compile programs too.
 - By default the program is built for the processor of the machine that compiles it, so it may not run on an older one. Choose another target with `--cpu`: `x86-64` (any 64-bit PC), `x86-64-v2` (SSE4.2) or `x86-64-v3` (AVX2).
 
 ```shell

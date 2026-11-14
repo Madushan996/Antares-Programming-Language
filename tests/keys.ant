@@ -1,0 +1,10 @@
+# Reads two keys and shows their names. CI runs this inside a pseudo-terminal
+# and types "w" and the up arrow:  antares tests/keys.ant
+got = []
+start = clock()
+while len(got) < 2 and clock() - start < 10 {
+    k = key()
+    when k != nothing { got = push(got, k) }
+    wait(0.01)
+}
+show "keys:", join(got, " ")

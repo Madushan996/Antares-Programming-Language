@@ -14,7 +14,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -36,12 +36,20 @@ jobs:
             ./target/release/antares examples/$e.ant
           done
 
+      - name: Keyboard input in a terminal
+        if: runner.os == 'Linux'
+        run: |
+          out=$( (sleep 2; printf 'w\033[A'; sleep 3) \
+            | timeout 30 script -qec "./target/release/antares tests/keys.ant" /dev/null | tr -d '\r')
+          echo "$out"
+          echo "$out" | grep -q "keys: w up"
+
   compiled:
     name: Compiled programs match the interpreter
     runs-on: ubuntu-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release

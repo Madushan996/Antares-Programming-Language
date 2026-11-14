@@ -1752,6 +1752,42 @@ impl<'a> Cx<'a> {
 /// `cpu` is the processor to build for: "native" (this machine, the default),
 /// "x86-64" (any 64-bit PC), "x86-64-v2" (SSE4.2), "x86-64-v3" (AVX2).
 /// `embed` lists files to pack into the program; it reads them as "embedded:<file name>".
+const REPOSITORY: &str = "https://github.com/Madushan996/Antares-Programming-Language";
+
+/// Whether a folder holds the Antares source (compiled programs build against it).
+fn is_source(dir: &std::path::Path) -> bool {
+    dir.join("src").join("rt.rs").is_file()
+        && std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|t| t.contains("name = \"antares\""))
+}
+
+/// The Antares source folder to build against: ANTARES_HOME, or the folder
+/// this copy of Antares was built from if it is still there. None means the
+/// matching release is fetched from GitHub instead.
+fn find_source() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("ANTARES_HOME").filter(|h| !h.is_empty()) {
+        let home = PathBuf::from(home);
+        if is_source(&home) {
+            return Some(home);
+        }
+        eprintln!("ANTARES_HOME is set to {}, but that isn't the Antares source folder; ignoring it.", home.display());
+    }
+    let built_from = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    is_source(&built_from).then_some(built_from)
+}
+
+/// Where to keep build files when there is no local source folder.
+fn cache_dir() -> Option<PathBuf> {
+    let var = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let base = if cfg!(windows) {
+        var("LOCALAPPDATA")
+    } else if cfg!(target_os = "macos") {
+        var("HOME").map(|h| h.join("Library").join("Caches"))
+    } else {
+        var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|h| h.join(".cache")))
+    };
+    base.map(|b| b.join("antares").join(env!("CARGO_PKG_VERSION")))
+}
+
 pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String]) -> i32 {
     let src = match std::fs::read_to_string(path) {
         Ok(s) => s,
@@ -1845,12 +1881,27 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
         .collect();
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dir = root.join("target").join("aot").join(&stem);
+    let (dependency, work) = match find_source() {
+        Some(root) => (
+            format!("{{ path = {:?} }}", root.to_string_lossy().replace('\\', "/")),
+            root.join("target"),
+        ),
+        None => {
+            let Some(cache) = cache_dir() else {
+                eprintln!("Couldn't find a folder to build in. Set ANTARES_HOME to the Antares source folder.");
+                return 1;
+            };
+            eprintln!(
+                "Using the Antares {} source from {} (set ANTARES_HOME to use a local copy instead).",
+                env!("CARGO_PKG_VERSION"),
+                REPOSITORY
+            );
+            (format!("{{ git = {:?}, tag = \"v{}\" }}", REPOSITORY, env!("CARGO_PKG_VERSION")), cache)
+        }
+    };
+    let dir = work.join("aot").join(&stem);
     let manifest = format!(
-        "[package]\nname = \"{stem}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nantares = {{ path = {root:?} }}\n\n[profile.release]\nopt-level = 3\nlto = \"fat\"\ncodegen-units = 1\npanic = \"abort\"\nstrip = true\n\n[workspace]\n",
-        stem = stem,
-        root = root.to_string_lossy().replace('\\', "/")
+        "[package]\nname = \"{stem}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nantares = {dependency}\n\n[profile.release]\nopt-level = 3\nlto = \"fat\"\ncodegen-units = 1\npanic = \"abort\"\nstrip = true\n\n[workspace]\n",
     );
     if std::fs::create_dir_all(dir.join("src")).is_err()
         || std::fs::write(dir.join("Cargo.toml"), manifest).is_err()
@@ -1860,7 +1911,7 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
         return 1;
     }
     eprintln!("Compiling {} (this takes a little while the first time)...", path);
-    let target = root.join("target").join("aot-target");
+    let target = work.join("aot-target");
     let result = std::process::Command::new("cargo")
         .args(["build", "--release", "--quiet", "--manifest-path"])
         .arg(dir.join("Cargo.toml"))
@@ -1871,7 +1922,8 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String])
     let output = match result {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Couldn't run cargo (is Rust installed?): {}", e);
+            eprintln!("Couldn't run cargo: {}", e);
+            eprintln!("`antares build` needs Rust. Install it from https://rustup.rs and try again.");
             return 1;
         }
     };
