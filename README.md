@@ -14,6 +14,9 @@ language-model calls are part of the language itself, not libraries.
 📘 **Full documentation:** [Antares Language Reference (PDF)](docs/Antares_Language_Reference.pdf)
 covers the whole language, every built-in function, and complete examples.
 
+📗 **New to programming?** [Learn Antares: A Beginner's Guide (PDF)](docs/Learn_Antares.pdf)
+teaches programming from the very first step, with exercises and answers.
+
 - **One file, no dependencies.** The whole language is a single ~680 KB
   program written in Rust with zero external crates. It starts instantly.
 - **Reads like plain verbs.** `learn`, `descend`, `ask`, `show`, `repeat`,
@@ -649,13 +652,21 @@ than Anthropic, and GPU support.
 
 ## Rebuilding the documentation
 
-The PDF is generated from [`docs/src/manual.md`](docs/src/manual.md):
+The language reference is generated from [`docs/src/manual.md`](docs/src/manual.md)
+and the beginner's book from [`docs/src/tutorial.md`](docs/src/tutorial.md):
 
 ```bash
 python docs/src/build.py
+python docs/src/build.py tutorial
 ```
 
 It needs Python with `markdown`, `pygments` and `pymupdf`, and Chrome or Edge.
+Every example in the book shows what Antares really prints; check that they
+still do after changing the language with:
+
+```bash
+python docs/src/check_examples.py
+```
 
 ## License
 

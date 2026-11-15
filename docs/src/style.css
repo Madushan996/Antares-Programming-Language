@@ -267,8 +267,15 @@ table:has(thead th:empty) td { text-align: center; border: 1px solid var(--rule)
   break-inside: avoid;
 }
 .callout.tip { background: #eef6f0; border-color: #cfe5d5; }
+.callout.try { background: #eef6f0; border-color: #cfe5d5; }
+.callout.remember { background: #eef3fb; border-color: #d3dff2; }
+.callout.warn { background: #fdf3e7; border-color: #f3d9b8; }
 .callout p:last-child { margin-bottom: 0; }
 
 /* ---------- appendix ---------- */
 .appendix .chap-label { color: var(--navy); }
 .appendix .chap-head::after { background: var(--navy); }
+
+/* an example stays on the page with the output box that follows it */
+pre.code:has(+ pre.blk.output) { break-after: avoid; }
+pre.blk.output { break-before: avoid; }
