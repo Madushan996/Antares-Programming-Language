@@ -62,7 +62,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.4.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.4.0.
+This book covers **Antares 0.5.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.5.0.
 
 ## Summary
 
@@ -98,7 +98,7 @@ antares version
 ```
 
 ```output
-Antares 0.4.0
+Antares 0.5.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -160,7 +160,7 @@ Each `show` prints one line, in order.
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.4.0 — type a line and press Enter. `exit` to leave.
+Antares 0.5.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -383,6 +383,23 @@ show score
 
 The last line, `score = score + 5`, looks odd at first. It is *not* an equation. It means: work out `score + 5` (which is 15) using the current score, then make that the new value of `score`. This "take the old value and change it" pattern is everywhere in programming.
 
+Because it is so common, there is a shorter way to write it. `score += 5` means exactly `score = score + 5`, and `-=`, `*=` and `/=` work the same way:
+
+```antares
+lives = 3
+lives -= 1
+coins = 10
+coins += 5
+coins *= 2
+show lives, coins
+```
+
+```output
+2 30
+```
+
+`+=` also adds text onto the end of text: `name += "!"`.
+
 ## Naming rules
 
 Variable names:
@@ -508,7 +525,7 @@ Here the user typed `Maya` and `2014`. Because the year comes back as text, the 
 ## Summary
 
 - `name = value` makes or changes a variable.
-- `x = x + 1` means "make x one bigger".
+- `x = x + 1`, or `x += 1`, means "make x one bigger".
 - Names are case-sensitive and should describe the value.
 - `+ - * / % ^` do arithmetic; parentheses change the order.
 - Text and numbers are different kinds of value: `number(...)` and `text(...)` convert between them.
@@ -1030,6 +1047,10 @@ each i in range(len(podium)) {
 | `sum(list)`, `mean(list)` | The total and the average of a list of numbers |
 | `max(list)`, `min(list)` | The largest and smallest number |
 | `join(list, sep)` | All items joined into one text, with `sep` between them |
+| `find(list, item)` | The position of the item, or -1 if it isn't there |
+| `insert(list, position, item)` | A new list with the item put in at that position |
+| `remove(list, position)` | A new list without the item at that position |
+| `unique(list)` | The items without repeats |
 
 ```antares
 marks = [62, 85, 71, 90]
@@ -1044,6 +1065,25 @@ show join(["red", "green", "blue"], " and ")
 308 77 90 62
 yes no
 red and green and blue
+```
+
+`insert` and `remove` change a list in the middle. Like `push`, they give back a new list, so store it back in the variable:
+
+```antares
+queue = ["Ana", "Ben", "Cleo"]
+queue = insert(queue, 1, "Dev")
+show queue
+queue = remove(queue, 0)
+show queue
+show find(queue, "Cleo"), find(queue, "Zed")
+show unique(["red", "blue", "red", "green", "blue"])
+```
+
+```output
+["Ana", "Dev", "Ben", "Cleo"]
+["Dev", "Ben", "Cleo"]
+2 -1
+["red", "blue", "green"]
 ```
 
 ## Lists of numbers are special
@@ -1468,6 +1508,20 @@ show filter(names, name => len(name) > 3)
 
 Notice `map(names, upper)`: any function can be passed, including built-ins and functions you wrote with `to`.
 
+`sort_by(list, f)` sorts a list by whatever `f` gives for each item. It's how you sort a list of maps by one of their fields:
+
+```antares
+players = [{name: "Ana", score: 12}, {name: "Ben", score: 30}, {name: "Cleo", score: 21}]
+ranked = sort_by(players, p => p.score)
+show map(ranked, p => p.name)
+show sort_by(["kiwi", "fig", "banana"], len)
+```
+
+```output
+["Ana", "Cleo", "Ben"]
+["fig", "kiwi", "banana"]
+```
+
 ## Pipelines with ->
 
 When you apply several functions one after another, nested parentheses get hard to read: `sum(map(sort(x), f))`. The **pipeline** arrow `->` passes the value on its left into the function on its right, so the code reads in the order things happen:
@@ -1828,6 +1882,51 @@ when has(email, "@") {
 Looks like an email address
 ```
 
+`find(t, part)` says *where* the part is: its position, or -1 if it isn't there:
+
+```antares
+email = "sam@example.com"
+at = find(email, "@")
+show at
+show "The user name is " + email[:at]
+```
+
+```output
+3
+The user name is sam
+```
+
+## Lining up numbers
+
+Two functions help when you print numbers. `fixed(x, places)` gives a number as text with exactly that many digits after the point. `pad(value, width)` adds spaces to make a value a set width, so columns line up. Numbers are lined up on the right and text on the left, as in a table:
+
+```antares
+show fixed(3.14159, 2), fixed(7, 2)
+items = [["tea", 2.5], ["cake", 12], ["juice", 3.25]]
+each item in items {
+    show pad(item[0], 8) + pad(fixed(item[1], 2), 6, "right")
+}
+```
+
+```output
+3.14 7.00
+tea       2.50
+cake     12.00
+juice     3.25
+```
+
+Because `fixed` gives text, `pad` would line it up on the left; the third input `"right"` lines it up on the right. A fourth input fills with another character instead of spaces, which is how you print times:
+
+```antares
+hour = 9
+minute = 5
+show "{hour}:{pad(minute, 2, "right", "0")}"
+```
+
+```output
+9:05
+```
+
 ## Text and numbers
 
 To do arithmetic with digits that arrive as text, convert them with `number(...)`. To turn any value into text, use `text(...)`, or put it inside braces in a text:
@@ -1883,7 +1982,8 @@ bird 1
 - Text has a length, indexes and slices, like a list of letters.
 - `upper`, `lower`, `trim`, `replace` and `reverse` give changed copies.
 - `split`, `lines` and `join` cut text up and glue lists together.
-- `has(t, part)` searches; `number` and `text` convert.
+- `has(t, part)` and `find(t, part)` search; `number` and `text` convert.
+- `fixed(x, places)` and `pad(value, width)` line numbers up.
 
 # Files and Bigger Programs {#files}
 
@@ -1917,6 +2017,23 @@ No note yet
 ```
 
 (This example shows `No note yet` when run in a fresh folder; after the previous example has run, it would find the note.)
+
+`append(file, text)` adds text to the end of a file instead of replacing it, which suits logs and diaries. `delete(file)` removes a file, and `files()` lists the files in the current folder (or `files("folder")` in another one):
+
+```antares
+append("diary.txt", "Monday: learned Antares\n")
+append("diary.txt", "Tuesday: wrote a game\n")
+show lines(trim(read("diary.txt")))
+show has(files(), "diary.txt")
+delete("diary.txt")
+show exists("diary.txt")
+```
+
+```output
+["Monday: learned Antares", "Tuesday: wrote a game"]
+yes
+no
+```
 
 ## Saving whole values
 
@@ -1970,6 +2087,44 @@ show sum(data)
 6
 ```
 
+## Information from outside
+
+A program can find out what was typed after its name when it was started, with `args()`, and read the computer's settings with `env(name)`:
+
+<!-- norun -->
+```antares
+# greet.ant
+when len(args()) > 0 {
+    show "Hello, {args()[0]}!"
+} else {
+    show "Hello, whoever you are!"
+}
+```
+
+```shell
+antares greet.ant Maya
+```
+
+```output
+Hello, Maya!
+```
+
+`now()` gives the date and time, as a map:
+
+```antares
+show keys(now())
+```
+
+```output
+["year", "month", "day", "hour", "minute", "second", "weekday"]
+```
+
+<!-- norun -->
+```antares
+t = now()
+show "Today is {t.weekday} {t.day}/{t.month}/{t.year}"
+```
+
 ## Splitting a program into files
 
 When a program grows to hundreds of lines, it helps to split it into several files. `use "name"` runs the file `name.ant` from the same folder, and makes everything it defines available:
@@ -2001,7 +2156,8 @@ Running `antares main.ant` shows `12.56636` and `25`. Each file is only run once
 
 ## Summary
 
-- `write` and `read` store and fetch text; `exists` checks for a file.
+- `write` and `read` store and fetch text; `append` adds to a file; `exists`, `delete` and `files` manage files.
+- `args()` gives the command line, `env(name)` a setting, and `now()` the date and time.
 - `save` and `load` store any value as JSON, exactly.
 - `json` and `to_json` convert between JSON text and values.
 - `use "name"` brings in another file's functions and variables.
@@ -2832,6 +2988,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.2.0 | 14 Nov 2026 | Much faster compiled programs, and icons for Windows programs. |
 | 0.3.0 | 15 Nov 2026 | Faster compiled code for programs like chess engines, and compact matrices by row. |
 | 0.4.0 | 15 Nov 2026 | Ranges with `within`, and compiled programs that skip checks they can prove are unneeded. |
+| 0.5.0 | 15 Nov 2026 | Everyday features: `+=`, the command line, laying out numbers, editing lists, the date and time, and files. |
 
 ## Version 0.1.0: the first release
 
@@ -2919,6 +3076,25 @@ Every value given to such a variable is checked, so a wrong number is reported w
 - **Smaller savings:** compact-matrix row operations no longer build temporary rows.
 
 On the NARC Antares chess engine, move generation became 35 to 54% faster and searching 3 to 9% faster.
+
+## Version 0.5.0: everyday features
+
+The features that everyday programs need most, and that were missing until now. Programs print exactly what they printed before.
+
+**New in the language:** `+=`, `-=`, `*=` and `/=` change a value by an amount (Chapter 4): `score += 5`, `counts[word] += 1`, `change total += amount`.
+
+**New built-in functions:**
+
+| Area | Functions |
+|---|---|
+| The command line | `args()`, `env(name)` |
+| Laying out numbers | `fixed(x, places)`, `pad(value, width [, side [, fill]])` |
+| Lists | `find`, `insert`, `remove`, `unique`, `sort_by` |
+| Text | `find`, `code(t)`, `char(n)` |
+| Date and time | `now()` |
+| Files | `append`, `delete`, `files` |
+
+That makes 100 built-in functions. This book, *Learn Antares*, was also published with this version, in the `docs` folder.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -3599,6 +3775,7 @@ draw("Done!")
 |---|---|
 | `show a, b` | Prints values on one line |
 | `name = value` | Makes or changes a variable |
+| `x += v`, `x -= v`, `x *= v`, `x /= v` | Changes a value by an amount |
 | `name = value within lo to hi` | A top-level variable that must hold numbers from lo to hi |
 | `list[i] = v`, `map.field = v` | Changes part of a value |
 | `when cond { } else when cond { } else { }` | Chooses what to do |
@@ -3634,15 +3811,15 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 
 | Group | Functions |
 |---|---|
-| Lists and maps | `len push sort reverse slice has keys values join map filter reduce` |
-| Text | `upper lower trim split lines replace text number` |
+| Lists and maps | `len push insert remove find unique sort sort_by reverse slice has keys values join map filter reduce` |
+| Text | `upper lower trim split lines replace find text number fixed pad code char` |
 | Numbers | `abs sqrt exp log sin cos floor round trunc clip max min` |
 | Tensors | `zeros ones range rand randn seed shape reshape t sum mean argmax softmax onehot` |
 | Learning | `grad tanh sigmoid relu` |
 | Integers | `int ints div popcount lowest_bit highest_bit rand_bits` |
 | Checking | `check fail within kind` |
-| Files and data | `read write exists save load json to_json read_binary program_folder` |
-| Input and screen | `input input_waiting key wait draw clear clock` |
+| Files and data | `read write append delete files exists save load json to_json read_binary program_folder` |
+| Input and screen | `input input_waiting key wait draw clear clock now args env` |
 
 The Antares Language Reference describes every one of them in detail.
 
