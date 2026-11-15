@@ -157,7 +157,7 @@ fn calls_anything(e: &Expr) -> bool {
 
 /// Built-ins that call functions given to them.
 fn calls_back(name: &str) -> bool {
-    matches!(name, "map" | "filter" | "reduce")
+    matches!(name, "map" | "filter" | "reduce" | "sort_by")
 }
 
 fn is_bit_op(op: BinOp) -> bool {
@@ -248,6 +248,8 @@ fn builtin_ret(name: &str, tys: &[Ty]) -> Ty {
             _ => Dyn,
         },
         "int" | "popcount" | "lowest_bit" | "highest_bit" | "div" | "rand_bits" => Int,
+        // always an ordinary number
+        "code" | "find" => Num,
         "ints" => IArr,
         "abs" | "floor" | "trunc" | "round" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tanh" | "sigmoid" | "relu" => {
             match tys {

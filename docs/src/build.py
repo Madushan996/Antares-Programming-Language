@@ -1,9 +1,11 @@
-"""Builds docs/Antares_Language_Reference.pdf from docs/src/manual.md.
+"""Builds docs/Antares_Language_Reference.pdf from docs/src/manual.md, and
+docs/Learn_Antares.pdf (the beginner's book) from docs/src/tutorial.md.
 
 Needs Python 3 with `markdown`, `pygments` and `pymupdf`, and Google Chrome
 or Microsoft Edge (used headless to lay out and print the pages).
 
-    python docs/src/build.py
+    python docs/src/build.py              the language reference
+    python docs/src/build.py tutorial     the beginner's book
 """
 
 import html
@@ -25,7 +27,6 @@ from pygments.token import Comment, Keyword, Name, Number, Operator, Punctuation
 HERE = Path(__file__).resolve().parent
 DOCS = HERE.parent
 ROOT = DOCS.parent
-OUT = DOCS / "Antares_Language_Reference.pdf"
 VERSION = re.search(r'^version\s*=\s*"([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
 DATE = "November 2026"
 
@@ -37,7 +38,8 @@ onehot grad exp log tanh sigmoid relu sqrt abs sin cos floor round trunc clip su
 compact expand screlu sum_product screlu_dot update_rows read_binary input_waiting len int
 ints popcount lowest_bit highest_bit div rand_bits push map filter reduce keys values has join
 split sort reverse slice upper lower trim replace lines text number kind read write input clock
-fail check json to_json save load exists program_folder key wait clear draw""".split()
+fail check within json to_json save load exists program_folder key wait clear draw args env append
+delete files now fixed pad code char insert remove find unique sort_by""".split()
 
 
 class AntaresLexer(RegexLexer):
@@ -115,7 +117,10 @@ def convert(md_text: str):
             text = mm.group(1)
             sid = f"{cid}-{sec_no}"
             num = f"{prefix}.{sec_no}"
-            sections.append((num, strip_tags(text), sid))
+            # every chapter of the beginner's book has these; listing them is clutter
+            # (and its answers appendix has one section per chapter)
+            if strip_tags(text) not in ("Try it yourself", "Summary") and not strip_tags(text).startswith("Chapter "):
+                sections.append((num, strip_tags(text), sid))
             return f'<h2 id="{sid}"><span class="secno">{num}</span>{text}</h2>'
 
         inner = re.sub(r"<h2>(.*?)</h2>", number_h2, inner)
@@ -155,10 +160,13 @@ def process_code(s: str) -> str:
     return CODE_RE.sub(repl, s)
 
 
+CALLOUTS = {"Tip.": "tip", "Try it.": "try", "Remember.": "remember", "Watch out.": "warn"}
+
+
 def process_callouts(s: str) -> str:
     def repl(m):
         inner = m.group(1)
-        kind = "tip" if "<strong>Tip." in inner else "note"
+        kind = next((k for word, k in CALLOUTS.items() if f"<strong>{word}" in inner), "note")
         return f'<aside class="callout {kind}">{inner}</aside>'
 
     return re.sub(r"<blockquote>\s*(.*?)\s*</blockquote>", repl, s, flags=re.S)
@@ -186,7 +194,7 @@ def toc_html(toc, pages):
     return '<section class="toc"><h1 class="toc-h">Contents</h1><ol>' + "".join(rows) + "</ol></section>"
 
 
-COVER_CODE = highlight_code('''learn slope = 0
+MANUAL_CODE = highlight_code('''learn slope = 0
 learn offset = 0
 
 repeat 400 {
@@ -198,32 +206,75 @@ model claude = "anthropic:claude-opus-5-5"
 count = ask claude "How many moons does Mars have?" as number''')
 
 
-def cover_html():
+TUTORIAL_CODE = highlight_code('''name = input("What is your name? ")
+show "Hello, {name}!"
+
+each planet in ["Mercury", "Venus", "Earth"] {
+    show "{planet} has {len(planet)} letters"
+}
+
+to double(x) = x * 2
+show map([1, 2, 3], double)''')
+
+# What each document is: its source, file, title and cover.
+BOOKS = {
+    "manual": {
+        "src": "manual.md",
+        "out": "Antares_Language_Reference.pdf",
+        "title": "Antares Language Reference",
+        "subject": f"The Antares programming language, version {VERSION}",
+        "kicker": "Programming Language Reference",
+        "cover_title": "Antares",
+        "sub": "The Language Reference and User Guide",
+        "tag": "A small programming language for AI. Tensors, automatic differentiation and "
+               "language-model calls are part of the language itself.",
+        "code": MANUAL_CODE,
+        "foot3": ("Implementation", "Rust, zero dependencies"),
+    },
+    "tutorial": {
+        "src": "tutorial.md",
+        "out": "Learn_Antares.pdf",
+        "title": "Learn Antares: A Beginner's Guide",
+        "subject": f"Learning to program with Antares, version {VERSION}",
+        "kicker": "A Beginner's Guide",
+        "cover_title": "Learn Antares",
+        "sub": "Programming from the very first step",
+        "tag": "No experience needed. Every example in this book was run with Antares, and "
+               "every chapter ends with exercises, answered at the back.",
+        "code": TUTORIAL_CODE,
+        "foot3": ("For", "Complete beginners"),
+    },
+}
+
+
+def cover_html(book):
+    k3, v3 = book["foot3"]
     return f'''<section class="cover">
   <div class="star"></div>
   <div class="cover-top">
-    <div class="cover-kicker">Programming Language Reference</div>
-    <div class="cover-title">Antares</div>
-    <div class="cover-sub">The Language Reference and User Guide</div>
-    <div class="cover-tag">A small programming language for AI. Tensors, automatic
-    differentiation and language-model calls are part of the language itself.</div>
+    <div class="cover-kicker">{book["kicker"]}</div>
+    <div class="cover-title">{book["cover_title"]}</div>
+    <div class="cover-sub">{book["sub"]}</div>
+    <div class="cover-tag">{book["tag"]}</div>
   </div>
-  <pre class="cover-code"><code>{COVER_CODE}</code></pre>
+  <pre class="cover-code"><code>{book["code"]}</code></pre>
   <div class="cover-foot">
     <div><span class="cf-k">Version</span>{VERSION}</div>
     <div><span class="cf-k">Edition</span>{DATE}</div>
-    <div><span class="cf-k">Implementation</span>Rust, zero dependencies</div>
+    <div><span class="cf-k">{k3}</span>{v3}</div>
   </div>
 </section>'''
 
 
-def page_html(body, toc, pages):
+def page_html(body, toc, pages, book):
     css = (HERE / "style.css").read_text(encoding="utf-8")
+    # the running footer names the document
+    css += f'\n@page {{ @bottom-left {{ content: "{book["title"]}"; }} }}\n@page cover {{ @bottom-left {{ content: none; }} }}\n'
     return f'''<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
-<title>Antares Language Reference</title>
+<title>{html.escape(book["title"])}</title>
 <style>{css}</style></head>
-<body>{cover_html()}{toc_html(toc, pages)}{body}</body></html>'''
+<body>{cover_html(book)}{toc_html(toc, pages)}{body}</body></html>'''
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +326,12 @@ def heading_pages(pdf_path, ids):
 
 
 def main():
-    body, toc = convert((HERE / "manual.md").read_text(encoding="utf-8"))
+    which = sys.argv[1] if len(sys.argv) > 1 else "manual"
+    if which not in BOOKS:
+        sys.exit(f"Choose one of: {', '.join(BOOKS)}")
+    book = BOOKS[which]
+    out = DOCS / book["out"]
+    body, toc = convert((HERE / book["src"]).read_text(encoding="utf-8"))
     ids = []
     for _, _, cid, sections, _ in toc:
         ids.append(cid)
@@ -283,10 +339,10 @@ def main():
     browser = find_browser()
     with tempfile.TemporaryDirectory() as work:
         first = Path(work) / "pass1.pdf"
-        print_pdf(browser, page_html(body, toc, {}), first, work)
+        print_pdf(browser, page_html(body, toc, {}, book), first, work)
         pages = heading_pages(first, ids)
         final = Path(work) / "pass2.pdf"
-        print_pdf(browser, page_html(body, toc, pages), final, work)
+        print_pdf(browser, page_html(body, toc, pages, book), final, work)
         check = heading_pages(final, ids)
         if check != pages:
             sys.exit("Page numbers moved between passes; run again")
@@ -298,16 +354,16 @@ def main():
             outline += [[2, f"{num}  {stitle}", pages[sid]] for num, stitle, sid in sections]
         doc.set_toc([[1, "Cover", 1], [1, "Contents", 2]] + outline)
         doc.set_metadata({
-            "title": "Antares Language Reference",
-            "subject": f"The Antares programming language, version {VERSION}",
+            "title": book["title"],
+            "subject": book["subject"],
             "keywords": "Antares, programming language, tensors, autodiff, machine learning, LLM",
             "creator": "docs/src/build.py",
             "producer": "Chrome + PyMuPDF",
         })
-        doc.save(OUT, garbage=3, deflate=True)
+        doc.save(out, garbage=3, deflate=True)
         n = doc.page_count
         doc.close()
-    print(f"Wrote {OUT} ({n} pages)")
+    print(f"Wrote {out} ({n} pages)")
 
 
 if __name__ == "__main__":

@@ -52,6 +52,11 @@ pub enum Tok {
     Colon,
     Dot,
     Assign,
+    /// `+=` `-=` `*=` `/=`: change a value by an amount.
+    PlusAssign,
+    MinusAssign,
+    StarAssign,
+    SlashAssign,
     Arrow,
     FatArrow,
     Plus,
@@ -140,6 +145,10 @@ fn continues(t: &Tok) -> bool {
             | Tok::Shl
             | Tok::Shr
             | Tok::Assign
+            | Tok::PlusAssign
+            | Tok::MinusAssign
+            | Tok::StarAssign
+            | Tok::SlashAssign
             | Tok::Arrow
             | Tok::FatArrow
             | Tok::Comma
@@ -310,6 +319,10 @@ pub fn lex(src: &str, first_line: u32) -> Result<Vec<Token>, (String, u32)> {
                     ('>', '>') => (Tok::Shr, 2),
                     ('<', '=') => (Tok::Le, 2),
                     ('>', '=') => (Tok::Ge, 2),
+                    ('+', '=') => (Tok::PlusAssign, 2),
+                    ('-', '=') => (Tok::MinusAssign, 2),
+                    ('*', '=') => (Tok::StarAssign, 2),
+                    ('/', '=') => (Tok::SlashAssign, 2),
                     ('(', _) => (Tok::LParen, 1),
                     (')', _) => (Tok::RParen, 1),
                     ('[', _) => (Tok::LBrack, 1),

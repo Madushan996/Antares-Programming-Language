@@ -73,6 +73,7 @@ fn report(files: &[(&str, &str)], main_src: &str, msg: &str, line: u32) {
 
 /// Runs a compiled program's body on a thread with a large stack.
 pub fn start(files: &'static [(&'static str, &'static str)], main_src: &'static str, body: fn() -> R<()>) -> ! {
+    crate::builtins::set_program_args(std::env::args().skip(1).collect());
     let child = std::thread::Builder::new()
         .stack_size(1 << 30)
         .spawn(move || {

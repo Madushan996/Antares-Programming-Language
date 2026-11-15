@@ -503,6 +503,18 @@ person.skills[0] = "maths"
 grid[0, 1] = 9
 ```
 
+`+=`, `-=`, `*=` and `/=` change a value by an amount: `x += 1` is the same as `x = x + 1`. They work on names and on parts of values, and `+=` joins text too:
+
+```antares
+score = 10
+score += 5                      # 15
+score *= 2                      # 30
+counts[word] += 1
+person.name += " Lovelace"
+```
+
+With a part of a value, the positions must be names, numbers, text or arithmetic on them (`xs[i + 1] += 2`), not calls, which would otherwise run twice.
+
 ## show
 
 `show` prints one or more values separated by spaces, followed by a new line:
@@ -632,7 +644,7 @@ Inside a function, `x = ...` always makes a **local** variable, even if a global
 
 ```antares
 count = 0
-to bump() { change count = count + 1 }
+to bump() { change count += 1 }
 bump()
 bump()
 show count                      # 2
@@ -1140,6 +1152,9 @@ show "Hello, {name}!"
 | `load(file)` | Reads a value written by `save` |
 | `read_binary(file, kind, start, count)` | Reads `count` whole numbers from a binary file, starting at byte `start`. `kind` is `"u8"`, `"i8"`, `"u16"`, `"i16"`, `"u32"` or `"i32"` (little-endian) |
 | `program_folder()` | The folder the running program is in, so it can find files next to it wherever it is started from |
+| `append(file, value)` | Adds a value (as text) to the end of a file, creating it if needed |
+| `delete(file)` | Removes a file |
+| `files([folder])` | The names of the files and folders in a folder (the current one if left out), sorted |
 
 ## JSON
 
@@ -1152,7 +1167,22 @@ show sum(data.n), data.ok             # 6 yes
 
 ## Text functions
 
-`upper`, `lower` and `trim` change text. `split(text)` splits on spaces (or `split(text, sep)` on a separator), `lines(text)` splits into lines, `replace(text, from, to)` replaces every occurrence, and `join(list, sep)` puts items back together. `text(v)` turns any value into text, and `number(t)` reads a number from text.
+`upper`, `lower` and `trim` change text. `split(text)` splits on spaces (or `split(text, sep)` on a separator), `lines(text)` splits into lines, `replace(text, from, to)` replaces every occurrence, and `join(list, sep)` puts items back together. `find(text, part)` gives the position where `part` first appears, or -1. `text(v)` turns any value into text, and `number(t)` reads a number from text. `code(t)` gives the number of a character and `char(n)` the character with a number.
+
+Two functions lay numbers out. `fixed(x, places)` gives `x` as text with exactly that many digits after the point, and `pad(value, width)` adds spaces to make a value `width` characters wide. Numbers are lined up on the right and text on the left, as in a table; a third input, `"left"` or `"right"`, chooses, and a fourth fills with another character instead of spaces: `pad(5, 2, "right", "0")` is `"05"` (a minus sign stays in front of the zeros). What `fixed` gives is text, so line it up on the right yourself:
+
+```antares
+show fixed(3.14159, 2), fixed(2, 3)
+each row in [["tea", 2.5], ["cake", 12]] {
+    show pad(row[0], 6) + pad(fixed(row[1], 2), 7, "right")
+}
+```
+
+```output
+3.14 2.000
+tea      2.50
+cake    12.00
+```
 
 ```antares
 show split("a,b,c", ","), join(["x", "y"], "-"), replace("cat", "c", "b")
@@ -1164,6 +1194,14 @@ show split("a,b,c", ","), join(["x", "y"], "-"), replace("cat", "c", "b")
 
 ## Time
 
+`now()` gives the local date and time as a map with the fields `year`, `month`, `day`, `hour`, `minute`, `second` and `weekday` (the day's name, such as `"Monday"`):
+
+```antares
+t = now()
+show "Today is {t.weekday} {t.day}/{t.month}/{t.year}"
+show "The time is {t.hour}:{pad(t.minute, 2, "right", "0")}"     # 9:05, not 9:5
+```
+
 `clock()` gives the current time in seconds, as a decimal, useful for measuring how long something takes:
 
 ```antares
@@ -1171,6 +1209,22 @@ start = clock()
 result = fib(25)
 show "took", clock() - start, "seconds"
 ```
+
+## The command line and settings
+
+`args()` gives what was typed after the program's name when it was started, as a list of text. `env(name)` gives a setting of the computer (an environment variable), or `nothing` if it isn't set:
+
+```antares
+# antares greet.ant Maya
+when len(args()) > 0 {
+    show "Hello, {args()[0]}!"
+} else {
+    show "Hello, whoever you are!"
+}
+show env("HOME")
+```
+
+Compiled programs get their arguments the same way: `greet.exe Maya`.
 
 # Games and Live Terminal Programs {#games}
 
@@ -1390,6 +1444,11 @@ The statements `learn` and `descend` are described in Chapter 11.
 | `reverse(x)` | Reversed list or text |
 | `slice(x, start [, end])` | Part of a list or text |
 | `has(x, item)` | Whether a list contains an item, a map has a key, or a text contains a text |
+| `find(x, item)` | Position of the first equal item in a list, or of a text in a text; -1 if not there |
+| `insert(list, pos, item)` | A new list with `item` put in at `pos` |
+| `remove(list, pos)` | A new list without the item at `pos` (negative counts from the end) |
+| `unique(list)` | The items without repeats, in the order they first appear |
+| `sort_by(list, f)` | Sorted copy, by the number or text `f` gives for each item |
 | `keys(map)`, `values(map)` | Field names and field values |
 | `join(list [, sep])` | Items joined into text |
 
@@ -1404,6 +1463,9 @@ The statements `learn` and `descend` are described in Chapter 11.
 | `replace(t, from, to)` | Replace every occurrence |
 | `text(v)` | Any value as text |
 | `number(v)` | Text, yes/no or integer as an ordinary number |
+| `fixed(x, places)` | A number as text with exactly that many digits after the point |
+| `pad(v, width [, side [, fill]])` | Text padded to a width with spaces (or `fill`); numbers on the right, text on the left |
+| `code(t)`, `char(n)` | The number of a character, and the character with a number |
 
 ## Data and files
 
@@ -1415,6 +1477,10 @@ The statements `learn` and `descend` are described in Chapter 11.
 | `read_binary(file, kind, start, count)` | Whole numbers from a binary file |
 | `json(t)`, `to_json(v)` | Parse and produce JSON |
 | `program_folder()` | Folder of the running program |
+| `append(file, value)`, `delete(file)` | Add to the end of a file; remove a file |
+| `files([folder])` | Names in a folder |
+| `args()` | What was typed after the program's name |
+| `env(name)` | A setting of the computer, or `nothing` |
 | `input([prompt])` | Read a line from the user |
 | `input_waiting()` | Whether input is waiting |
 
@@ -1433,6 +1499,7 @@ The statements `learn` and `descend` are described in Chapter 11.
 |---|---|
 | `kind(v)` | The kind of a value, as text |
 | `clock()` | Current time in seconds |
+| `now()` | The local date and time, as a map |
 | `check(cond [, message])` | Raise a problem when `cond` is `no` |
 | `fail([message])` | Raise a problem |
 
@@ -1501,10 +1568,10 @@ statement   = "use" TEXT
             | "while" expr block
             | "descend" expr "by" expr [ "using" ( "adam" | "sgd" ) ]
             | "try" block "else" [ NAME ] block
-            | "change" NAME "=" expr
+            | "change" NAME ( "=" | "+=" | "-=" | "*=" | "/=" ) expr
             | "stop" | "skip"
             | NAME "=" expr [ range ]
-            | target "=" expr
+            | target ( "=" | "+=" | "-=" | "*=" | "/=" ) expr
             | expr
 
 target      = NAME { "." NAME | "[" index { "," index } "]" }

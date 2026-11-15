@@ -165,13 +165,20 @@ fn real_main() -> i32 {
             }
         },
         Some("run") => match args.get(1) {
-            Some(p) => run_file(p),
+            Some(p) => {
+                builtins::set_program_args(args[2..].to_vec());
+                run_file(p)
+            }
             None => {
                 eprintln!("Which file? Try: antares run program.ant");
                 1
             }
         },
-        Some(p) => run_file(p),
+        Some(p) => {
+            // what follows the program's name is for the program (see args())
+            builtins::set_program_args(args[1..].to_vec());
+            run_file(p)
+        }
     }
 }
 
