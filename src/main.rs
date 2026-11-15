@@ -1,4 +1,4 @@
-use antares::{aot, builtins, interp, lexer, parser, value};
+use antares::{aot, builtins, interp, lexer, pack, parser, value};
 
 use std::io::{BufRead, Write};
 use value::Value;
@@ -65,6 +65,30 @@ fn run_file(path: &str) -> i32 {
     }
 }
 
+/// Runs the program attached to this executable by `antares build --pack`.
+fn run_packed(p: pack::Packed) -> i32 {
+    builtins::set_program_args(std::env::args().skip(1).collect());
+    if let Ok(exe) = std::env::current_exe() {
+        builtins::set_program_folder(&exe);
+    }
+    let embedded: Vec<(&'static str, &'static [u8])> = p
+        .embedded
+        .into_iter()
+        .map(|(name, data)| (&*Box::leak(name.into_boxed_str()), &*Box::leak(data.into_boxed_slice())))
+        .collect();
+    builtins::set_embedded(&embedded);
+    let mut session = Session::new();
+    session.parser.set_packed(&p.main, p.files, p.aliases);
+    match session.run(&p.main_src) {
+        Ok(_) => 0,
+        Err((msg, line)) => {
+            let _ = std::io::stdout().flush();
+            report(&session, &p.main_src, &msg, line);
+            1
+        }
+    }
+}
+
 fn balance(src: &str) -> i32 {
     let mut depth = 0;
     let mut in_text = false;
@@ -115,6 +139,9 @@ fn repl() -> i32 {
 }
 
 fn real_main() -> i32 {
+    if let Some(packed) = pack::find() {
+        return run_packed(packed);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         None => repl(),
@@ -127,8 +154,11 @@ fn real_main() -> i32 {
             println!("  antares                 start an interactive session");
             println!("  antares program.ant     run a program");
             println!("  antares run program.ant the same");
-            println!("  antares build program.ant   compile it to a fast native program");
-            println!("      [output.exe] [--cpu native|x86-64|x86-64-v2|x86-64-v3] [--embed file] [--icon file.ico]");
+            println!("  antares build program.ant   make a program you can share");
+            println!("      [output.exe] [--embed file] [--icon file.ico]");
+            println!("      [--native]  compile to fast native code (needs Rust; the default when Rust is installed)");
+            println!("      [--pack]    pack it with the Antares engine instead (no Rust needed)");
+            println!("      [--cpu native|x86-64|x86-64-v2|x86-64-v3]  for --native");
             println!("  antares version         show the version");
             0
         }
@@ -139,9 +169,13 @@ fn real_main() -> i32 {
                 let mut cpu = None;
                 let mut embed: Vec<String> = vec![];
                 let mut icon = None;
+                let mut mode = None;
                 let mut i = 2;
                 while i < args.len() {
-                    if args[i] == "--cpu" {
+                    if args[i] == "--pack" || args[i] == "--native" {
+                        mode = Some(args[i].clone());
+                        i += 1;
+                    } else if args[i] == "--cpu" {
                         cpu = args.get(i + 1).map(|s| s.as_str());
                         i += 2;
                     } else if args[i] == "--icon" {
@@ -157,7 +191,26 @@ fn real_main() -> i32 {
                         i += 1;
                     }
                 }
-                aot::build(p, out, cpu, &embed, icon)
+                let native = match mode.as_deref() {
+                    Some("--native") => true,
+                    Some(_) => false,
+                    None => {
+                        let found = aot::have_cargo();
+                        if !found {
+                            eprintln!("Rust isn't installed, so {} is packed with the Antares engine instead of compiled.", p);
+                            eprintln!("It runs like `antares run`. For compiled speed, install Rust from https://rustup.rs and build again.");
+                        }
+                        found
+                    }
+                };
+                if native {
+                    aot::build(p, out, cpu, &embed, icon)
+                } else {
+                    if cpu.is_some() {
+                        eprintln!("Note: --cpu only applies to compiled programs (--native); ignoring it.");
+                    }
+                    pack::build(p, out, &embed, icon)
+                }
             }
             None => {
                 eprintln!("Which file? Try: antares build program.ant");

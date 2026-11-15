@@ -45,7 +45,7 @@ count = ask claude "How many moons does Mars have?" as number
 - [Your first program](#your-first-program)
 - [Building something: a step-by-step example](#building-something-a-step-by-step-example)
 - [Everyday commands](#everyday-commands)
-- [Making a fast executable to share](#making-a-fast-executable-to-share)
+- [Making an executable to share](#making-an-executable-to-share)
 - [Troubleshooting](#troubleshooting)
 - [The language in five minutes](#the-language-in-five-minutes)
 - [Machine learning](#machine-learning) · [Language models](#language-models) · [Built-in functions](#built-in-functions)
@@ -249,7 +249,7 @@ Tips for bigger projects:
 |---|---|
 | `antares program.ant` | Run a program |
 | `antares` | Interactive session (type `exit` to leave) |
-| `antares build program.ant` | Make a fast stand-alone executable |
+| `antares build program.ant` | Make a stand-alone executable to share |
 | `antares version` | Show the installed version |
 | `antares help` | List the commands |
 
@@ -257,24 +257,34 @@ To use language models, set your Anthropic API key first:
 `setx ANTHROPIC_API_KEY "your-key"` on Windows (then open a new terminal), or
 `export ANTHROPIC_API_KEY="your-key"` on macOS/Linux.
 
-## Making a fast executable to share
+## Making an executable to share
 
-`antares build` turns a program into a native executable that runs on
-computers **without** Antares installed, and much faster than the interpreter:
+`antares build` turns a program into an executable that runs on computers
+**without** Antares installed:
 
 ```bash
 antares build main.ant
 ```
 
 This creates `main.exe` (Windows) or `main` (macOS/Linux) next to `main.ant`.
+It is made in one of two ways:
 
-- This one step needs **Rust**: install it from [rustup.rs](https://rustup.rs)
-  (just accept the defaults). Running programs normally does not.
-- The first build downloads the Antares source code for your version and takes
-  a minute or two; later builds take about 30 to 40 seconds.
+| | Packed (`--pack`) | Compiled (`--native`) |
+|---|---|---|
+| Needs Rust | No | Yes, from [rustup.rs](https://rustup.rs) |
+| Build time | Under a second | 30 to 40 seconds (a minute or two the first time) |
+| Speed | Same as `antares program.ant` | Much faster (see [Compiling](#compiling)) |
+
+Without either option, `antares build` compiles when Rust is installed and
+packs otherwise (it says so when it packs).
+
+- A packed program is a copy of `antares` with your program, the files it
+  brings in with `use`, and any `--embed` files attached at the end.
+- A compiled program downloads the Antares source code for your version on
+  its first build.
 - Files the program reads (like `houses.json`) must be shipped next to the
   executable, or packed inside it with `--embed houses.json`.
-- To share the executable with people who have older computers, add
+- To share a compiled executable with people who have older computers, add
   `--cpu x86-64`. See [Compiling](#compiling) for details.
 
 ## Troubleshooting
@@ -284,7 +294,7 @@ This creates `main.exe` (Windows) or `main` (macOS/Linux) next to `main.ant`.
 | `antares: command not found` / `'antares' is not recognized` | Open a **new** terminal after installing. If it still fails, the install folder isn't on your PATH; see Option 2, step 4 |
 | macOS: "cannot be opened because Apple cannot check it" | Run `xattr -d com.apple.quarantine "$(which antares)"` |
 | `Couldn't open "program.ant"` | You're in a different folder. Use `cd` to go to the folder with the file, or give the full path |
-| `antares build` says it needs Rust | Install Rust from [rustup.rs](https://rustup.rs), open a new terminal, try again |
+| `antares build --native` says it needs Rust | Install Rust from [rustup.rs](https://rustup.rs) and open a new terminal, or build with `--pack` instead |
 | A model call says to set `ANTHROPIC_API_KEY` | Set your API key as shown in [Everyday commands](#everyday-commands) |
 | Something else | Open an [issue](https://github.com/Madushan996/Antares-Programming-Language/issues) with the program and the full message |
 
@@ -547,9 +557,11 @@ as compiled code, which is why the matrix test beats both.
 
 ## Compiling
 
-`antares build program.ant` turns a program into a native executable placed
-next to the source file. The program behaves the same as when interpreted;
-`python tests/compare_compiled.py` checks this on the test suites and examples.
+`antares build program.ant --native` turns a program into a native executable
+placed next to the source file (this is what `antares build` does when Rust is
+installed). The program behaves the same as when interpreted;
+`python tests/compare_compiled.py` checks this on the test suites and examples,
+and `python tests/compare_compiled.py --pack` does the same for packed programs.
 
 The compiler looks at the whole program and works out which variables only
 ever hold a plain number, a yes/no, or a plain row of numbers. Those become
@@ -567,7 +579,12 @@ interpreter uses.
 Things to know:
 
 - It needs Rust (`cargo`) installed, because the compiler writes Rust code and
-  builds it. A build takes about 30 to 40 seconds.
+  builds it. A build takes about 30 to 40 seconds. Without Rust, use `--pack`
+  (see [Making an executable to share](#making-an-executable-to-share)): the
+  program then runs at interpreter speed, but needs nothing to build.
+- Packed programs are checked on Windows. On macOS, attaching data to a
+  program may upset its code signature; compile with `--native` there if a
+  packed program won't start.
 - The compiled program is built against the Antares source code. `antares
   build` uses the folder named by the `ANTARES_HOME` environment variable if
   set, then the folder this copy of Antares was built from if it is still
@@ -614,8 +631,8 @@ Things to know:
   the name `"embedded:<file name>"` with `read_binary`, and `exists` says
   whether it is there, so the same source can fall back to a file on disk
   when run interpreted. The chess engine embeds its 25 MB network this way.
-- `--icon file.ico` gives a Windows executable its icon (with the GNU Rust
-  toolchain it needs `windres`).
+- `--icon file.ico` gives a Windows executable its icon (when compiling with
+  the GNU Rust toolchain it needs `windres`; packing needs nothing).
 - To see why something is slow, build with the environment variable
   `ANTARES_EXPLAIN=1`. The compiler then names every variable that ended up
   as a general value and what it was given. A common cause is two files using
@@ -627,7 +644,8 @@ Things to know:
 |---|---|
 | `src/lexer.rs` | Source text to tokens |
 | `src/parser.rs` | Tokens to a tree; resolves every name to a slot up front |
-| `src/aot.rs` | The compiler behind `antares build`: type inference and code generation |
+| `src/aot.rs` | The compiler behind `antares build --native`: type inference and code generation |
+| `src/pack.rs` | `antares build --pack`: attaches a program to a copy of `antares`, and finds it again at startup |
 | `src/rt.rs` | Support code linked into compiled programs |
 | `src/vm.rs` | The fast engine: translates functions to instructions and runs them |
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
