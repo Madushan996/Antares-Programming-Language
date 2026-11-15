@@ -72,6 +72,8 @@ jobs:
           antares hello.ant | grep -q "Hello from Antares 144"
           antares build hello.ant
           ./hello | grep -q "Hello from Antares 144"
+          antares build hello.ant packed --pack
+          ./packed | grep -q "Hello from Antares 144"
 
   release:
     name: Publish the release

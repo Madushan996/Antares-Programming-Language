@@ -36,6 +36,12 @@ jobs:
             ./target/release/antares examples/$e.ant
           done
 
+      - name: Packed programs match the interpreter
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" tests/compare_compiled.py --pack
+
       - name: Keyboard input in a terminal
         if: runner.os == 'Linux'
         run: |
