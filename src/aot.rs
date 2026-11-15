@@ -242,6 +242,11 @@ fn builtin_ret(name: &str, tys: &[Ty]) -> Ty {
     let tys: Vec<Ty> = tys.iter().map(|t| if *t == ILit { Num } else { *t }).collect();
     let tys = &tys[..];
     match name {
+        // within gives back what it was given
+        "within" => match tys.first() {
+            Some(t @ (Int | Num | IArr | Arr | PkR | PkM | Bot)) => *t,
+            _ => Dyn,
+        },
         "int" | "popcount" | "lowest_bit" | "highest_bit" | "div" | "rand_bits" => Int,
         "ints" => IArr,
         "abs" | "floor" | "trunc" | "round" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tanh" | "sigmoid" | "relu" => {
@@ -352,6 +357,10 @@ struct Cx<'a> {
     tables: HashMap<usize, (usize, bool)>,
     /// The numbers a table made from a constant list starts with.
     table_init: HashMap<usize, Vec<i64>>,
+    /// What integer variables, results and tables can hold (see `find_ranges`).
+    ranges: HashMap<(usize, usize), Rg>,
+    /// `lowest_bit(x)` / `highest_bit(x)` calls where `x` is certainly not 0.
+    nonzero_bits: std::collections::HashSet<*const Expr>,
 }
 
 /// What an innermost counting loop does with rows (see `Cx::fast_rows`).
@@ -395,12 +404,57 @@ impl FastScan {
 
 /// Where a variable gets a value from (for finding whole-number variables).
 enum Src {
-    /// An assignment, or an input of a function called by name.
+    /// An assignment.
     Expr(*const Expr, usize),
+    /// An input given to a function called by name.
+    Arg(*const Expr, usize),
     /// The variable of an `each` loop over this.
     Each(*const Expr, usize),
+    /// The counter of `repeat count as i`.
+    Repeat(*const Expr, usize),
     /// Anything else.
     Other,
+}
+
+/// Source keys that aren't variables: (function scope, RET) is what the
+/// function gives back, and (TABLE, global) the numbers stored in a table.
+const RET: usize = usize::MAX;
+const TABLE: usize = usize::MAX;
+
+/// The whole numbers an integer expression can have: none known yet (only
+/// while working them out), all from `lo` to `hi`, or any.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Rg {
+    Bot,
+    In(i64, i64),
+    Any,
+}
+
+impl Rg {
+    fn join(self, o: Rg) -> Rg {
+        match (self, o) {
+            (Rg::Bot, x) | (x, Rg::Bot) => x,
+            (Rg::In(a, b), Rg::In(c, d)) => Rg::In(a.min(c), b.max(d)),
+            _ => Rg::Any,
+        }
+    }
+
+    /// Both known: the range from `f` on their bounds, or any if that overflows.
+    fn with(self, o: Rg, f: impl Fn(i64, i64, i64, i64) -> Option<(i64, i64)>) -> Rg {
+        match (self, o) {
+            (Rg::Any, _) | (_, Rg::Any) => Rg::Any,
+            (Rg::Bot, _) | (_, Rg::Bot) => Rg::Bot,
+            (Rg::In(a, b), Rg::In(c, d)) => f(a, b, c, d).map_or(Rg::Any, |(lo, hi)| Rg::In(lo, hi)),
+        }
+    }
+
+    /// The highest number, if none are negative.
+    fn nonneg(self) -> Option<i64> {
+        match self {
+            Rg::In(lo, hi) if lo >= 0 => Some(hi),
+            _ => None,
+        }
+    }
 }
 
 /// What a function body does, for deciding how to call it.
@@ -487,6 +541,34 @@ impl<'a> Cx<'a> {
             Expr::Num(n) => Some(*n),
             Expr::Neg(a, _) => self.const_of(a, sc).map(|x| -x),
             Expr::Var { depth, idx, .. } if self.resolve(sc, *depth) == 0 => self.consts.get(&(*idx as usize)).copied(),
+            _ => None,
+        }
+    }
+
+    /// Like `const_of`, also working out arithmetic on constants
+    /// (`SIZE * SIZE - 1`), as the program would.
+    fn fold_const(&self, e: &Expr, sc: usize) -> Option<f64> {
+        if let Some(c) = self.const_of(e, sc) {
+            return Some(c);
+        }
+        match e {
+            Expr::Int(n) => Some(*n as f64),
+            Expr::Var { depth, idx, .. } if self.resolve(sc, *depth) == 0 => self.iconsts.get(&(*idx as usize)).map(|&c| c as f64),
+            Expr::Call(f, args, _) if args.len() == 1 => match self.callee(f, sc) {
+                // int(constant)
+                Callee::Builtin(b) if self.bnames[b] == "int" => self.fold_const(&args[0], sc).filter(|c| *c == c.trunc()),
+                _ => None,
+            },
+            Expr::Neg(a, _) => self.fold_const(a, sc).map(|x| -x),
+            Expr::Binary(op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div), a, b, _) => {
+                let (x, y) = (self.fold_const(a, sc)?, self.fold_const(b, sc)?);
+                Some(match op {
+                    BinOp::Add => x + y,
+                    BinOp::Sub => x - y,
+                    BinOp::Mul => x * y,
+                    _ => x / y,
+                })
+            }
             _ => None,
         }
     }
@@ -1294,6 +1376,9 @@ impl<'a> Cx<'a> {
                 Callee::Builtin(i) => {
                     let name = self.bnames[i];
                     match (name, args.len()) {
+                        ("within", 3 | 4) if matches!(self.ty(&args[0], sc), Ty::Int | Ty::Num | Ty::ILit) => {
+                            return self.within_code(args, sc, *line);
+                        }
                         ("int", 1) => return (self.int_code(&args[0], sc, *line), Ty::Int),
                         ("popcount", 1) => {
                             return (format!("({}.count_ones() as i64)", self.int_code(&args[0], sc, *line)), Ty::Int)
@@ -1406,8 +1491,41 @@ impl<'a> Cx<'a> {
                         let (c, t) = self.expr(a, sc);
                         parts.push(conv(c, t, self.var_ty_param(s, i)));
                     }
-                    parts.push(self.depth_arg().to_string());
-                    let call = self.static_call(s, format!("f{}({})", s, parts.join(", ")));
+                    // inputs given a range: checked here, unless certainly in it
+                    let mut checks = vec![];
+                    for (k, lo, hi, pname, pline) in self.input_checks(s).0 {
+                        let (lo, hi) = unsafe { (&*lo, &*hi) };
+                        let int = matches!(self.var_ty_param(s, k), Ty::Int | Ty::Whole);
+                        let proven = int
+                            && matches!(self.ty(&args[k], sc), Ty::Int | Ty::Whole)
+                            && matches!((self.erange(&args[k], sc), self.within_bounds(lo, hi, s)), (Rg::In(x, y), Some((l, h))) if x >= l && y <= h);
+                        let lc = self.num_code(lo, s);
+                        let hc = self.num_code(hi, s);
+                        if !proven {
+                            let f = match self.var_ty_param(s, k) {
+                                Ty::Int | Ty::Whole => "within_i",
+                                Ty::Num => "within_n",
+                                _ => "within_v",
+                            };
+                            let clone = if f == "within_v" { ".clone()" } else { "" };
+                            checks.push(format!("{}(a{}_{}, {}, {}, {:?}, {})?;", f, k, clone, lc, hc, pname, pline));
+                        }
+                    }
+                    let call = if checks.is_empty() {
+                        parts.push(self.depth_arg().to_string());
+                        self.static_call(s, format!("f{}({})", s, parts.join(", ")))
+                    } else {
+                        // the inputs are worked out first, in order, then checked
+                        let mut lets = String::new();
+                        let mut names = vec![];
+                        for (k, p) in parts.iter().enumerate() {
+                            lets.push_str(&format!("let a{}_ = {}; ", k, p));
+                            names.push(format!("a{}_", k));
+                        }
+                        names.push(self.depth_arg().to_string());
+                        let call = self.static_call(s, format!("f{}({})", s, names.join(", ")));
+                        format!("{{ {}{} {} }}", lets, checks.join(" "), call)
+                    };
                     if self.scopes[s].ret == Ty::Unit {
                         (format!("{{ {}; Value::Nothing }}", call), Ty::Dyn)
                     } else {
@@ -1465,7 +1583,11 @@ impl<'a> Cx<'a> {
                     if let Expr::Var { depth, idx: vi, .. } = &**base {
                         if let Some((tb, int)) = self.table_of(sc, *depth, *vi) {
                             let k = if int { "i" } else { "a" };
+                            let safe = self.in_table(&idx[0], sc, *vi as usize);
                             let code = match self.table_pos(&idx[0], sc, *line) {
+                                Ok((ic, _)) if safe => {
+                                    format!("(*(std::ptr::addr_of!({}) as *const {}).add(({}) as usize))", tb, if int { "i64" } else { "f64" }, ic)
+                                }
                                 Ok((ic, num)) => format!("tget_{}(&*std::ptr::addr_of!({}), {}, {}, {})?", k, tb, ic, num, line),
                                 Err(fc) => format!("tget_{}f(&*std::ptr::addr_of!({}), {}, {})?", k, tb, fc, line),
                             };
@@ -2040,7 +2162,17 @@ impl<'a> Cx<'a> {
                     self.whole_sources_expr(value, sc, out);
                 }
                 Stmt::SetPath { depth, idx, path, value, .. } => {
-                    out.push(((self.resolve(sc, *depth), *idx as usize), Src::Other));
+                    let t = self.resolve(sc, *depth);
+                    out.push(((t, *idx as usize), Src::Other));
+                    // a number stored at one position of a table (anything else
+                    // means it isn't a table)
+                    if t == 0 {
+                        let src = match &path[..] {
+                            [Access::Index(es)] if es.len() == 1 && !matches!(es[0], Expr::Range(..)) => Src::Expr(value, sc),
+                            _ => Src::Other,
+                        };
+                        out.push(((TABLE, *idx as usize), src));
+                    }
                     self.whole_sources_expr(value, sc, out);
                     for a in path {
                         if let Access::Index(es) = a {
@@ -2057,11 +2189,17 @@ impl<'a> Cx<'a> {
                 }
                 Stmt::Give(e) => {
                     if let Some(e) = e {
+                        if sc != 0 {
+                            out.push(((sc, RET), Src::Expr(e, sc)));
+                        }
                         self.whole_sources_expr(e, sc, out);
                     }
                 }
-                Stmt::Repeat { count, body, .. } => {
+                Stmt::Repeat { count, var, body, .. } => {
                     // the counter of `repeat ... as i` counts in steps of 1
+                    if let Some(v) = var {
+                        out.push(((sc, *v as usize), Src::Repeat(count, sc)));
+                    }
                     self.whole_sources_expr(count, sc, out);
                     self.whole_sources(body, sc, out);
                 }
@@ -2127,7 +2265,7 @@ impl<'a> Cx<'a> {
                     Callee::Static(s) => {
                         if args.len() == self.scopes[s].nparams && !self.scopes[s].escapes {
                             for (i, a) in args.iter().enumerate() {
-                                out.push(((s, i), Src::Expr(a, sc)));
+                                out.push(((s, i), Src::Arg(a, sc)));
                             }
                         }
                     }
@@ -2165,6 +2303,625 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The expressions a function body's value can come from at its end.
+    fn tail_exprs<'e>(stmts: &'e [Stmt], out: &mut Vec<&'e Expr>) {
+        match stmts.last() {
+            Some(Stmt::Expr(e)) => out.push(e),
+            Some(Stmt::When { arms, otherwise }) => {
+                for (_, b, _) in arms {
+                    Self::tail_exprs(b, out);
+                }
+                if let Some(b) = otherwise {
+                    Self::tail_exprs(b, out);
+                }
+            }
+            Some(Stmt::Try { body, handler, .. }) => {
+                Self::tail_exprs(body, out);
+                Self::tail_exprs(handler, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// Works out the whole numbers each integer variable, each result of a
+    /// function called by name and each integer table can hold, so positions
+    /// that are certainly inside a table need no check (see `in_table`).
+    ///
+    /// Every way of getting a value counts: assignments, inputs at every call,
+    /// loop counters, the 0 a variable holds before its first assignment and
+    /// the 0 a function gives back after a problem (see `rt::fault`). Anything
+    /// not understood is "any number".
+    fn find_ranges(&mut self, top: &[Stmt]) {
+        let statics: Vec<usize> = self.static_fn.values().copied().collect();
+        self.find_nonzero(top, 0, &[]);
+        let mut srcs = vec![];
+        self.whole_sources(top, 0, &mut srcs);
+        let mut st: HashMap<(usize, usize), Rg> = HashMap::new();
+        for t in 0..self.scopes.len() {
+            let sc = &self.scopes[t];
+            let named = statics.contains(&t) && !sc.escapes;
+            for i in 0..sc.vars.len() {
+                if !matches!(sc.vars[i], Ty::Int | Ty::Whole) || sc.captured[i] {
+                    continue;
+                }
+                if t == 0
+                    && (self.is_builtin(i) || self.static_fn.contains_key(&i) || self.consts.contains_key(&i) || self.iconsts.contains_key(&i))
+                {
+                    continue;
+                }
+                if t != 0 && i < sc.nparams {
+                    // inputs are known only for functions called by name
+                    if named {
+                        st.insert((t, i), Rg::Bot);
+                    }
+                    continue;
+                }
+                st.insert((t, i), Rg::In(0, 0));
+            }
+            if named && matches!(sc.ret, Ty::Int | Ty::Whole) {
+                st.insert((t, RET), Rg::In(0, 0));
+                let def: &FnDef = unsafe { &*sc.def };
+                let mut tails = vec![];
+                Self::tail_exprs(&def.body, &mut tails);
+                for e in tails {
+                    srcs.push(((t, RET), Src::Expr(e, t)));
+                }
+            }
+        }
+        for (&i, &(_, int)) in &self.tables {
+            if int {
+                let init = self
+                    .table_init
+                    .get(&i)
+                    .map_or(Rg::In(0, 0), |v| v.iter().fold(Rg::In(0, 0), |r, &x| r.join(Rg::In(x, x))));
+                st.insert((TABLE, i), init);
+            }
+        }
+        // inputs checked with `x within lo to hi`: checked when calling, so the
+        // body knows the range (see `input_checks`)
+        let mut fixed = std::collections::HashSet::new();
+        for &s in &statics {
+            for (k, lo, hi, _, _) in self.input_checks(s).0 {
+                if st.contains_key(&(s, k)) {
+                    if let Some((lo, hi)) = self.within_bounds(unsafe { &*lo }, unsafe { &*hi }, s) {
+                        st.insert((s, k), if lo <= hi { Rg::In(lo, hi) } else { Rg::Bot });
+                        fixed.insert((s, k));
+                    }
+                }
+            }
+        }
+        self.ranges = st;
+        let mut round = 0;
+        loop {
+            let mut changed = false;
+            for (v, src) in &srcs {
+                let Some(&old) = self.ranges.get(v) else { continue };
+                if old == Rg::Any || (matches!(src, Src::Arg(..)) && fixed.contains(v)) {
+                    continue;
+                }
+                let r = match *src {
+                    Src::Expr(e, sc) | Src::Arg(e, sc) => self.erange(unsafe { &*e }, sc),
+                    Src::Each(iter, sc) => self.each_range(unsafe { &*iter }, sc),
+                    // `repeat n as i` counts from 1 to n
+                    Src::Repeat(count, sc) => match self.erange(unsafe { &*count }, sc) {
+                        Rg::In(_, hi) => Rg::In(1, hi.max(1)),
+                        r => r,
+                    },
+                    Src::Other => Rg::Any,
+                };
+                // a value checked with within(..., lo, hi) never grows past lo to hi
+                let cap = match *src {
+                    Src::Expr(e, sc) => self.within_cap(unsafe { &*e }, sc),
+                    _ => None,
+                };
+                changed |= self.widen_into(*v, r, round, cap);
+            }
+            if !changed {
+                break;
+            }
+            round += 1;
+        }
+        if std::env::var("ANTARES_EXPLAIN").is_ok() {
+            let mut known: Vec<_> = self.ranges.iter().filter(|(_, r)| matches!(r, Rg::In(..))).collect();
+            known.sort_by_key(|(k, _)| **k);
+            for (&(t, i), r) in known {
+                let what = if t == TABLE {
+                    format!("the numbers in table {}", self.gnames.get(i).cloned().unwrap_or_default())
+                } else if i == RET {
+                    format!("what {} gives back", self.scopes[t].name)
+                } else if t == 0 {
+                    self.gnames.get(i).cloned().unwrap_or_default()
+                } else {
+                    format!("variable {} of {}", i, self.scopes[t].name)
+                };
+                if let Rg::In(lo, hi) = r {
+                    eprintln!("explain: {} are from {} to {}", what, lo, hi);
+                }
+            }
+        }
+    }
+
+    /// Adds `r` to what `v` can hold; a range still growing after many rounds
+    /// grows without end. Whether anything changed.
+    fn widen_into(&mut self, v: (usize, usize), r: Rg, round: usize, cap: Option<Rg>) -> bool {
+        let Some(&old) = self.ranges.get(&v) else { return false };
+        let mut new = old.join(r);
+        if new != old {
+            match cap {
+                Some(c) if round > 2 => new = new.join(c),
+                _ if round > 24 => new = Rg::Any,
+                _ => {}
+            }
+        }
+        if new != old {
+            self.ranges.insert(v, new);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// For within(x, lo, hi, ...) with known lo and hi: the range nothing it
+    /// gives back can be outside.
+    fn within_cap(&self, e: &Expr, sc: usize) -> Option<Rg> {
+        let Expr::Call(f, args, _) = e else { return None };
+        let Callee::Builtin(b) = self.callee(f, sc) else { return None };
+        if self.bnames[b] != "within" || !(3..=4).contains(&args.len()) {
+            return None;
+        }
+        self.within_bounds(&args[1], &args[2], sc).map(|(lo, hi)| Rg::In(lo, hi))
+    }
+
+    /// The numbers the counter of `each x in range(...)` takes.
+    fn each_range(&self, iter: &Expr, sc: usize) -> Rg {
+        let Some((start, end, step)) = self.range_parts(iter, sc) else { return Rg::Any };
+        let a = match start {
+            Some(x) => self.erange(x, sc),
+            None => Rg::In(0, 0),
+        };
+        let z = self.erange(end, sc);
+        if step > 0.0 {
+            // from the start up to (not including) the end
+            a.with(z, |lo, _, _, d| Some((lo, d.checked_sub(1)?)))
+        } else {
+            // from the start down to (not including) the end
+            a.with(z, |_, hi, c, _| Some((c.checked_add(1)?, hi)))
+        }
+    }
+
+    /// The whole numbers integer expression `e` can have (see `find_ranges`).
+    fn erange(&self, e: &Expr, sc: usize) -> Rg {
+        if let Some(c) = self.const_of(e, sc) {
+            return if c == c.trunc() && c.abs() <= 9.0e15 { Rg::In(c as i64, c as i64) } else { Rg::Any };
+        }
+        match e {
+            Expr::Int(n) => Rg::In(*n, *n),
+            Expr::Var { depth, idx, .. } => {
+                let t = self.resolve(sc, *depth);
+                let i = *idx as usize;
+                if t == 0 {
+                    if let Some(&c) = self.iconsts.get(&i) {
+                        return Rg::In(c, c);
+                    }
+                }
+                self.ranges.get(&(t, i)).copied().unwrap_or(Rg::Any)
+            }
+            Expr::Neg(a, _) => self.erange(a, sc).with(Rg::In(0, 0), |lo, hi, _, _| Some((hi.checked_neg()?, lo.checked_neg()?))),
+            Expr::Binary(op, a, b, _) => {
+                let (x, y) = (self.erange(a, sc), self.erange(b, sc));
+                let bot = x == Rg::Bot || y == Rg::Bot;
+                match op {
+                    BinOp::Add => x.with(y, |a, b, c, d| Some((a.checked_add(c)?, b.checked_add(d)?))),
+                    BinOp::Sub => x.with(y, |a, b, c, d| Some((a.checked_sub(d)?, b.checked_sub(c)?))),
+                    BinOp::Mul => x.with(y, |a, b, c, d| {
+                        let p = [a.checked_mul(c)?, a.checked_mul(d)?, b.checked_mul(c)?, b.checked_mul(d)?];
+                        Some((*p.iter().min()?, *p.iter().max()?))
+                    }),
+                    // remainders are never negative (as in rem_euclid)
+                    BinOp::Mod => match (x, self.const_of(b, sc)) {
+                        (Rg::In(..), Some(c)) if c == c.trunc() && (1.0..=9.0e15).contains(&c) => Rg::In(0, c as i64 - 1),
+                        (Rg::Bot, _) => Rg::Bot,
+                        _ => Rg::Any,
+                    },
+                    BinOp::BitAnd => match (x.nonneg(), y.nonneg()) {
+                        (Some(p), Some(q)) => Rg::In(0, p.min(q)),
+                        (Some(p), None) | (None, Some(p)) => Rg::In(0, p),
+                        _ if bot => Rg::Bot,
+                        _ => Rg::Any,
+                    },
+                    BinOp::BitOr | BinOp::BitXor => match (x.nonneg(), y.nonneg()) {
+                        (Some(p), Some(q)) => {
+                            let m = p.max(q) as u64;
+                            Rg::In(0, ((m + 1).next_power_of_two() - 1).min(i64::MAX as u64) as i64)
+                        }
+                        _ if bot => Rg::Bot,
+                        _ => Rg::Any,
+                    },
+                    // shifts move the bits as an unsigned number; 64 or more gives 0
+                    BinOp::Shr => match (x, y) {
+                        _ if bot => Rg::Bot,
+                        (Rg::In(lo, hi), Rg::In(c, d)) if c == d && (0..64).contains(&c) && lo >= 0 => Rg::In(lo >> c, hi >> c),
+                        (_, Rg::In(c, d)) if c == d && (1..64).contains(&c) => Rg::In(0, (u64::MAX >> c) as i64),
+                        _ => Rg::Any,
+                    },
+                    BinOp::Shl => match (x, y) {
+                        _ if bot => Rg::Bot,
+                        (Rg::In(lo, hi), Rg::In(c, d)) if c == d && (0..63).contains(&c) && lo >= 0 && hi <= (i64::MAX >> c) => {
+                            Rg::In(lo << c, hi << c)
+                        }
+                        _ => Rg::Any,
+                    },
+                    _ => Rg::Any,
+                }
+            }
+            Expr::Call(f, args, _) => match self.callee(f, sc) {
+                Callee::Builtin(i) => match (self.bnames[i], args.len()) {
+                    _ if self.nonzero_bits.contains(&(e as *const Expr)) => Rg::In(0, 63),
+                    ("within", 3 | 4) if matches!(self.ty(&args[0], sc), Ty::Int | Ty::Whole) => match self.within_bounds(&args[1], &args[2], sc) {
+                        Some((lo, hi)) => match self.erange(&args[0], sc) {
+                            Rg::Bot => Rg::Bot,
+                            Rg::Any => Rg::In(lo, hi),
+                            // what gets past the check
+                            Rg::In(a, b) if a.max(lo) <= b.min(hi) => Rg::In(a.max(lo), b.min(hi)),
+                            Rg::In(..) => Rg::Bot,
+                        },
+                        None => Rg::Any,
+                    },
+                    ("lowest_bit", 1) | ("popcount", 1) => Rg::In(0, 64),
+                    ("highest_bit", 1) => Rg::In(-1, 63),
+                    // a whole number stays the same number
+                    ("int", 1) => match self.erange(&args[0], sc) {
+                        Rg::In(lo, hi) => Rg::In(lo, hi),
+                        r => r,
+                    },
+                    ("abs", 1) => self.erange(&args[0], sc).with(Rg::In(0, 0), |lo, hi, _, _| {
+                        let (a, b) = (lo.checked_abs()?, hi.checked_abs()?);
+                        Some((if lo <= 0 && hi >= 0 { 0 } else { a.min(b) }, a.max(b)))
+                    }),
+                    ("min", 2) => self.erange(&args[0], sc).with(self.erange(&args[1], sc), |a, b, c, d| Some((a.min(c), b.min(d)))),
+                    ("max", 2) => self.erange(&args[0], sc).with(self.erange(&args[1], sc), |a, b, c, d| Some((a.max(c), b.max(d)))),
+                    _ => Rg::Any,
+                },
+                Callee::Static(s) if args.len() == self.scopes[s].nparams => self.ranges.get(&(s, RET)).copied().unwrap_or(Rg::Any),
+                _ => Rg::Any,
+            },
+            Expr::Index(b, idx, _) if idx.len() == 1 && !matches!(idx[0], Expr::Range(..)) => match &**b {
+                Expr::Var { depth, idx: vi, .. } if self.resolve(sc, *depth) == 0 => {
+                    self.ranges.get(&(TABLE, *vi as usize)).copied().unwrap_or(Rg::Any)
+                }
+                _ => Rg::Any,
+            },
+            _ => Rg::Any,
+        }
+    }
+
+    /// A local variable of scope `sc`, if `e` is one.
+    fn local_var(&self, e: &Expr, sc: usize) -> Option<usize> {
+        match e {
+            Expr::Var { depth, idx, .. } if *depth == 0 && sc != 0 && !self.scopes[sc].captured[*idx as usize] => Some(*idx as usize),
+            _ => None,
+        }
+    }
+
+    /// For `a == 0` / `a != 0` (either way round): the local variable compared with 0.
+    fn zero_test(&self, a: &Expr, b: &Expr, sc: usize) -> Option<usize> {
+        if self.const_of(b, sc) == Some(0.0) {
+            self.local_var(a, sc)
+        } else if self.const_of(a, sc) == Some(0.0) {
+            self.local_var(b, sc)
+        } else {
+            None
+        }
+    }
+
+    /// The local variables of scope `sc` that `cond` being true shows aren't 0.
+    fn nonzero_vars(&self, cond: &Expr, sc: usize, out: &mut Vec<usize>) {
+        let local = |e: &Expr| self.local_var(e, sc);
+        let c = |e: &Expr| self.const_of(e, sc);
+        match cond {
+            Expr::And(a, b, _) => {
+                self.nonzero_vars(a, sc, out);
+                self.nonzero_vars(b, sc, out);
+            }
+            Expr::Binary(op, a, b, _) => {
+                let v = match (op, local(a), local(b)) {
+                    (BinOp::Ne, _, _) => self.zero_test(a, b, sc),
+                    (BinOp::Gt, Some(v), _) if c(b).is_some_and(|x| x >= 0.0) => Some(v),
+                    (BinOp::Lt, Some(v), _) if c(b).is_some_and(|x| x <= 0.0) => Some(v),
+                    (BinOp::Ge, Some(v), _) if c(b).is_some_and(|x| x > 0.0) => Some(v),
+                    _ => None,
+                };
+                out.extend(v);
+            }
+            _ => {}
+        }
+    }
+
+    /// The variables of scope `sc` that `stmts` can give a value.
+    fn assigned_in(&self, stmts: &[Stmt], sc: usize, out: &mut Vec<usize>) {
+        for st in stmts {
+            match st {
+                Stmt::Assign { idx, .. } | Stmt::Learn { idx, .. } => out.push(*idx as usize),
+                Stmt::AssignOuter { depth, idx, .. } | Stmt::SetPath { depth, idx, .. } => {
+                    if self.resolve(sc, *depth) == sc {
+                        out.push(*idx as usize);
+                    }
+                }
+                Stmt::Repeat { var, body, .. } => {
+                    out.extend(var.map(|v| v as usize));
+                    self.assigned_in(body, sc, out);
+                }
+                Stmt::Each { var, body, .. } => {
+                    out.push(*var as usize);
+                    self.assigned_in(body, sc, out);
+                }
+                Stmt::While { body, .. } => self.assigned_in(body, sc, out),
+                Stmt::When { arms, otherwise } => {
+                    for (_, b, _) in arms {
+                        self.assigned_in(b, sc, out);
+                    }
+                    if let Some(b) = otherwise {
+                        self.assigned_in(b, sc, out);
+                    }
+                }
+                Stmt::Try { body, var, handler } => {
+                    out.extend(var.map(|v| v as usize));
+                    self.assigned_in(body, sc, out);
+                    self.assigned_in(handler, sc, out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Finds the `lowest_bit(x)` / `highest_bit(x)` calls whose `x` is a
+    /// local variable certainly not 0 there: inside `while x != 0 { ... }` or
+    /// `when x != 0 { ... }` (and the like) before `x` is changed, or after
+    /// `when x == 0 { give ... }`. Those give a position from 0 to 63.
+    fn find_nonzero(&mut self, stmts: &[Stmt], sc: usize, facts: &[usize]) {
+        let mut facts: Vec<usize> = facts.to_vec();
+        let drop = |facts: &mut Vec<usize>, gone: &[usize]| facts.retain(|v| !gone.contains(v));
+        for st in stmts {
+            match st {
+                Stmt::While { cond, body, .. } => {
+                    // the condition runs again after each round of the body
+                    let mut gone = vec![];
+                    self.assigned_in(body, sc, &mut gone);
+                    drop(&mut facts, &gone);
+                    self.nonzero_expr(cond, sc, &facts);
+                    let mut inner = facts.clone();
+                    self.nonzero_vars(cond, sc, &mut inner);
+                    self.find_nonzero(body, sc, &inner);
+                }
+                Stmt::When { arms, otherwise } => {
+                    let mut gone = vec![];
+                    for (c, b, _) in arms {
+                        self.nonzero_expr(c, sc, &facts);
+                        let mut inner = facts.clone();
+                        self.nonzero_vars(c, sc, &mut inner);
+                        self.find_nonzero(b, sc, &inner);
+                        self.assigned_in(b, sc, &mut gone);
+                    }
+                    if let Some(b) = otherwise {
+                        self.find_nonzero(b, sc, &facts);
+                        self.assigned_in(b, sc, &mut gone);
+                    }
+                    drop(&mut facts, &gone);
+                    // `when x == 0 { give ... }` with nothing else: x isn't 0 after it
+                    if let ([(Expr::Binary(BinOp::Eq, a, b, _), body, _)], None) = (&arms[..], otherwise) {
+                        if matches!(body.last(), Some(Stmt::Give(_) | Stmt::Stop(_) | Stmt::Skip(_))) {
+                            facts.extend(self.zero_test(a, b, sc));
+                        }
+                    }
+                }
+                Stmt::Repeat { count, var, body, .. } => {
+                    self.nonzero_expr(count, sc, &facts);
+                    let mut gone = vec![];
+                    self.assigned_in(body, sc, &mut gone);
+                    gone.extend(var.map(|v| v as usize));
+                    drop(&mut facts, &gone);
+                    self.find_nonzero(body, sc, &facts);
+                }
+                Stmt::Each { var, iter, body, .. } => {
+                    self.nonzero_expr(iter, sc, &facts);
+                    let mut gone = vec![*var as usize];
+                    self.assigned_in(body, sc, &mut gone);
+                    drop(&mut facts, &gone);
+                    self.find_nonzero(body, sc, &facts);
+                }
+                Stmt::Try { body, var, handler } => {
+                    let mut gone = vec![];
+                    self.assigned_in(std::slice::from_ref(st), sc, &mut gone);
+                    gone.extend(var.map(|v| v as usize));
+                    drop(&mut facts, &gone);
+                    self.find_nonzero(body, sc, &facts);
+                    self.find_nonzero(handler, sc, &facts);
+                }
+                Stmt::Assign { idx, value } => {
+                    if let (Expr::Lambda(def), 0) = (value, sc) {
+                        if let Some(&fs) = self.by_def.get(&Rc::as_ptr(def)) {
+                            if self.static_fn.get(&(*idx as usize)).copied() == Some(fs) {
+                                self.find_nonzero(&def.body, fs, &[]);
+                                continue;
+                            }
+                        }
+                    }
+                    self.nonzero_expr(value, sc, &facts);
+                    drop(&mut facts, &[*idx as usize]);
+                }
+                Stmt::AssignOuter { value, .. } | Stmt::Learn { value, .. } => {
+                    self.nonzero_expr(value, sc, &facts);
+                    let mut gone = vec![];
+                    self.assigned_in(std::slice::from_ref(st), sc, &mut gone);
+                    drop(&mut facts, &gone);
+                }
+                Stmt::SetPath { path, value, .. } => {
+                    self.nonzero_expr(value, sc, &facts);
+                    for a in path {
+                        if let Access::Index(es) = a {
+                            for e in es {
+                                self.nonzero_expr(e, sc, &facts);
+                            }
+                        }
+                    }
+                    let mut gone = vec![];
+                    self.assigned_in(std::slice::from_ref(st), sc, &mut gone);
+                    drop(&mut facts, &gone);
+                }
+                Stmt::Show(es) => {
+                    for e in es {
+                        self.nonzero_expr(e, sc, &facts);
+                    }
+                }
+                Stmt::Give(Some(e)) | Stmt::Expr(e) => self.nonzero_expr(e, sc, &facts),
+                Stmt::Descend { loss, rate, .. } => {
+                    self.nonzero_expr(loss, sc, &facts);
+                    self.nonzero_expr(rate, sc, &facts);
+                }
+                Stmt::Give(None) | Stmt::Stop(_) | Stmt::Skip(_) => {}
+            }
+        }
+    }
+
+    fn nonzero_expr(&mut self, e: &Expr, sc: usize, facts: &[usize]) {
+        match e {
+            Expr::Call(f, args, _) => {
+                if let (Callee::Builtin(i), [Expr::Var { depth: 0, idx, .. }]) = (self.callee(f, sc), &args[..]) {
+                    if matches!(self.bnames[i], "lowest_bit" | "highest_bit") && facts.contains(&(*idx as usize)) {
+                        self.nonzero_bits.insert(e as *const Expr);
+                    }
+                }
+                self.nonzero_expr(f, sc, facts);
+                for a in args {
+                    self.nonzero_expr(a, sc, facts);
+                }
+            }
+            Expr::Interp(p) | Expr::List(p) => {
+                for x in p {
+                    self.nonzero_expr(x, sc, facts);
+                }
+            }
+            Expr::Map(m) => {
+                for (_, x) in m {
+                    self.nonzero_expr(x, sc, facts);
+                }
+            }
+            Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => self.nonzero_expr(a, sc, facts),
+            Expr::Binary(_, a, b, _) => {
+                self.nonzero_expr(a, sc, facts);
+                self.nonzero_expr(b, sc, facts);
+            }
+            // the right side runs only when the left one allows it
+            Expr::And(a, b, _) => {
+                self.nonzero_expr(a, sc, facts);
+                let mut inner = facts.to_vec();
+                self.nonzero_vars(a, sc, &mut inner);
+                self.nonzero_expr(b, sc, &inner);
+            }
+            Expr::Or(a, b, _) => {
+                self.nonzero_expr(a, sc, facts);
+                self.nonzero_expr(b, sc, facts);
+            }
+            Expr::Index(b, idx, _) => {
+                self.nonzero_expr(b, sc, facts);
+                for x in idx {
+                    self.nonzero_expr(x, sc, facts);
+                }
+            }
+            Expr::Range(a, z, _) => {
+                for x in [a, z].into_iter().flatten() {
+                    self.nonzero_expr(x, sc, facts);
+                }
+            }
+            Expr::Lambda(def) => {
+                if let Some(&s) = self.by_def.get(&Rc::as_ptr(def)) {
+                    self.find_nonzero(&def.body, s, &[]);
+                }
+            }
+            Expr::Ask { model, prompt, .. } => {
+                self.nonzero_expr(model, sc, facts);
+                self.nonzero_expr(prompt, sc, facts);
+            }
+            Expr::ModelNew { spec, opts, .. } => {
+                self.nonzero_expr(spec, sc, facts);
+                if let Some(o) = opts {
+                    self.nonzero_expr(o, sc, facts);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The range of within(x, lo, hi, ...) when lo and hi are known: the whole
+    /// numbers from lo to hi.
+    fn within_bounds(&self, lo: &Expr, hi: &Expr, sc: usize) -> Option<(i64, i64)> {
+        let (lo, hi) = (self.fold_const(lo, sc)?, self.fold_const(hi, sc)?);
+        let (lo, hi) = (lo.ceil(), hi.floor());
+        (lo.abs() < 9.0e15 && hi.abs() < 9.0e15).then_some((lo as i64, hi as i64))
+    }
+
+    /// within(x, lo, hi [, name]) for a number x: x, after a check that is left
+    /// out when x is certainly in range.
+    fn within_code(&mut self, args: &[Expr], sc: usize, line: u32) -> (String, Ty) {
+        let int = self.ty(&args[0], sc) == Ty::Int;
+        let proven = int
+            && matches!((self.erange(&args[0], sc), self.within_bounds(&args[1], &args[2], sc)), (Rg::In(a, b), Some((lo, hi))) if a >= lo && b <= hi);
+        let (x, t) = if int { (self.int_code(&args[0], sc, line), Ty::Int) } else { (self.num_code(&args[0], sc), Ty::Num) };
+        let lo = self.num_code(&args[1], sc);
+        let hi = self.num_code(&args[2], sc);
+        let name = match args.get(3) {
+            Some(Expr::Str(n)) => format!("{:?}", &**n),
+            Some(e) => {
+                let c = self.dyn_code(e, sc);
+                format!("&{{ let n_ = {}; n_.show() }}", c)
+            }
+            None => "\"\"".to_string(),
+        };
+        if proven {
+            // the bounds and name are still worked out, as when checking
+            return (x, t);
+        }
+        let f = if int { "within_i" } else { "within_n" };
+        (format!("{}({}, {}, {}, {}, {})?", f, x, lo, hi, name, line), t)
+    }
+
+    /// The inputs of function `s` (called by name) checked first with
+    /// `x within lo to hi`: (input, lowest, highest, name, line), and how many
+    /// statements at the start of the body do that.
+    fn input_checks(&self, s: usize) -> (Vec<(usize, *const Expr, *const Expr, String, u32)>, usize) {
+        let mut out = vec![];
+        if self.scopes[s].escapes || !self.static_fn.values().any(|&f| f == s) {
+            return (out, 0);
+        }
+        let def: &FnDef = unsafe { &*self.scopes[s].def };
+        let mut n = 0;
+        for st in &def.body {
+            let Stmt::Assign { idx, value: Expr::Call(f, args, line) } = st else { break };
+            let k = *idx as usize;
+            let Callee::Builtin(b) = self.callee(f, s) else { break };
+            match (&args[..], self.bnames[b]) {
+                ([Expr::Var { depth: 0, idx: v, .. }, lo, hi, Expr::Str(name)], "within")
+                    if *v as usize == k
+                        && k < self.scopes[s].nparams
+                        && !self.scopes[s].captured[k]
+                        && self.fold_const(lo, s).is_some()
+                        && self.fold_const(hi, s).is_some() =>
+                {
+                    out.push((k, lo as *const Expr, hi as *const Expr, name.to_string(), *line));
+                    n += 1;
+                }
+                _ => break,
+            }
+        }
+        (out, n)
+    }
+
+    /// Whether position `ie` is certainly inside fixed table `t`.
+    fn in_table(&self, ie: &Expr, sc: usize, t: usize) -> bool {
+        let Some(&(len, _)) = self.tables.get(&t) else { return false };
+        matches!(self.erange(ie, sc), Rg::In(lo, hi) if lo >= 0 && (hi as u64) < len as u64)
+    }
+
     /// Finds the number variables that only ever hold whole numbers counted
     /// in small steps, and keeps them as machine integers.
     fn infer_whole(&mut self, top: &[Stmt]) {
@@ -2196,13 +2953,14 @@ impl<'a> Cx<'a> {
                     continue;
                 }
                 let ok = match *src {
-                    Src::Expr(e, sc) => self.counts(unsafe { &*e }, sc, &w),
+                    Src::Expr(e, sc) | Src::Arg(e, sc) => self.counts(unsafe { &*e }, sc, &w),
                     Src::Each(iter, sc) => match self.range_parts(unsafe { &*iter }, sc) {
                         Some((start, _, step)) => {
                             step == step.trunc() && step.abs() <= 64.0 && start.is_none_or(|x| self.counts(x, sc, &w))
                         }
                         None => false,
                     },
+                    Src::Repeat(..) => true,
                     Src::Other => false,
                 };
                 if !ok {
@@ -2416,7 +3174,35 @@ impl<'a> Cx<'a> {
     /// and never changes length, so it needs no sharing check and its length is
     /// a constant.
     /// `ints(n)` or `zeros(n)`: whether it is ints, and the expression for n.
+    /// `e` without a within(..., lo, hi, ...) around it whose check can't fail
+    /// for a new table: its zeros (or its constant numbers) are in range.
+    fn table_value<'e>(&self, e: &'e Expr, sc: usize) -> &'e Expr {
+        let Expr::Call(f, args, _) = e else { return e };
+        let Callee::Builtin(b) = self.callee(f, sc) else { return e };
+        if self.bnames[b] != "within" || !(3..=4).contains(&args.len()) {
+            return e;
+        }
+        let (Some(lo), Some(hi)) = (self.fold_const(&args[1], sc), self.fold_const(&args[2], sc)) else { return e };
+        let inside = |x: f64| x >= lo && x <= hi;
+        let ok = match &args[0] {
+            Expr::Call(g, a, _) => match (self.callee(g, sc), &a[..]) {
+                (Callee::Builtin(c), [Expr::List(items)]) if self.bnames[c] == "ints" => {
+                    items.iter().all(|x| self.const_of(x, sc).is_some_and(inside) || matches!(x, Expr::Int(n) if inside(*n as f64)))
+                }
+                (Callee::Builtin(c), [_]) if matches!(self.bnames[c], "ints" | "zeros") => inside(0.0),
+                _ => false,
+            },
+            _ => false,
+        };
+        if ok {
+            &args[0]
+        } else {
+            e
+        }
+    }
+
     fn reset_kind<'e>(&self, e: &'e Expr, sc: usize) -> Option<(bool, &'e Expr)> {
+        let e = self.table_value(e, sc);
         let Expr::Call(f, args, _) = e else { return None };
         let Callee::Builtin(b) = self.callee(f, sc) else { return None };
         match (self.bnames[b], &args[..]) {
@@ -2531,7 +3317,11 @@ impl<'a> Cx<'a> {
         let mut used_so_far: BTreeSet<usize> = BTreeSet::new();
         let mut reached = vec![false; n];
         for (k, st) in top.iter().enumerate() {
-            if let Stmt::Assign { idx, value: Expr::Call(f, args, _) } = st {
+            let made = match st {
+                Stmt::Assign { idx, value } => Some((idx, self.table_value(value, 0))),
+                _ => None,
+            };
+            if let Some((idx, Expr::Call(f, args, _))) = made {
                 let i = *idx as usize;
                 let mut init: Option<Vec<i64>> = None;
                 let kind = match (self.callee(f, 0), &args[..]) {
@@ -3235,7 +4025,15 @@ impl<'a> Cx<'a> {
                 if let (Some((tb, int)), Some(ie)) = (self.table_of(sc, *depth, *idx), self.fast_set(path)) {
                     let vc = if int { self.int_code(value, sc, *line) } else { self.num_code(value, sc) };
                     let k = if int { "i" } else { "a" };
+                    let safe = self.in_table(ie, sc, *idx as usize);
                     return match self.table_pos(ie, sc, *line) {
+                        Ok((ic, _)) if safe => format!(
+                            "{{ let v_ = {}; let i_ = {}; *(std::ptr::addr_of_mut!({}) as *mut {}).add(i_ as usize) = v_; }}\n",
+                            vc,
+                            ic,
+                            tb,
+                            if int { "i64" } else { "f64" }
+                        ),
                         Ok((ic, num)) => format!(
                             "{{ let v_ = {}; let i_ = {}; tset_{}(&mut *std::ptr::addr_of_mut!({}), i_, {}, v_, {})?; }}\n",
                             vc, ic, k, tb, num, line
@@ -3565,7 +4363,9 @@ impl<'a> Cx<'a> {
             }
         }
         out.push_str(&self.locals(s));
-        out.push_str(&self.block(&def.body, s, true));
+        // inputs with a range are checked by the callers (see `input_checks`)
+        let skip = if by_name { self.input_checks(s).1 } else { 0 };
+        out.push_str(&self.block(&def.body[skip..], s, true));
         self.loops = saved.0;
         self.try_depth = saved.1;
         self.ret = saved.2;
@@ -3920,10 +4720,13 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String],
         fast: vec![],
         tables: HashMap::new(),
         table_init: HashMap::new(),
+        ranges: HashMap::new(),
+        nonzero_bits: std::collections::HashSet::new(),
     };
     cx.infer(&stmts);
     cx.infer_whole(&stmts);
     cx.find_tables(&stmts);
+    cx.find_ranges(&stmts);
     let mut code = cx.program(&stmts, parser.files(), &src);
     // Embedded files become part of the executable.
     let mut entries = vec![];

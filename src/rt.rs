@@ -246,6 +246,38 @@ pub fn bcall(i: usize, args: Vec<Value>, line: u32) -> R<Value> {
 
 pub use crate::builtins::{screlu_dot_slice, update_rows_slice};
 
+/// within(x, lo, hi, name) for an integer: x, or the problem.
+#[inline(always)]
+pub fn within_i(x: i64, lo: f64, hi: f64, name: &str, line: u32) -> R<i64> {
+    let f = x as f64;
+    if f >= lo && f <= hi {
+        Ok(x)
+    } else {
+        within_fail(x.to_string(), lo, hi, name, line)
+    }
+}
+
+/// within(x, lo, hi, name) for a number.
+#[inline(always)]
+pub fn within_n(x: f64, lo: f64, hi: f64, name: &str, line: u32) -> R<f64> {
+    if x >= lo && x <= hi {
+        Ok(x)
+    } else {
+        within_fail(crate::value::fmt_num(x), lo, hi, name, line)
+    }
+}
+
+/// within(x, lo, hi, name) for any value.
+pub fn within_v(x: Value, lo: f64, hi: f64, name: &str, line: u32) -> R<Value> {
+    at(crate::builtins::within_value(x, lo, hi, name), line)
+}
+
+#[cold]
+#[inline(never)]
+fn within_fail<X>(x: String, lo: f64, hi: f64, name: &str, line: u32) -> R<X> {
+    fail(crate::builtins::within_message(&x, lo, hi, name), line)
+}
+
 /// Calls a built-in that takes its inputs as a slice (no list is allocated).
 #[inline]
 pub fn scall(f: fn(&[Value]) -> Result<Value, String>, args: &[Value], line: u32) -> R<Value> {

@@ -23,6 +23,36 @@ pub struct Parser {
     files: Vec<(String, String)>,
     loaded: Vec<PathBuf>,
     dirs: Vec<PathBuf>,
+    /// Top-level variables given a range with `within`: (slot, lowest, highest, line).
+    ranged: Vec<(u32, Expr, Expr, u32)>,
+}
+
+/// A copy of a range bound: a number, a variable, or arithmetic on them, with
+/// variables `extra` scopes further out (for using it inside a function).
+fn copy_bound(e: &Expr, extra: u32) -> Option<Expr> {
+    Some(match e {
+        Expr::Num(n) => Expr::Num(*n),
+        Expr::Int(n) => Expr::Int(*n),
+        Expr::Var { depth, idx, name, line } => Expr::Var { depth: depth + extra, idx: *idx, name: name.clone(), line: *line },
+        Expr::Neg(a, l) => Expr::Neg(Box::new(copy_bound(a, extra)?), *l),
+        Expr::Binary(op, a, b, l) => Expr::Binary(*op, Box::new(copy_bound(a, extra)?), Box::new(copy_bound(b, extra)?), *l),
+        Expr::Call(f, args, l) => Expr::Call(
+            Box::new(copy_bound(f, extra)?),
+            args.iter().map(|a| copy_bound(a, extra)).collect::<Option<Vec<_>>>()?,
+            *l,
+        ),
+        _ => return None,
+    })
+}
+
+/// The line an expression is on, if it records one.
+fn expr_line(e: &Expr) -> Option<u32> {
+    match e {
+        Expr::Var { line, .. } | Expr::Call(_, _, line) | Expr::Index(_, _, line) | Expr::Binary(_, _, _, line) => Some(*line),
+        Expr::Neg(_, line) | Expr::Not(_, line) | Expr::BitNot(_, line) | Expr::Field(_, _, line) => Some(*line),
+        Expr::And(_, _, line) | Expr::Or(_, _, line) => Some(*line),
+        _ => None,
+    }
 }
 
 fn describe(t: &Tok) -> String {
@@ -73,6 +103,7 @@ impl Parser {
             files: vec![],
             loaded: vec![],
             dirs: vec![PathBuf::new()],
+            ranged: vec![],
         }
     }
 
@@ -109,12 +140,20 @@ impl Parser {
         let saved = self.scopes[0].len();
         let saved_assigned = self.assigned.clone();
         let saved_loaded = self.loaded.len();
+        let saved_ranged = self.ranged.len();
         self.dirs.truncate(1);
         self.toks = toks;
         self.pos = 0;
         self.forward.clear();
         self.scopes.truncate(1);
         let mut r = self.program();
+        if let Ok(stmts) = &mut r {
+            if self.ranged.len() > saved_ranged {
+                if let Err(e) = self.keep_in_range(stmts, 0) {
+                    r = Err(e);
+                }
+            }
+        }
         if r.is_ok() {
             for (idx, name, line) in &self.forward {
                 if !self.assigned[*idx] {
@@ -128,6 +167,7 @@ impl Parser {
             self.scopes[0].truncate(saved);
             self.assigned = saved_assigned;
             self.loaded.truncate(saved_loaded);
+            self.ranged.truncate(saved_ranged);
         }
         r
     }
@@ -335,8 +375,17 @@ impl Parser {
         Ok(stmts)
     }
 
-    fn function(&mut self, name: &str, params: Vec<String>) -> PR<Rc<FnDef>> {
+    fn function(&mut self, name: &str, params: Vec<String>, ranges: Vec<Option<(Expr, Expr, u32)>>) -> PR<Rc<FnDef>> {
         let nparams = params.len();
+        // inputs with a range are checked first: x = within(x, lo, hi, "x")
+        let nest = self.scopes.len() as u32;
+        let mut checks = vec![];
+        for (k, r) in ranges.iter().enumerate() {
+            if let Some((lo, hi, line)) = r {
+                let v = Expr::Var { depth: 0, idx: k as u32, name: params[k].as_str().into(), line: *line };
+                checks.push(Stmt::Assign { idx: k as u32, value: self.within_call_at(v, lo, hi, nest, &params[k], *line) });
+            }
+        }
         self.scopes.push(params);
         let body = if self.eat(&Tok::Assign) {
             vec![Stmt::Expr(self.expr()?)]
@@ -349,11 +398,202 @@ impl Parser {
             ));
         };
         let nslots = self.scopes.pop().unwrap().len();
+        let body = if checks.is_empty() {
+            body
+        } else {
+            // a body `= value` gives that value back after the checks
+            let mut b = checks;
+            b.extend(body);
+            b
+        };
         Ok(Rc::new(FnDef { name: name.into(), nparams, nslots, body, code: Default::default() }))
     }
 
+    /// within(value, lo, hi, "name") for code inside a function `nest` scopes
+    /// below the top level, with `lo` and `hi` written one scope further out.
+    fn within_call_at(&self, value: Expr, lo: &Expr, hi: &Expr, nest: u32, name: &str, line: u32) -> Expr {
+        let args = vec![value, copy_bound(lo, 1).unwrap(), copy_bound(hi, 1).unwrap(), Expr::Str(name.into())];
+        Expr::Call(Box::new(self.within_fn(nest, line)), args, line)
+    }
+
+    /// `within lowest to highest` after a value or an input name, if there.
+    fn within_range(&mut self) -> PR<Option<(Expr, Expr)>> {
+        if !matches!(self.peek(), Tok::Ident(w) if w == "within") {
+            return Ok(None);
+        }
+        self.advance();
+        let lo = self.expr()?;
+        self.expect(Tok::To, "`to` between the lowest and highest number (for example: within 0 to 63)")?;
+        let hi = self.expr()?;
+        if copy_bound(&lo, 0).is_none() || copy_bound(&hi, 0).is_none() {
+            return self.err("the lowest and highest numbers after `within` must be numbers, names of numbers, or arithmetic on them".into());
+        }
+        Ok(Some((lo, hi)))
+    }
+
+    /// The slot of the `within` built-in, as seen from `nest` functions deep.
+    fn within_fn(&self, nest: u32, line: u32) -> Expr {
+        let idx = self.scopes[0].iter().position(|n| n == "within").unwrap_or(0) as u32;
+        Expr::Var { depth: nest, idx, name: "within".into(), line }
+    }
+
+    /// within(value, lo, hi, "name"), for code `nest` functions deep.
+    fn within_call(&self, value: Expr, lo: &Expr, hi: &Expr, extra: u32, name: &str, line: u32) -> Expr {
+        let args = vec![value, copy_bound(lo, extra).unwrap(), copy_bound(hi, extra).unwrap(), Expr::Str(name.into())];
+        Expr::Call(Box::new(self.within_fn(extra, line)), args, line)
+    }
+
+    /// Makes every value given to a variable with a range (a top-level
+    /// `name = ... within lo to hi`) go through within(value, lo, hi, "name"):
+    /// assignments, `change`, and changing a part (`name[i] = value`).
+    /// `nest` is how many functions deep `stmts` are.
+    fn keep_in_range(&self, stmts: &mut [Stmt], nest: u32) -> PR<()> {
+        for st in stmts.iter_mut() {
+            let (target, value, line) = match st {
+                Stmt::Assign { idx, value } => ((nest == 0).then_some(*idx), Some(value), None),
+                Stmt::AssignOuter { depth, idx, value } => ((*depth == nest).then_some(*idx), Some(value), None),
+                Stmt::SetPath { depth, idx, value, line, .. } => ((*depth == nest).then_some(*idx), Some(value), Some(*line)),
+                Stmt::Learn { idx, value, line } => {
+                    if nest == 0 && self.ranged.iter().any(|r| r.0 == *idx) {
+                        return Err(PErr { msg: "a variable with a range can't be learned".into(), line: *line });
+                    }
+                    (None, Some(value), None)
+                }
+                _ => (None, None, None),
+            };
+            if let Some(value) = value {
+                self.keep_in_range_expr(value, nest)?;
+                if let Some(r) = target.and_then(|t| self.ranged.iter().find(|r| r.0 == t)) {
+                    let line = line.or_else(|| expr_line(value)).unwrap_or(r.3);
+                    let name = self.scopes[0][r.0 as usize].clone();
+                    let v = std::mem::replace(value, Expr::Nothing);
+                    *value = self.within_call(v, &r.1, &r.2, nest, &name, line);
+                }
+            }
+            let counter = |v: &Option<u32>, line: u32| -> PR<()> {
+                match v {
+                    Some(v) if nest == 0 && self.ranged.iter().any(|r| r.0 == *v) => {
+                        Err(PErr { msg: format!("'{}' has a range, so it can't count the rounds of a loop or hold a problem", self.scopes[0][*v as usize]), line })
+                    }
+                    _ => Ok(()),
+                }
+            };
+            match st {
+                Stmt::SetPath { path, .. } => {
+                    for a in path {
+                        if let Access::Index(es) = a {
+                            for e in es {
+                                self.keep_in_range_expr(e, nest)?;
+                            }
+                        }
+                    }
+                }
+                Stmt::Show(es) => {
+                    for e in es {
+                        self.keep_in_range_expr(e, nest)?;
+                    }
+                }
+                Stmt::Give(Some(e)) | Stmt::Expr(e) => self.keep_in_range_expr(e, nest)?,
+                Stmt::Repeat { count, var, body, line } => {
+                    counter(var, *line)?;
+                    self.keep_in_range_expr(count, nest)?;
+                    self.keep_in_range(body, nest)?;
+                }
+                Stmt::Each { var, iter, body, line } => {
+                    counter(&Some(*var), *line)?;
+                    self.keep_in_range_expr(iter, nest)?;
+                    self.keep_in_range(body, nest)?;
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.keep_in_range_expr(cond, nest)?;
+                    self.keep_in_range(body, nest)?;
+                }
+                Stmt::When { arms, otherwise } => {
+                    for (c, b, _) in arms.iter_mut() {
+                        self.keep_in_range_expr(c, nest)?;
+                        self.keep_in_range(b, nest)?;
+                    }
+                    if let Some(b) = otherwise {
+                        self.keep_in_range(b, nest)?;
+                    }
+                }
+                Stmt::Descend { loss, rate, .. } => {
+                    self.keep_in_range_expr(loss, nest)?;
+                    self.keep_in_range_expr(rate, nest)?;
+                }
+                Stmt::Try { body, var, handler } => {
+                    counter(var, 0)?;
+                    self.keep_in_range(body, nest)?;
+                    self.keep_in_range(handler, nest)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn keep_in_range_expr(&self, e: &mut Expr, nest: u32) -> PR<()> {
+        match e {
+            Expr::Lambda(def) => {
+                if let Some(def) = Rc::get_mut(def) {
+                    self.keep_in_range(&mut def.body, nest + 1)?;
+                }
+            }
+            Expr::Interp(p) | Expr::List(p) => {
+                for x in p {
+                    self.keep_in_range_expr(x, nest)?;
+                }
+            }
+            Expr::Map(m) => {
+                for (_, x) in m {
+                    self.keep_in_range_expr(x, nest)?;
+                }
+            }
+            Expr::Neg(a, _) | Expr::Not(a, _) | Expr::Field(a, _, _) | Expr::BitNot(a, _) => self.keep_in_range_expr(a, nest)?,
+            Expr::Binary(_, a, b, _) | Expr::And(a, b, _) | Expr::Or(a, b, _) => {
+                self.keep_in_range_expr(a, nest)?;
+                self.keep_in_range_expr(b, nest)?;
+            }
+            Expr::Call(f, args, _) => {
+                self.keep_in_range_expr(f, nest)?;
+                for a in args {
+                    self.keep_in_range_expr(a, nest)?;
+                }
+            }
+            Expr::Index(b, idx, _) => {
+                self.keep_in_range_expr(b, nest)?;
+                for x in idx {
+                    self.keep_in_range_expr(x, nest)?;
+                }
+            }
+            Expr::Range(a, z, _) => {
+                for x in [a, z].into_iter().flatten() {
+                    self.keep_in_range_expr(x, nest)?;
+                }
+            }
+            Expr::Ask { model, prompt, .. } => {
+                self.keep_in_range_expr(model, nest)?;
+                self.keep_in_range_expr(prompt, nest)?;
+            }
+            Expr::ModelNew { spec, opts, .. } => {
+                self.keep_in_range_expr(spec, nest)?;
+                if let Some(o) = opts {
+                    self.keep_in_range_expr(o, nest)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn params(&mut self) -> PR<Vec<String>> {
+        Ok(self.params_with_ranges()?.0)
+    }
+
+    /// Input names, and the range given to each with `within`, if any.
+    fn params_with_ranges(&mut self) -> PR<(Vec<String>, Vec<Option<(Expr, Expr, u32)>>)> {
         let mut params = vec![];
+        let mut ranges = vec![];
         if self.eat(&Tok::LParen) {
             while !self.eat(&Tok::RParen) {
                 let p = self.ident("an input name")?;
@@ -361,13 +601,15 @@ impl Parser {
                     return self.err(format!("the input name '{}' is used twice", p));
                 }
                 params.push(p);
+                let line = self.line();
+                ranges.push(self.within_range()?.map(|(lo, hi)| (lo, hi, line)));
                 if !self.eat(&Tok::Comma) {
                     self.expect(Tok::RParen, "')'")?;
                     break;
                 }
             }
         }
-        Ok(params)
+        Ok((params, ranges))
     }
 
     fn statement(&mut self) -> PR<Stmt> {
@@ -394,8 +636,8 @@ impl Parser {
                 self.advance();
                 let name = self.ident("a name after `to`")?;
                 let idx = self.declare(&name);
-                let params = self.params()?;
-                let def = self.function(&name, params)?;
+                let (params, ranges) = self.params_with_ranges()?;
+                let def = self.function(&name, params, ranges)?;
                 Ok(Stmt::Assign { idx, value: Expr::Lambda(def) })
             }
             Tok::Show => {
@@ -531,7 +773,17 @@ impl Parser {
                 self.advance();
                 self.advance();
                 let value = self.expr()?;
+                let range = self.within_range()?;
                 let idx = self.declare(&name);
+                if let Some((lo, hi)) = range {
+                    if self.scopes.len() != 1 {
+                        return self.err("`within` gives a range to a top-level variable or to a function's input; inside a function, use within(x, lowest, highest)".into());
+                    }
+                    if self.ranged.iter().any(|r| r.0 == idx) {
+                        return self.err(format!("'{}' already has a range", name));
+                    }
+                    self.ranged.push((idx, lo, hi, line));
+                }
                 Ok(Stmt::Assign { idx, value })
             }
             _ => {

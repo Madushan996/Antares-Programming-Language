@@ -1,0 +1,52 @@
+# Ranges: `name = value within lo to hi` for top-level variables (every number
+# they hold), `to f(x within lo to hi)` for inputs, and within(x, lo, hi).
+
+SIZE = 8
+board = ints(SIZE * SIZE) within 0 to 15
+count = int(0) within 0 to SIZE * SIZE
+level = 3 within -1 to 9.5
+pieces = [1, 2, [3, 4]] within 0 to 4
+
+to put(p within 0 to 15, sq within 0 to SIZE * SIZE - 1) {
+    board[sq] = p
+    change count = count + 1
+}
+
+to take(sq within 0 to 63) = board[sq]
+
+to bump(step) {
+    change level = level + step
+}
+
+put(int(5), int(10))
+put(int(15), int(63))
+show take(int(10)), take(int(63)), count
+
+# a value out of range is a problem where it is given
+try { put(int(16), int(1)) } else e { show "p", e }
+try { put(int(1), int(64)) } else e { show "sq", e }
+try { take(int(-1)) } else e { show "take", e }
+try { board[3] = 99 } else e { show "store", e }
+try { board = ints([1, 2, 99]) } else e { show "row", e }
+try { bump(7) } else e { show "change", e }
+bump(6.5)
+show level
+try { level = -1.5 } else e { show "neg", e }
+try { pieces = [1, [2, 5]] } else e { show "list", e }
+show board[3], count, level, pieces
+
+# a store inside a function that isn't called by name
+add_to = (k, v) => k + v
+store = (i, v) => within(v, 0, 15)
+show store(0, 7)
+
+# within as a built-in
+show within(3, 0, 5), within(ints(4), 0, 0)
+try { within(6, 0, 5) } else e { show "plain", e }
+try { within("text", 0, 5) } else e { show "kind", e }
+
+# counting up to the limit, then one more
+each i in range(SIZE * SIZE - 2) { put(int(i % 16), int(i)) }
+show count
+try { put(int(0), int(0)) } else e { show "full", e }
+show count
