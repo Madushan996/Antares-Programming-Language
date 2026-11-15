@@ -30,6 +30,7 @@ Some things that make Antares friendly for beginners:
 
 - **One small program to install.** Antares is a single file, with nothing else to set up.
 - **Clear problem messages.** When something is wrong, Antares tells you the line, shows it, and explains the problem in plain words. If you misspell a name, it suggests the right one.
+- **A friendly editor.** The Antares IDE is a free program for writing and running Antares code: press one button to run, and problems are marked on the line where they happen.
 - **Try things instantly.** An interactive mode lets you type a line and see the answer straight away.
 - **Fast when you need it.** When a program is finished, `antares build` can turn it into a fast stand-alone program you can share.
 
@@ -73,7 +74,7 @@ This book covers **Antares 0.5.0**, released in November 2026. Everything in it 
 
 # Getting Set Up {#setup}
 
-In this chapter you install Antares, write your first program, and meet the interactive mode.
+In this chapter you install Antares and the Antares IDE, write your first program, and meet the interactive mode.
 
 ## Installing Antares
 
@@ -105,33 +106,32 @@ If you see a version number, Antares is installed. You can also download Antares
 
 > **Remember.** The window where you type commands like `antares version` is called a **terminal** (on Windows, PowerShell is a terminal). You'll use it to run your programs.
 
-## Choosing an editor
+## The Antares IDE
 
-A program is a plain text file. You can write it in any text editor, such as Notepad on Windows or TextEdit on a Mac (in plain-text mode). A programmer's editor makes life easier, though: **Visual Studio Code** is free and works on every system. It numbers the lines, which helps when Antares reports a problem on a particular line.
+You write programs in an **editor**, a program for typing code. The easiest one to start with is the **Antares IDE**, made for beginners. IDE stands for *integrated development environment*: one window where you write a program, run it and see what it does.
+
+To get it on Windows, go to **github.com/Madushan996/AntaresIDE**, open **Releases**, download **AntaresIDE.exe** and double-click it. It's one file, with nothing else to install. (On macOS and Linux, run it from its source with Python: the page explains how.)
+
+The window has four parts:
+
+- **In the middle, your code.** The words are coloured as you type, and every line is numbered.
+- **Underneath, the output.** This is what your program shows when it runs.
+- **On the left, your files.** The other programs in the same folder; double-click one to open it.
+- **On the right, help.** Every word of the language, explained. Click on a word in your code and press **F1** to see its help.
 
 Antares programs are saved with the ending **`.ant`**, for example `hello.ant`.
 
 ## Your first program
 
-1. Make a new folder for your programs, for example `antares-code` in your Documents folder.
-2. In your editor, create a new file and type this line:
+1. Start the Antares IDE and press **New** (or Ctrl+N).
+2. Type this line in place of what's there:
 
 ```antares
 show "Hello, world!"
 ```
 
-3. Save it as `hello.ant` in your new folder.
-4. In the terminal, go to the folder with the `cd` command ("change directory"):
-
-```shell
-cd Documents/antares-code
-```
-
-5. Run the program:
-
-```shell
-antares hello.ant
-```
+3. Press **Save** (or Ctrl+S). Make a new folder for your programs, for example `antares-code` in your Documents folder, and save the program in it as `hello.ant`.
+4. Press the green **Run** button (or **F5**). What the program shows appears in the output underneath:
 
 ```output
 Hello, world!
@@ -153,7 +153,29 @@ I can do sums:
 5
 ```
 
-Each `show` prints one line, in order.
+Each `show` prints one line, in order. Here is how it looks in the IDE:
+
+![The Antares IDE after running hello.ant: files on the left, the code in the middle, the output underneath, and help on the right](images/ide_hello.png)
+
+> **Try it.** The **Examples** menu in the IDE has eleven programs to try, from a times table to a game of Snake. Open one and press Run.
+
+## Running programs from the terminal
+
+You don't have to use the IDE. A program is a plain text file, so you can write it in any text editor, such as Notepad on Windows, TextEdit on a Mac (in plain-text mode) or Visual Studio Code, and run it in the terminal. Go to the program's folder with the `cd` command ("change directory"), then run the program with `antares`:
+
+```shell
+cd Documents/antares-code
+```
+
+```shell
+antares hello.ant
+```
+
+```output
+Hello, world!
+```
+
+This book shows programs and what they print, so the examples work the same way whichever you use.
 
 ## The interactive mode
 
@@ -188,18 +210,19 @@ Problem on line 1: this text is missing its closing "
      1 | show "Hello, world!
 ```
 
-The message says **which line** has the problem, shows you that line, and explains what's wrong. Fix the line and run the program again. Chapter 11 is all about problems and how to handle them.
+The message says **which line** has the problem, shows you that line, and explains what's wrong. In the IDE, the line is also marked in red and the cursor jumps to it. Fix the line and run the program again. Chapter 11 is all about problems and how to handle them.
 
 ## Try it yourself
 
-1. Write a program `me.ant` that shows your name on one line and your favourite food on the next.
+1. In the IDE, write a program `me.ant` that shows your name on one line and your favourite food on the next.
 2. Write a program that shows the result of `7 * 6`.
 3. In the interactive mode, find out what `100 / 8` is.
 
 ## Summary
 
 - Install Antares with the one-line installer, then check it with `antares version`.
-- Programs are text files ending in `.ant`; run one with `antares name.ant`.
+- The Antares IDE is the easiest place to write programs: press Run (F5) to run one.
+- Programs are text files ending in `.ant`; in the terminal, run one with `antares name.ant`.
 - Programs run from top to bottom.
 - `antares` on its own starts the interactive mode, a quick calculator and testing ground.
 - Problem messages name the line and explain what's wrong.
@@ -514,6 +537,10 @@ Hello Maya! In 2030 you will be 16.
 ```
 
 Here the user typed `Maya` and `2014`. Because the year comes back as text, the program uses `number(...)` before doing a sum with it.
+
+In the IDE, a box appears under the output while the program waits for an answer. Type the answer there and press Enter:
+
+![The Antares IDE waiting for an answer: type it in the box under the output and press Enter](images/ide_input.png)
 
 ## Try it yourself
 
@@ -1627,6 +1654,10 @@ Problem on line 1: can't use - between a text and a number
 
 Appendix D lists the messages you'll meet most often and what they usually mean.
 
+In the IDE, a problem is easy to find. The line is marked in red and the cursor jumps to it. Under the message, a **hint** in plain words explains what usually causes that kind of problem, and **Show me line 2** jumps back to the line if you've moved away:
+
+![A problem in the Antares IDE: the line is marked in red, and a hint explains it](images/ide_problem.png)
+
 > **Remember.** When you get a problem message, read it carefully, look at the line it names, and also at the line just before it. The cause is usually close by.
 
 ## Finding bugs
@@ -2724,7 +2755,9 @@ while yes {
 }
 ```
 
-The `examples` folder that comes with Antares includes `snake.ant`, a complete Snake game in under 90 lines built this way. Run it with `antares examples/snake.ant` and steer with the arrow keys.
+These programs need a real terminal window. The Antares IDE notices when a program uses `key()`, `draw()` or `clear()`, and runs it in its own window for you.
+
+The `examples` folder that comes with Antares includes `snake.ant`, a complete Snake game in under 90 lines built this way (it's in the IDE's Examples menu too). Run it with `antares examples/snake.ant` and steer with the arrow keys.
 
 ## Try it yourself
 
@@ -2748,7 +2781,7 @@ So far you've run programs with `antares program.ant`. Antares reads the program
 antares build program.ant
 ```
 
-This makes `program.exe` on Windows (or `program` on macOS and Linux) next to your source file. Run it directly, without Antares, and share it with friends who don't have Antares installed. The compiled program behaves exactly like the interpreted one; it just runs faster, often many times faster.
+This makes `program.exe` on Windows (or `program` on macOS and Linux) next to your source file. In the Antares IDE, the **Build .exe** button does the same. Run it directly, without Antares, and share it with friends who don't have Antares installed. The compiled program behaves exactly like the interpreted one; it just runs faster, often many times faster.
 
 | Program | Interpreted | Compiled |
 |---|---|---|
@@ -3094,7 +3127,7 @@ The features that everyday programs need most, and that were missing until now. 
 | Date and time | `now()` |
 | Files | `append`, `delete`, `files` |
 
-That makes 100 built-in functions. This book, *Learn Antares*, was also published with this version, in the `docs` folder.
+That makes 100 built-in functions. This book, *Learn Antares*, was also published with this version, in the `docs` folder, and so was the **Antares IDE**, an editor for beginners (Chapter 2).
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -3803,6 +3836,20 @@ draw("Done!")
 | Bits | `& \| xor ~ << >>` |
 | Other | `->` (pipeline), `=>` (quick function), `ask m "q" as kind` |
 
+## Antares IDE keys
+
+| Keys | Does |
+|---|---|
+| F5 | Run the program |
+| Shift+F5 | Stop it |
+| F1 | Help on the word under the cursor |
+| Ctrl+S, Ctrl+N, Ctrl+O | Save, New, Open |
+| Ctrl+Z, Ctrl+Y | Undo, Redo |
+| Ctrl+F, Ctrl+G | Find and replace, Go to line |
+| Ctrl+/ | Comment or uncomment lines |
+| Tab | Accept a suggested word, or indent |
+| Ctrl+=, Ctrl+- | Bigger, smaller text |
+
 ## Keywords
 
 These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend`, `each`, `else`, `give`, `in`, `learn`, `model`, `no`, `not`, `nothing`, `or`, `repeat`, `show`, `skip`, `stop`, `to`, `try`, `use`, `using`, `when`, `while`, `with`, `xor`, `yes`.
@@ -3852,6 +3899,7 @@ The Antares Language Reference describes every one of them in detail.
 | **field** | A named part of a map, like `name` in `{name: "Ana"}` |
 | **function** | A named group of steps that can be used again and again |
 | **gradient** | For each learnable number, how fast the loss grows when that number grows |
+| **IDE** | An integrated development environment: one program for writing, running and fixing code, such as the Antares IDE |
 | **index** | The position number of an item in a list or text, counting from 0 |
 | **input** | A value given to a function when it is called |
 | **integer** | A whole number of exactly 64 bits, for working with bits |
