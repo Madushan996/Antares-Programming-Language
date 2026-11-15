@@ -582,9 +582,9 @@ Things to know:
   builds it. A build takes about 30 to 40 seconds. Without Rust, use `--pack`
   (see [Making an executable to share](#making-an-executable-to-share)): the
   program then runs at interpreter speed, but needs nothing to build.
-- Packed programs are checked on Windows. On macOS, attaching data to a
-  program may upset its code signature; compile with `--native` there if a
-  packed program won't start.
+- Packed programs work on Windows, macOS and Linux: every change is checked
+  to make sure packed programs behave exactly like interpreted ones on all
+  three.
 - The compiled program is built against the Antares source code. `antares
   build` uses the folder named by the `ANTARES_HOME` environment variable if
   set, then the folder this copy of Antares was built from if it is still
