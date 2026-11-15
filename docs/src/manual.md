@@ -1298,7 +1298,7 @@ The compiler looks at the whole program and works out which variables only ever 
 ## Requirements and targets
 
 - The compiler needs Rust (`cargo`) installed, because it writes Rust code and builds it. A build takes about 30 to 40 seconds. Install Rust from rustup.rs, or use `--pack`.
-- Packed programs are checked on Windows. On macOS, attaching data to a program may upset its code signature; compile with `--native` there if a packed program won't start.
+- Packed programs work on Windows, macOS and Linux: every change is checked to make sure packed programs behave exactly like interpreted ones on all three.
 - Compiled programs are built against the Antares source code. `antares build` uses the folder named by the `ANTARES_HOME` environment variable if it is set, then the folder this copy of Antares was built from if it still exists. Otherwise it downloads the source of the matching release from GitHub once and keeps it in your cache folder, so a downloaded copy of Antares can compile programs too.
 - By default the program is built for the processor of the machine that compiles it, so it may not run on an older one. Choose another target with `--cpu`: `x86-64` (any 64-bit PC), `x86-64-v2` (SSE4.2) or `x86-64-v3` (AVX2).
 
