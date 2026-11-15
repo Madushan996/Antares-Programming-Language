@@ -108,6 +108,7 @@ def convert(md_text: str):
         inner = md.convert(rest)
         inner = process_code(inner)
         inner = process_callouts(inner)
+        inner = process_images(inner)
         sections = []
         sec_no = 0
 
@@ -161,6 +162,21 @@ def process_code(s: str) -> str:
 
 
 CALLOUTS = {"Tip.": "tip", "Try it.": "try", "Remember.": "remember", "Watch out.": "warn"}
+
+
+def process_images(s: str) -> str:
+    """![caption](images/x.png) becomes a figure with the picture inside the page
+    (the page is printed from a temporary folder, so files can't be linked)."""
+    import base64
+
+    def repl(m):
+        alt, src = html.unescape(m.group(1)), m.group(2)
+        data = base64.b64encode((HERE / src).read_bytes()).decode("ascii")
+        kind = "png" if src.lower().endswith(".png") else "jpeg"
+        return (f'<figure><img src="data:image/{kind};base64,{data}" alt="{html.escape(alt)}">'
+                f'<figcaption>{html.escape(alt)}</figcaption></figure>')
+
+    return re.sub(r'<p>\s*<img alt="([^"]*)" src="([^"]+)"\s*/?>\s*</p>', repl, s)
 
 
 def process_callouts(s: str) -> str:

@@ -279,3 +279,8 @@ table:has(thead th:empty) td { text-align: center; border: 1px solid var(--rule)
 /* an example stays on the page with the output box that follows it */
 pre.code:has(+ pre.blk.output) { break-after: avoid; }
 pre.blk.output { break-before: avoid; }
+
+/* pictures (screenshots) with their captions */
+figure { margin: 3mm 0 5mm; break-inside: avoid; }
+figure img { display: block; width: 100%; border: 1px solid var(--rule); border-radius: 1.5mm; }
+figcaption { margin-top: 1.5mm; font-size: 8.5pt; color: var(--muted); text-align: center; }
