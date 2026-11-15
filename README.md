@@ -301,7 +301,8 @@ person = {name: "Ada", age: 36}   # a map
 ```
 
 Text can contain values: `"Hello {name}, next year you are {age + 1}"`.
-Write `\{` for a plain brace. Comments start with `#`.
+Write `\{` for a plain brace. Comments start with `#`. `+=`, `-=`, `*=` and
+`/=` change a value by an amount: `age += 1`, `counts[word] += 1`.
 
 ### Maths
 
@@ -375,7 +376,7 @@ variable. To replace a variable that lives outside the function, say so with
 
 ```
 count = 0
-to bump() { change count = count + 1 }
+to bump() { change count += 1 }
 ```
 
 ### Decisions and loops
@@ -512,14 +513,15 @@ trying things offline (see `examples/ask.ant`).
 | Reduce | `sum mean max min argmax` |
 | Maths | `exp log sqrt abs sin cos floor round trunc clip tanh sigmoid relu softmax` |
 | Fast row arithmetic | `sum_rows update_rows rows sum_product screlu screlu_dot` |
-| Integers | `int ints popcount lowest_bit highest_bit div rand_bits` |
+| Integers | `int ints popcount lowest_bit highest_bit div rand_bits within` |
 | Compact numbers | `compact` (whole numbers stored in 2 bytes instead of 8, for the row built-ins), `expand` |
 | Learning | `grad` (plus the `learn` and `descend` statements) |
-| Lists and maps | `push map filter reduce sort reverse slice has keys values join` |
-| Text | `upper lower trim split lines replace text number` |
-| Data | `save load exists program_folder json to_json read write read_binary input input_waiting` |
+| Lists and maps | `push insert remove find unique map filter reduce sort sort_by reverse slice has keys values join` |
+| Text | `upper lower trim split lines replace find text number fixed pad code char` |
+| Data and files | `save load exists program_folder json to_json read write append delete files read_binary input input_waiting` |
+| The command line | `args` (what was typed after the program's name), `env` (a setting of the computer) |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
-| Other | `kind clock check fail` |
+| Other | `kind clock now check fail` |
 
 ## Speed
 

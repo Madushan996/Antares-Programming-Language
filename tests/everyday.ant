@@ -1,0 +1,101 @@
+# Everyday features: += -= *= /=, args, env, fixed, pad, code, char, insert,
+# remove, find, unique, sort_by, now, append, delete, files.
+
+# ----- changing a value by an amount -----
+score = 10
+score += 5
+score -= 3
+score *= 2
+score /= 4
+show score
+name = "Ant"
+name += "ares"
+show name
+xs = [1, 2, 3]
+xs[1] += 10
+i = 2
+xs[i] *= 3
+show xs
+p = {score: 1, tags: ["a"]}
+p.score += 41
+p.tags[0] += "b"
+show p
+grid = [[1, 2], [3, 4]]
+grid[1, 0] -= 3
+show grid
+count = 0
+to bump(amount) {
+    change count += amount
+}
+bump(2)
+bump(3)
+show count
+total = 0
+repeat 4 as k { total += k }
+show total
+level = 3 within 0 to 5
+level += 2
+show level
+try { level += 1 } else e { show e }
+show 3 >= 2, 2 <= 1
+
+# ----- the command line and settings -----
+show args()
+show kind(args())
+show env("ANTARES_SURELY_NOT_SET_42") == nothing
+show kind(env("PATH"))
+
+# ----- numbers as text -----
+show fixed(3.14159, 2), fixed(2, 3), fixed(-0.001, 2), fixed(1234.5, 0)
+show "[" + pad("ab", 5) + "]", "[" + pad(42, 5) + "]", "[" + pad(7, 4, "left") + "]", "[" + pad("x", 3, "right") + "]"
+show "[" + pad("toolong", 3) + "]"
+try { fixed(1, 2.5) } else e { show e }
+try { pad("a", 3, "middle") } else e { show e }
+
+# ----- characters -----
+show code("A"), code("a"), code("€"), char(66), char(8364)
+word = ""
+each n in [72, 105] { word += char(n) }
+show word
+try { code("") } else e { show e }
+try { char(-1) } else e { show e }
+
+# ----- editing lists -----
+fruit = ["apple", "cherry"]
+fruit = insert(fruit, 1, "banana")
+fruit = insert(fruit, 3, "date")
+fruit = insert(fruit, 0, "fig")
+show fruit
+fruit = remove(fruit, 0)
+fruit = remove(fruit, -1)
+show fruit
+show insert([1, 2], 1, 9), remove([1, 2, 3], 1)
+show find(fruit, "banana"), find(fruit, "kiwi"), find([3, 1, 4], 4)
+show find("antares", "tar"), find("antares", "z"), find("naïve café", "café")
+show unique([3, 1, 3, 2, 1]), unique(["a", "b", "a"]), unique([])
+people = [{name: "Cleo", age: 31}, {name: "Ana", age: 25}, {name: "Ben", age: 31}]
+show map(sort_by(people, p => p.age), p => p.name)
+show map(sort_by(people, p => p.name), p => p.name)
+show sort_by(["kiwi", "fig", "banana"], len)
+try { insert([1, 2], 5, 0) } else e { show e }
+try { remove([], 0) } else e { show e }
+try { sort_by([1, 2], x => {v: x}) } else e { show e }
+
+# ----- the date and time -----
+t = now()
+show keys(t)
+show t.year >= 2026, t.month >= 1 and t.month <= 12, t.day >= 1 and t.day <= 31
+show t.hour >= 0 and t.hour < 24, t.minute < 60, t.second < 61
+show has(["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"], t.weekday)
+
+# ----- files -----
+log = "everyday_test_log.txt"
+when exists(log) { delete(log) }
+append(log, "first\n")
+append(log, "second\n")
+show lines(trim(read(log)))
+show has(files(), log), has(files("."), log)
+delete(log)
+show exists(log), has(files(), log)
+try { delete(log) } else e { show "can't delete twice" }
+try { files("no_such_folder_42") } else e { show "no such folder" }

@@ -37,7 +37,8 @@ onehot grad exp log tanh sigmoid relu sqrt abs sin cos floor round trunc clip su
 compact expand screlu sum_product screlu_dot update_rows read_binary input_waiting len int
 ints popcount lowest_bit highest_bit div rand_bits push map filter reduce keys values has join
 split sort reverse slice upper lower trim replace lines text number kind read write input clock
-fail check json to_json save load exists program_folder key wait clear draw""".split()
+fail check within json to_json save load exists program_folder key wait clear draw args env append
+delete files now fixed pad code char insert remove find unique sort_by""".split()
 
 
 class AntaresLexer(RegexLexer):

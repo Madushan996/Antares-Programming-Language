@@ -1384,6 +1384,297 @@ thread_local! {
     static PROGRAM_FOLDER: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
 }
 
+static PROGRAM_ARGS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Records what was typed after the program's name on the command line.
+pub fn set_program_args(args: Vec<String>) {
+    let _ = PROGRAM_ARGS.set(args);
+}
+
+/// args(): what was typed after the program's name, as a list of text.
+fn b_args(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "args")?;
+    let args = PROGRAM_ARGS.get().cloned().unwrap_or_default();
+    Ok(Value::List(Rc::new(args.into_iter().map(s).collect())))
+}
+
+/// env(name): a setting of the computer (an environment variable), or nothing.
+fn b_env(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "env")?;
+    let name = text(&a[0], "env")?;
+    Ok(match std::env::var(&*name) {
+        Ok(v) => s(v),
+        Err(_) => Value::Nothing,
+    })
+}
+
+/// append(file, value): adds the value (as text) to the end of a file.
+fn b_append(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "append")?;
+    let p = text(&a[0], "append")?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&*p)
+        .map_err(|e| format!("couldn't open the file \"{}\": {}", p, e))?;
+    f.write_all(a[1].show().as_bytes()).map_err(|e| format!("couldn't write to the file \"{}\": {}", p, e))?;
+    Ok(Value::Nothing)
+}
+
+/// delete(file): removes a file.
+fn b_delete(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "delete")?;
+    let p = text(&a[0], "delete")?;
+    std::fs::remove_file(&*p).map_err(|e| format!("couldn't delete the file \"{}\": {}", p, e))?;
+    Ok(Value::Nothing)
+}
+
+/// files(folder): the names of the files and folders in a folder, sorted.
+fn b_files(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() > 1 {
+        return Err(format!("files takes a folder (or nothing, for the current folder) but was given {} inputs", a.len()));
+    }
+    let dir = match a.first() {
+        Some(v) => text(v, "files")?.to_string(),
+        None => ".".to_string(),
+    };
+    let rd = std::fs::read_dir(&dir).map_err(|e| format!("couldn't read the folder \"{}\": {}", dir, e))?;
+    let mut names: Vec<String> = rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().to_string()).collect();
+    names.sort();
+    Ok(Value::List(Rc::new(names.into_iter().map(s).collect())))
+}
+
+/// The local date and time: year, month, day, hour, minute, second, weekday (0 = Sunday).
+#[cfg(windows)]
+fn local_now() -> [i64; 7] {
+    #[repr(C)]
+    struct SystemTime {
+        year: u16,
+        month: u16,
+        weekday: u16,
+        day: u16,
+        hour: u16,
+        minute: u16,
+        second: u16,
+        ms: u16,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetLocalTime(t: *mut SystemTime);
+    }
+    let mut t = SystemTime { year: 0, month: 0, weekday: 0, day: 0, hour: 0, minute: 0, second: 0, ms: 0 };
+    unsafe { GetLocalTime(&mut t) };
+    [t.year, t.month, t.day, t.hour, t.minute, t.second, t.weekday].map(|x| x as i64)
+}
+
+#[cfg(unix)]
+fn local_now() -> [i64; 7] {
+    #[repr(C)]
+    struct Tm {
+        sec: i32,
+        min: i32,
+        hour: i32,
+        mday: i32,
+        mon: i32,
+        year: i32,
+        wday: i32,
+        yday: i32,
+        isdst: i32,
+        gmtoff: i64,
+        zone: *const u8,
+    }
+    unsafe extern "C" {
+        fn time(t: *mut i64) -> i64;
+        fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    }
+    let mut tm = Tm { sec: 0, min: 0, hour: 0, mday: 0, mon: 0, year: 0, wday: 0, yday: 0, isdst: 0, gmtoff: 0, zone: std::ptr::null() };
+    unsafe {
+        let now = time(std::ptr::null_mut());
+        localtime_r(&now, &mut tm);
+    }
+    [tm.year as i64 + 1900, tm.mon as i64 + 1, tm.mday as i64, tm.hour as i64, tm.min as i64, tm.sec as i64, tm.wday as i64]
+}
+
+#[cfg(not(any(windows, unix)))]
+fn local_now() -> [i64; 7] {
+    // no local time: the time in UTC, from the system clock
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let days = secs.div_euclid(86400);
+    let rem = secs.rem_euclid(86400);
+    // civil date from days since 1970-01-01 (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    [y, m, d, rem / 3600, rem % 3600 / 60, rem % 60, (days + 4).rem_euclid(7)]
+}
+
+/// now(): the local date and time as a map.
+fn b_now(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 0, "now")?;
+    let [y, mo, d, h, mi, se, wd] = local_now();
+    const DAYS: [&str; 7] = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    let n = |x: i64| Value::Num(x as f64);
+    Ok(Value::Map(Rc::new(vec![
+        ("year".into(), n(y)),
+        ("month".into(), n(mo)),
+        ("day".into(), n(d)),
+        ("hour".into(), n(h)),
+        ("minute".into(), n(mi)),
+        ("second".into(), n(se)),
+        ("weekday".into(), s(DAYS[wd.rem_euclid(7) as usize].to_string())),
+    ])))
+}
+
+/// fixed(x, places): x as text with exactly that many digits after the point.
+fn b_fixed(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "fixed")?;
+    let x = num(&a[0], "fixed")?;
+    let places = num(&a[1], "fixed")?;
+    if places != places.trunc() || !(0.0..=20.0).contains(&places) {
+        return Err(format!("fixed needs a whole number of places from 0 to 20, not {}", fmt_num(places)));
+    }
+    let mut t = format!("{:.*}", places as usize, x);
+    // no "-0.00"
+    if t.starts_with('-') && t[1..].chars().all(|c| c == '0' || c == '.') {
+        t.remove(0);
+    }
+    Ok(s(t))
+}
+
+/// pad(value, width [, side]): the value as text, with spaces added to make it
+/// `width` characters wide. Numbers are lined up on the right and everything
+/// else on the left, as in a table; side "left" or "right" chooses.
+fn b_pad(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() != 2 && a.len() != 3 {
+        return Err(format!("pad takes a value, a width and optionally a side, but was given {} inputs", a.len()));
+    }
+    let width = num(&a[1], "pad")?;
+    if width != width.trunc() || width < 0.0 {
+        return Err(format!("pad needs a width that is a whole number, 0 or more, not {}", fmt_num(width)));
+    }
+    let right = match a.get(2) {
+        None => matches!(a[0], Value::Num(_) | Value::Int(_)),
+        Some(v) => match &*text(v, "pad")? {
+            "left" => false,
+            "right" => true,
+            other => return Err(format!("pad lines things up on the \"left\" or the \"right\", not \"{}\"", other)),
+        },
+    };
+    let t = a[0].show();
+    let fill = " ".repeat((width as usize).saturating_sub(t.chars().count()));
+    Ok(s(if right { fill + &t } else { t + &fill }))
+}
+
+/// code(text): the number of the first character (its Unicode code point).
+fn b_code(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "code")?;
+    let t = text(&a[0], "code")?;
+    match t.chars().next() {
+        Some(c) => Ok(Value::Num(c as u32 as f64)),
+        None => Err("code needs some text, not empty text".into()),
+    }
+}
+
+/// char(n): the character with that number.
+fn b_char(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "char")?;
+    let n = num(&a[0], "char")?;
+    match (n == n.trunc() && n >= 0.0 && n <= u32::MAX as f64).then(|| char::from_u32(n as u32)).flatten() {
+        Some(c) => Ok(s(c.to_string())),
+        None => Err(format!("{} isn't the number of a character", fmt_num(n))),
+    }
+}
+
+/// A position for insert and remove: negative counts from the end.
+fn list_pos(v: &Value, len: usize, extra: usize, name: &str) -> Result<usize, String> {
+    let k = num(v, name)?;
+    if k != k.trunc() {
+        return Err(format!("{} needs a whole-number position, not {}", name, fmt_num(k)));
+    }
+    let n = (len + extra) as f64;
+    let k2 = if k < 0.0 { k + n } else { k };
+    if k2 < 0.0 || k2 >= n {
+        let last = len + extra - 1;
+        return Err(if len + extra == 0 {
+            format!("{} was given position {}, but the list is empty", name, fmt_num(k))
+        } else {
+            format!("{}: position {} is out of range (valid: 0 to {})", name, fmt_num(k), last)
+        });
+    }
+    Ok(k2 as usize)
+}
+
+/// insert(list, position, item): a new list with the item put in at that position.
+fn b_insert(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 3, "insert")?;
+    let mut items = iter_items(&a[0])?;
+    let k = list_pos(&a[1], items.len(), 1, "insert")?;
+    items.insert(k, a[2].clone());
+    Ok(pack_list(items))
+}
+
+/// remove(list, position): a new list without the item at that position.
+fn b_remove(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "remove")?;
+    let mut items = iter_items(&a[0])?;
+    let k = list_pos(&a[1], items.len(), 0, "remove")?;
+    items.remove(k);
+    Ok(pack_list(items))
+}
+
+/// find(x, item): the position of the first item equal to `item` in a list,
+/// or where a text first appears in a text; -1 if it isn't there.
+fn b_find(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "find")?;
+    if let Value::Str(t) = &a[0] {
+        let part = text(&a[1], "find")?;
+        return Ok(Value::Num(match t.find(&*part) {
+            Some(byte) => t[..byte].chars().count() as f64,
+            None => -1.0,
+        }));
+    }
+    let items = iter_items(&a[0])?;
+    Ok(Value::Num(items.iter().position(|v| v.equals(&a[1])).map_or(-1.0, |k| k as f64)))
+}
+
+/// unique(list): the items without repeats, in the order they first appear.
+fn b_unique(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "unique")?;
+    let mut out: Vec<Value> = vec![];
+    for v in iter_items(&a[0])? {
+        if !out.iter().any(|o| o.equals(&v)) {
+            out.push(v);
+        }
+    }
+    Ok(pack_list(out))
+}
+
+/// sort_by(list, f): a copy sorted by f(item), which gives a number or text for
+/// each item. Items with the same key keep their order.
+fn b_sort_by(it: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "sort_by")?;
+    let items = iter_items(&a[0])?;
+    let mut keyed = vec![];
+    for v in items {
+        let k = it.call_native(&a[1], vec![v.clone()])?;
+        keyed.push((k, v));
+    }
+    if keyed.iter().all(|(k, _)| k.scalar().is_some()) {
+        keyed.sort_by(|x, y| x.0.scalar().partial_cmp(&y.0.scalar()).unwrap_or(std::cmp::Ordering::Equal));
+    } else if keyed.iter().all(|(k, _)| matches!(k, Value::Str(_))) {
+        keyed.sort_by(|x, y| x.0.show().cmp(&y.0.show()));
+    } else {
+        return Err("sort_by needs its function to give all numbers or all text".into());
+    }
+    Ok(pack_list(keyed.into_iter().map(|(_, v)| v).collect()))
+}
+
 /// Records where the running program lives (the script, or the compiled executable).
 pub fn set_program_folder(file: &std::path::Path) {
     let dir = std::fs::canonicalize(file)
@@ -1978,6 +2269,21 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("ints", b_ints),
         ("popcount", b_popcount),
         ("within", b_within),
+        ("args", b_args),
+        ("env", b_env),
+        ("append", b_append),
+        ("delete", b_delete),
+        ("files", b_files),
+        ("now", b_now),
+        ("fixed", b_fixed),
+        ("pad", b_pad),
+        ("code", b_code),
+        ("char", b_char),
+        ("insert", b_insert),
+        ("remove", b_remove),
+        ("find", b_find),
+        ("unique", b_unique),
+        ("sort_by", b_sort_by),
         ("lowest_bit", b_lowest_bit),
         ("highest_bit", b_highest_bit),
         ("div", b_div),

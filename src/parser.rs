@@ -45,6 +45,39 @@ fn copy_bound(e: &Expr, extra: u32) -> Option<Expr> {
     })
 }
 
+/// A copy of the place in `place += value` (a name, or part of a named list
+/// or map at positions that are names, numbers, text or arithmetic on them),
+/// so it can be read as well as given a value. Positions that call
+/// something aren't copied: working them out twice could do something twice.
+fn copy_place(e: &Expr) -> Option<Expr> {
+    Some(match e {
+        Expr::Num(n) => Expr::Num(*n),
+        Expr::Int(n) => Expr::Int(*n),
+        Expr::Str(t) => Expr::Str(t.clone()),
+        Expr::Var { depth, idx, name, line } => Expr::Var { depth: *depth, idx: *idx, name: name.clone(), line: *line },
+        Expr::Neg(a, l) => Expr::Neg(Box::new(copy_place(a)?), *l),
+        Expr::Binary(op, a, b, l) => Expr::Binary(*op, Box::new(copy_place(a)?), Box::new(copy_place(b)?), *l),
+        Expr::Field(b, name, l) => Expr::Field(Box::new(copy_place(b)?), name.clone(), *l),
+        Expr::Index(b, idx, l) => Expr::Index(
+            Box::new(copy_place(b)?),
+            idx.iter().map(|x| if matches!(x, Expr::Range(..)) { None } else { copy_place(x) }).collect::<Option<Vec<_>>>()?,
+            *l,
+        ),
+        _ => return None,
+    })
+}
+
+/// The arithmetic of `+=` `-=` `*=` `/=`.
+fn compound_op(t: &Tok) -> Option<BinOp> {
+    match t {
+        Tok::PlusAssign => Some(BinOp::Add),
+        Tok::MinusAssign => Some(BinOp::Sub),
+        Tok::StarAssign => Some(BinOp::Mul),
+        Tok::SlashAssign => Some(BinOp::Div),
+        _ => None,
+    }
+}
+
 /// The line an expression is on, if it records one.
 fn expr_line(e: &Expr) -> Option<u32> {
     match e {
@@ -733,9 +766,19 @@ impl Parser {
             Tok::Change => {
                 self.advance();
                 let name = self.ident("a name after `change`")?;
-                self.expect(Tok::Assign, "'='")?;
+                let op = compound_op(self.peek());
+                if op.is_some() {
+                    self.advance();
+                } else {
+                    self.expect(Tok::Assign, "'=' (or += -= *= /=)")?;
+                }
                 let value = self.expr()?;
                 let (depth, idx) = self.resolve(&name, line);
+                // change x += v is change x = x + v
+                let value = match op {
+                    Some(op) => Expr::Binary(op, Box::new(Expr::Var { depth, idx, name: name.as_str().into(), line }), Box::new(value), line),
+                    None => value,
+                };
                 if depth == 0 {
                     let idx = self.declare(&name);
                     Ok(Stmt::Assign { idx, value })
@@ -769,6 +812,16 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Skip(line))
             }
+            Tok::Ident(name) if compound_op(self.peek_at(1)).is_some() => {
+                // x += v is x = x + v
+                self.advance();
+                let op = compound_op(&self.advance()).unwrap();
+                let (depth, idx) = self.resolve(&name, line);
+                let old = Expr::Var { depth, idx, name: name.as_str().into(), line };
+                let value = Expr::Binary(op, Box::new(old), Box::new(self.expr()?), line);
+                let idx = self.declare(&name);
+                Ok(Stmt::Assign { idx, value })
+            }
             Tok::Ident(name) if *self.peek_at(1) == Tok::Assign => {
                 self.advance();
                 self.advance();
@@ -788,7 +841,20 @@ impl Parser {
             }
             _ => {
                 let e = self.expr()?;
-                if *self.peek() == Tok::Assign {
+                let op = compound_op(self.peek());
+                if *self.peek() == Tok::Assign || op.is_some() {
+                    // a[i] += v is a[i] = a[i] + v
+                    let old = match op {
+                        Some(_) => match copy_place(&e) {
+                            Some(c) => Some(c),
+                            None => {
+                                return self.err(
+                                    "with += -= *= /= the place must be simple (no calls in its positions); write it out, as in xs[i] = xs[i] + 1".into(),
+                                )
+                            }
+                        },
+                        None => None,
+                    };
                     let mut path = vec![];
                     let mut cur = e;
                     loop {
@@ -805,6 +871,10 @@ impl Parser {
                                 path.reverse();
                                 self.advance();
                                 let value = self.expr()?;
+                                let value = match (op, old) {
+                                    (Some(op), Some(old)) => Expr::Binary(op, Box::new(old), Box::new(value), line),
+                                    _ => value,
+                                };
                                 return Ok(Stmt::SetPath { depth, idx, name, path, value, line });
                             }
                             _ => {
