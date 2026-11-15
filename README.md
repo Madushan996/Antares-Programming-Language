@@ -75,7 +75,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.3.0`.
+You should see `Antares 0.4.0`.
 
 ### Option 2: download it yourself
 
@@ -429,6 +429,17 @@ message in the name you chose (the name is optional). `fail("message")`
 raises a problem of your own, and `check(condition, "message")` does so when
 the condition is not met.
 
+A top-level variable or a function's input can be given the range its
+numbers must stay in. Every value it is given is then checked:
+
+```
+board = ints(64) within 0 to 15
+to put(piece within 0 to 15, square within 0 to 63) {
+    board[square] = piece
+}
+put(3, 64)      # problem: square only holds numbers from 0 to 63, not 64
+```
+
 ## Machine learning
 
 `learn` declares a value the program is allowed to adjust. `descend`
@@ -582,6 +593,12 @@ Things to know:
   `m[d] = update_rows(m[s], w, ...)`, `m[d] = m[s]` and
   `screlu_dot(m[r], w[k], cap)` run in place on the matrix in a compiled
   program, with no row built in between.
+- A position into a fixed table that is certainly inside it needs no check.
+  Where the compiler can't work that out, give a range:
+  `board = ints(64) within 0 to 15`, `count = int(0) within 0 to 255`,
+  `to put(p within 0 to 15, sq within 0 to 63)`. Values are checked where
+  they are given (an input's check moves to the calls, and is left out when
+  the value is known to fit), and uses as positions are then free.
 - One value of unknown kind can slow down everything it touches. If a number
   comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler
   knows it is a number. In the chess engine, one such lookup made the whole
@@ -624,7 +641,7 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.3. Not there yet: giving a value to a slice
+This is version 0.4. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
 than Anthropic, and GPU support.
 

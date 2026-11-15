@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.3.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.4.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.3.0 — type a line and press Enter. `exit` to leave.
+Antares 0.4.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -724,6 +724,32 @@ to sqrt_of(x) {
 }
 ```
 
+## Ranges: within
+
+A top-level variable can be given the range its numbers must stay in, by adding `within lowest to highest` where it is first given a value. Every value it is given from then on, anywhere in the program (assignments, `change`, and changing one of its numbers), is checked. For a row, list or tensor, every number in it must be in range:
+
+```antares
+board = ints(64) within 0 to 15     # every number on the board is 0 to 15
+moves = int(0) within 0 to 255
+board[10] = 7                       # fine
+board[11] = 16                      # problem: board only holds numbers from 0 to 15, not 16
+```
+
+A function's inputs can have ranges too. They are checked when the function is called, before its body runs:
+
+```antares
+to put(piece within 0 to 15, square within 0 to 63) {
+    board[square] = piece
+}
+put(3, 64)                          # problem: square only holds numbers from 0 to 63, not 64
+```
+
+The lowest and highest numbers are numbers, names of numbers given before, or arithmetic on them (`within 0 to SIZE * SIZE - 1`). Fractions are allowed (`within -1 to 9.5`). A variable with a range can't be the counter of `each` or `repeat`.
+
+The built-in `within(x, lowest, highest)` does the same check once: it gives back `x`, or reports a problem. An optional fourth input names the value in the message.
+
+Ranges catch mistakes where they happen instead of where a bad number is used later. In a compiled program they also make code faster: a number known to be in range needs no check when it is used as a position (see "Writing fast compiled code" in [Performance and the Native Compiler](#perf)).
+
 # Splitting a Program Across Files {#modules}
 
 `use "name"` runs `name.ant` from the same folder as the current file, once:
@@ -1234,6 +1260,8 @@ antares build program.ant out.exe --cpu x86-64
 - **Simple loops.** The innermost `each i in range(...)`, `repeat ... as i` or counting `while` loop (`while i < n { ...; i = i + 1 }`, where `n` doesn't change in the loop) that uses rows and fixed tables only as `row[i + c]` checks positions once, before it starts, and then reads and writes them directly.
 - **Clearing and filling tables.** Giving a fixed table `ints(n)` or `zeros(n)` of the same size again (as a program does to clear its tables) keeps it a fixed table: the new assignment just fills it with zeros. `ints([...])` of constant numbers makes a fixed table that starts with them.
 - **Constants from constants.** A top-level variable given, once, arithmetic on constants given before it (`AH = HIST + 1`, `SIZE = ROWS * 8`) is a constant as well.
+- **Positions the compiler can prove.** A position into a fixed table that is certainly inside it needs no check. The compiler works this out from constants, loop counters, `x & 63`, `x % 8`, `x >> 3`, `lowest_bit(x)` inside `while x != 0` (or `when x != 0`), the numbers stored in tables, and what functions called by name are given and give back.
+- **Ranges.** Where the compiler can't work a range out, say it: `board = ints(64) within 0 to 15`, `count = int(0) within 0 to 255`, `to put(p within 0 to 15, sq within 0 to 63)`. The check moves to where values are given (an input's check to the calls, where it is often left out because the value is known to fit), and every use as a position is then free. A function whose last check goes away also stops being able to fail, which makes calling it cheaper. In the chess engine, ranges on the board, the side to move, the move counter and the inputs of a dozen functions removed most of the checks in move generation.
 - **Say what is a number.** One value of unknown kind can slow down everything it touches. If a number comes out of a map, a list or JSON, wrap it in `number(...)` so the compiler knows it is a number. In the chess engine, one such lookup made the whole board slow until it was wrapped.
 - **Set before reading.** A number variable that is read before it is given a value reads as 0 in a compiled program, where the interpreter reports a problem.
 - **Find the slow spots.** Build with the environment variable `ANTARES_EXPLAIN=1`. The compiler then names every variable that ended up as a general value and what it was given. A common cause is two files using the same global name for different things.
@@ -1338,6 +1366,7 @@ Inputs in brackets `[ ]` are optional. "Tensor" means a number or any list of nu
 | `popcount(x)` | Number of set bits |
 | `lowest_bit(x)` | Position of the lowest set bit (64 if none) |
 | `highest_bit(x)` | Position of the highest set bit (-1 if none) |
+| `within(x, lo, hi [, name])` | `x`, if it (or every number in it) is from `lo` to `hi`; a problem otherwise |
 | `div(a, b)` | Division dropping the remainder |
 | `rand_bits()` | 64 random bits |
 
@@ -1445,7 +1474,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.3. Not there yet:
+This is version 0.4. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
 - Tools and multi-turn chat for language models.
@@ -1474,11 +1503,14 @@ statement   = "use" TEXT
             | "try" block "else" [ NAME ] block
             | "change" NAME "=" expr
             | "stop" | "skip"
+            | NAME "=" expr [ range ]
             | target "=" expr
             | expr
 
 target      = NAME { "." NAME | "[" index { "," index } "]" }
-params      = NAME { "," NAME }
+params      = param { "," param }
+param       = NAME [ range ]
+range       = "within" expr "to" expr
 
 expr        = or_expr { "->" postfix }
 or_expr     = and_expr { "or" and_expr }

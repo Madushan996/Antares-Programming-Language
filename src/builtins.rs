@@ -1065,6 +1065,68 @@ fn b_ints(_: &mut Interp, a: Vec<Value>) -> Res {
     Ok(Value::Ints(Rc::new(out)))
 }
 
+/// The first number in `v` (a number, or every number of a row, matrix or
+/// list) that `bad` rejects, as text.
+fn first_outside(v: &Value, bad: &dyn Fn(f64) -> bool) -> Result<Option<String>, String> {
+    Ok(match v {
+        Value::Int(i) => bad(*i as f64).then(|| i.to_string()),
+        Value::Num(x) => bad(*x).then(|| fmt_num(*x)),
+        Value::Ints(r) => r.iter().find(|&&i| bad(i as f64)).map(|i| i.to_string()),
+        Value::Tensor(t) => t.data.borrow().iter().find(|&&x| bad(x)).map(|x| fmt_num(*x)),
+        Value::Packed(p) => p.data.borrow().iter().find(|&&x| bad(x as f64)).map(|x| x.to_string()),
+        Value::List(items) => {
+            for x in items.iter() {
+                if let Some(t) = first_outside(x, bad)? {
+                    return Ok(Some(t));
+                }
+            }
+            None
+        }
+        other => return Err(format!("within checks numbers, not a {}", other.kind())),
+    })
+}
+
+/// within(x, lo, hi [, name]): x itself, if it (or every number in it) is from
+/// lo to hi; a problem otherwise. `name = ... within lo to hi` makes every
+/// value given to a variable go through this.
+fn b_within(_: &mut Interp, a: Vec<Value>) -> Res {
+    within_slice(a)
+}
+
+fn within_slice(a: Vec<Value>) -> Res {
+    if a.len() != 3 && a.len() != 4 {
+        return Err(format!("within takes 3 or 4 inputs but was given {}", a.len()));
+    }
+    let lo = num(&a[1], "within")?;
+    let hi = num(&a[2], "within")?;
+    if let Some(x) = first_outside(&a[0], &|x: f64| !(x >= lo && x <= hi))? {
+        let name = match a.get(3) {
+            Some(Value::Str(name)) => name.to_string(),
+            _ => String::new(),
+        };
+        return Err(within_message(&x, lo, hi, &name));
+    }
+    Ok(a.into_iter().next().unwrap())
+}
+
+/// The problem when `x` (as text) is outside lo to hi (`name`: what holds it, if known).
+pub fn within_message(x: &str, lo: f64, hi: f64, name: &str) -> String {
+    if name.is_empty() {
+        format!("{} is not from {} to {}", x, fmt_num(lo), fmt_num(hi))
+    } else {
+        format!("{} only holds numbers from {} to {}, not {}", name, fmt_num(lo), fmt_num(hi), x)
+    }
+}
+
+/// within for any value, in a compiled program.
+pub fn within_value(x: Value, lo: f64, hi: f64, name: &str) -> Result<Value, String> {
+    let mut args = vec![x, Value::Num(lo), Value::Num(hi)];
+    if !name.is_empty() {
+        args.push(Value::Str(name.into()));
+    }
+    within_slice(args)
+}
+
 /// popcount(x): how many of the 64 bits are set.
 fn b_popcount(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 1, "popcount")?;
@@ -1915,6 +1977,7 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("int", b_int),
         ("ints", b_ints),
         ("popcount", b_popcount),
+        ("within", b_within),
         ("lowest_bit", b_lowest_bit),
         ("highest_bit", b_highest_bit),
         ("div", b_div),

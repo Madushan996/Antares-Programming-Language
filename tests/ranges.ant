@@ -1,0 +1,99 @@
+# Positions into fixed tables that the compiler can prove are inside need no
+# check, and functions get a copy that assumes their inputs are in range. This
+# checks that every way a position can go wrong still gives the same problem.
+
+board = ints(64)
+side_of = ints(2)
+pairs = ints(16)
+codes = ints([3, 1, 4, 1, 5, 9, 2, 6])
+counts = zeros(8)
+moved = ints(64)
+
+to put(p, sq) {
+    board[sq] = p
+    side_of[p >> 3] = side_of[p >> 3] + 1
+}
+
+to take(sq) {
+    p = board[sq]
+    board[sq] = 0
+    p
+}
+
+to bits(b) {
+    total = 0
+    while b != 0 {
+        sq = lowest_bit(b)
+        b = b & (b - 1)
+        total = total + board[sq] + sq
+    }
+    total
+}
+
+to top(b) {
+    when b == 0 { give -1 }
+    board[highest_bit(b)]
+}
+
+to shift_and_read(sq) {
+    sq = sq + 8
+    board[sq]
+}
+
+to walk(sq, n) {
+    when n == 0 { give board[sq] }
+    walk(sq + 1, n - 1) + board[sq]
+}
+
+each i in range(64) { put(int(i % 16), int(i)) }
+show bits(int(0xFF00FF)), top(int(0)), top(int(0x8000000000000000))
+show take(int(12)), take(int(63)), board[12]
+
+# inputs from text: not known when compiling
+n = int(number("70"))
+m = int(number("-3"))
+try { put(int(1), n) } else e { show "put", e }
+try { show take(n) } else e { show "take", e }
+try { show take(m) } else e { show "take neg", e }
+show take(int(number("5")))
+
+# lowest_bit(0) is 64, highest_bit(0) is -1
+z = int(number("0"))
+try { show board[lowest_bit(z)] } else e { show "low", e }
+show board[highest_bit(z)]
+try { show board[lowest_bit(z) + 1] } else e { show "low1", e }
+
+# an input changed inside the function
+show shift_and_read(int(3))
+try { show shift_and_read(int(60)) } else e { show "shift", e }
+
+# recursion
+show walk(int(10), int(5))
+try { show walk(int(60), int(5)) } else e { show "walk", e }
+
+# numbers stored in a table, then used as positions
+each i in range(16) { pairs[i] = int(i * 4) }
+pairs[15] = n
+total = 0
+each i in range(15) { total = total + board[pairs[i]] }
+show total
+try { show board[pairs[15]] } else e { show "pairs", e }
+show board[codes[5] * 7], codes[7]
+
+# remainders, masks and shifts
+k = int(number("1000003"))
+show board[k % 64], board[k & 63], board[(k >> 14) & 63], board[k % 8 * 8]
+try { show board[k >> 10] } else e { show "shr", e }
+
+# counters of loops
+repeat 64 as i { moved[i - 1] = int(i) * 2 }
+repeat 63 as i { moved[i] = moved[i] + 1 }
+s = 0
+each i in range(63, -1, -1) { s = s + moved[i] }
+show s
+try { repeat 64 as i { moved[i] = 1 } } else e { show "repeat", e }
+
+# number tables, and positions that are numbers
+each i in range(8) { counts[i] = i / 2 }
+show counts[codes[2]], counts[7]
+try { show counts[codes[5]] } else e { show "counts", e }
