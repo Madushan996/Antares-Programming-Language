@@ -111,7 +111,7 @@ Antares 0.5.0 — type a line and press Enter. `exit` to leave.
 | `antares` | Start an interactive session |
 | `antares program.ant` | Run a program |
 | `antares run program.ant` | The same |
-| `antares build program.ant [output] [options]` | Compile the program to a native executable (Chapter 16) |
+| `antares build program.ant [output] [options]` | Make an executable to share: compiled, or packed when Rust isn't installed (Chapter 16) |
 | `antares version` | Show the version (also `--version`, `-v`) |
 | `antares help` | Show a short summary of commands (also `--help`, `-h`) |
 
@@ -1278,7 +1278,14 @@ Antares is faster than Python on all of these (1.3 to 5.5 times on ordinary code
 antares build program.ant
 ```
 
-`antares build` turns a program into a native executable placed next to the source file. The program behaves the same as when interpreted; `python tests/compare_compiled.py` checks this on the test suites and examples.
+`antares build` turns a program into an executable placed next to the source file, in one of two ways:
+
+- **Compiled** (`--native`): native code, much faster than the interpreter. Needs Rust.
+- **Packed** (`--pack`): a copy of `antares` with the program, the files it brings in with `use` and any `--embed` files attached at the end. Runs at interpreter speed, needs nothing to build, and is made in under a second.
+
+Without either option, `antares build` compiles when Rust (`cargo`) is installed and packs otherwise, saying so. Either way the program behaves the same as when interpreted; `python tests/compare_compiled.py` checks this on the test suites and examples (add `--pack` to check packed programs).
+
+The rest of this chapter is about compiled programs.
 
 The compiler looks at the whole program and works out which variables only ever hold a plain number, a yes/no, an integer, or a plain row of numbers. Those become machine numbers and direct memory, and functions called by name become direct calls. Everything else (text, lists, maps, tensors being learned, functions passed around as values) keeps working through the same runtime the interpreter uses.
 
@@ -1290,7 +1297,8 @@ The compiler looks at the whole program and works out which variables only ever 
 
 ## Requirements and targets
 
-- The compiler needs Rust (`cargo`) installed, because it writes Rust code and builds it. A build takes about 30 to 40 seconds. Install Rust from rustup.rs.
+- The compiler needs Rust (`cargo`) installed, because it writes Rust code and builds it. A build takes about 30 to 40 seconds. Install Rust from rustup.rs, or use `--pack`.
+- Packed programs are checked on Windows. On macOS, attaching data to a program may upset its code signature; compile with `--native` there if a packed program won't start.
 - Compiled programs are built against the Antares source code. `antares build` uses the folder named by the `ANTARES_HOME` environment variable if it is set, then the folder this copy of Antares was built from if it still exists. Otherwise it downloads the source of the matching release from GitHub once and keeps it in your cache folder, so a downloaded copy of Antares can compile programs too.
 - By default the program is built for the processor of the machine that compiles it, so it may not run on an older one. Choose another target with `--cpu`: `x86-64` (any 64-bit PC), `x86-64-v2` (SSE4.2) or `x86-64-v3` (AVX2).
 
@@ -1300,11 +1308,11 @@ antares build program.ant out.exe --cpu x86-64
 
 ## Embedding files
 
-`--embed file` packs a file into the executable. The program reads it under the name `"embedded:<file name>"` with `read_binary`, and `exists` says whether it is there, so the same source can fall back to a file on disk when run interpreted. The chess engine embeds its 25 MB neural network this way.
+`--embed file` packs a file into the executable (compiled or packed). The program reads it under the name `"embedded:<file name>"` with `read_binary`, and `exists` says whether it is there, so the same source can fall back to a file on disk when run interpreted. The chess engine embeds its 25 MB neural network this way.
 
 ## Icons
 
-`--icon file.ico` gives a Windows executable its icon, the one Explorer and the taskbar show. With Microsoft's Rust toolchain nothing else is needed; with the GNU toolchain it needs `windres` (part of MinGW binutils). If that isn't there the program is still built, without the icon, and `antares build` says so. On other systems the option is ignored.
+`--icon file.ico` gives a Windows executable its icon, the one Explorer and the taskbar show. A packed program needs nothing else, and neither does compiling with Microsoft's Rust toolchain; with the GNU toolchain it needs `windres` (part of MinGW binutils). If that isn't there the program is still built, without the icon, and `antares build` says so. On other systems the option is ignored.
 
 ## Writing fast compiled code
 
@@ -1536,7 +1544,8 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/builtins.rs` | The built-in functions |
 | `src/llm.rs` | Language-model calls through `curl` |
 | `src/json.rs` | JSON reading and writing |
-| `src/aot.rs` | The compiler behind `antares build` |
+| `src/aot.rs` | The compiler behind `antares build --native` |
+| `src/pack.rs` | `antares build --pack`: attaches a program to a copy of `antares` |
 | `src/rt.rs` | Support code linked into compiled programs |
 
 ## Current limits

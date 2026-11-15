@@ -13,6 +13,45 @@ pub struct PErr {
 
 type PR<T> = Result<T, PErr>;
 
+struct Packed {
+    files: std::collections::HashMap<String, String>,
+    aliases: std::collections::HashMap<String, String>,
+}
+
+/// A path with `.` and `..` worked out by its text alone, written with `/`.
+fn normalize(p: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut parts: Vec<String> = vec![];
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.last().is_some_and(|l| l != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".into());
+                }
+            }
+            Component::Normal(n) => parts.push(n.to_string_lossy().into_owned()),
+            Component::Prefix(_) | Component::RootDir => parts.push(c.as_os_str().to_string_lossy().into_owned()),
+        }
+    }
+    parts.join("/")
+}
+
+/// `path` relative to the folder `base` (both full paths), written with `/`.
+/// A path that shares no start with `base` (another drive) stays as it is.
+fn relative(path: &std::path::Path, base: &std::path::Path) -> String {
+    let (p, b): (Vec<_>, Vec<_>) = (path.components().collect(), base.components().collect());
+    let common = p.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return normalize(path);
+    }
+    let mut parts: Vec<String> = vec!["..".into(); b.len() - common];
+    parts.extend(p[common..].iter().map(|c| c.as_os_str().to_string_lossy().into_owned()));
+    parts.join("/")
+}
+
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -23,6 +62,15 @@ pub struct Parser {
     files: Vec<(String, String)>,
     loaded: Vec<PathBuf>,
     dirs: Vec<PathBuf>,
+    /// The main file's folder, so every `use`d file can be named relative to it.
+    root: Option<PathBuf>,
+    /// For each file in `files`, its name relative to `root`.
+    keys: Vec<String>,
+    /// Every `use` seen: the path as written, relative to `root`, and the file it found.
+    aliases: Vec<(String, String)>,
+    /// When running a program packed into an executable: its files by
+    /// relative name, and how each written path was resolved when it was packed.
+    packed: Option<Packed>,
     /// Top-level variables given a range with `within`: (slot, lowest, highest, line).
     ranged: Vec<(u32, Expr, Expr, u32)>,
 }
@@ -136,6 +184,10 @@ impl Parser {
             files: vec![],
             loaded: vec![],
             dirs: vec![PathBuf::new()],
+            root: None,
+            keys: vec![],
+            aliases: vec![],
+            packed: None,
             ranged: vec![],
         }
     }
@@ -145,9 +197,29 @@ impl Parser {
     pub fn set_main(&mut self, path: &str) {
         let p = PathBuf::from(path);
         if let Ok(c) = std::fs::canonicalize(&p) {
-            self.dirs = vec![c.parent().map(|d| d.to_path_buf()).unwrap_or_default()];
+            let dir = c.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            self.dirs = vec![dir.clone()];
+            self.root = Some(dir);
             self.loaded.push(c);
         }
+    }
+
+    /// Run a program packed into an executable: `use` finds files among
+    /// `files` (relative name, source) instead of on disk. `main` is the main
+    /// file's relative name; `aliases` are the (written path, file) pairs
+    /// recorded by `uses` when it was packed.
+    pub fn set_packed(&mut self, main: &str, files: Vec<(String, String)>, aliases: Vec<(String, String)>) {
+        self.dirs = vec![PathBuf::new()];
+        self.root = None;
+        self.loaded = vec![PathBuf::from(main)];
+        self.packed = Some(Packed { files: files.into_iter().collect(), aliases: aliases.into_iter().collect() });
+    }
+
+    /// The files brought in with `use` by their names relative to the main
+    /// file's folder, and how each written path was resolved (for packing).
+    pub fn uses(&self) -> (Vec<(String, String)>, &[(String, String)]) {
+        let files = self.keys.iter().cloned().zip(self.files.iter().map(|(_, src)| src.clone())).collect();
+        (files, &self.aliases)
     }
 
     /// Name and source of a file loaded with `use` (ids start at 1).
@@ -359,14 +431,40 @@ impl Parser {
             path.set_extension("ant");
         }
         let shown = if std::path::Path::new(&rel).extension().is_none() { format!("{}.ant", rel) } else { rel.clone() };
-        let canon = std::fs::canonicalize(&path)
-            .map_err(|_| PErr { msg: format!("I couldn't find the file \"{}\" to use", shown), line })?;
-        if self.loaded.contains(&canon) {
-            return Ok(());
-        }
-        let src = std::fs::read_to_string(&canon)
-            .map_err(|e| PErr { msg: format!("I couldn't read \"{}\": {}", shown, e), line })?;
+        let (canon, src) = if let Some(packed) = &self.packed {
+            let written = normalize(&path);
+            let key = packed.aliases.get(&written).unwrap_or(&written);
+            if self.loaded.contains(&PathBuf::from(key)) {
+                return Ok(());
+            }
+            let src = packed
+                .files
+                .get(key)
+                .ok_or_else(|| PErr { msg: format!("the file \"{}\" wasn't packed into this program", shown), line })?;
+            (PathBuf::from(key), src.clone())
+        } else {
+            let canon = std::fs::canonicalize(&path)
+                .map_err(|_| PErr { msg: format!("I couldn't find the file \"{}\" to use", shown), line })?;
+            if let Some(root) = &self.root {
+                let dir = self.dirs.last().cloned().unwrap_or_default();
+                let mut written = PathBuf::from(relative(&dir, root)).join(&rel);
+                if written.extension().is_none() {
+                    written.set_extension("ant");
+                }
+                self.aliases.push((normalize(&written), relative(&canon, root)));
+            }
+            if self.loaded.contains(&canon) {
+                return Ok(());
+            }
+            let src = std::fs::read_to_string(&canon)
+                .map_err(|e| PErr { msg: format!("I couldn't read \"{}\": {}", shown, e), line })?;
+            (canon, src)
+        };
         self.loaded.push(canon.clone());
+        self.keys.push(match &self.root {
+            Some(root) => relative(&canon, root),
+            None => normalize(&canon),
+        });
         self.files.push((shown, src.clone()));
         let id = self.files.len() as u32;
         let toks = lex(&src, (id << 20) | 1).map_err(|(msg, line)| PErr { msg, line })?;

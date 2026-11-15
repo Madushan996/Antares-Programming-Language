@@ -2791,11 +2791,15 @@ This makes `program.exe` on Windows (or `program` on macOS and Linux) next to yo
 
 Compiling needs **Rust**, a free programming toolset, because Antares writes a Rust version of your program and builds it. Install Rust from rustup.rs. The first build takes a minute or so; later builds are quicker.
 
+No Rust? `antares build` still works: it **packs** your program instead, attaching it to a copy of Antares. You get the same kind of stand-alone file to share, made in under a second, but it runs at the same speed as `antares program.ant`. Ask for this on purpose with `--pack`, or insist on compiling with `--native`.
+
 ## Build options
 
 | Option | Meaning |
 |---|---|
 | `antares build program.ant output.exe` | Choose the output file's name |
+| `--native` | Compile (needs Rust; the default when Rust is installed) |
+| `--pack` | Pack instead of compiling (no Rust needed) |
 | `--cpu native` | Build for exactly this computer (the default) |
 | `--cpu x86-64` | Build for any 64-bit PC, to share widely |
 | `--cpu x86-64-v3` | Build for PCs with AVX2 (most from 2013 on) |
@@ -2822,12 +2826,12 @@ To see where the compiler had to fall back to slower code, build with the settin
 
 ## Try it yourself
 
-1. If you have Rust installed, compile one of your programs from earlier chapters with `antares build` and run the result.
+1. Build one of your programs from earlier chapters with `antares build` and run the result. If you have Rust, try `--pack` too and compare the speed.
 2. Write a function `fib(n)` (Chapter 9 style, with recursion) and time `fib(27)` with `clock()` before and after, both interpreted and compiled.
 
 ## Summary
 
-- `antares build program.ant` makes a fast native program; it needs Rust.
+- `antares build program.ant` makes a stand-alone program: compiled and fast with Rust, packed (interpreter speed) without it.
 - `--cpu`, `--embed` and `--icon` control the build.
 - Keep variables to one kind, use constants, fixed tables and ranges, and check with `ANTARES_EXPLAIN=1`.
 

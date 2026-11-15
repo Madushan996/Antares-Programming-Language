@@ -3,7 +3,10 @@
 For each program: run it with the interpreter, compile it with `antares build`,
 run the result, and compare what both print and how both exit.
 
-Run from the project folder:  python tests/compare_compiled.py [files...]
+Run from the project folder:  python tests/compare_compiled.py [--pack] [files...]
+
+--pack builds with `antares build --pack` (the program attached to a copy of
+antares, no Rust needed) instead of compiling to native code.
 """
 import os
 import subprocess
@@ -23,12 +26,14 @@ def run(cmd):
 
 
 def main():
-    files = sys.argv[1:] or DEFAULT
+    args = sys.argv[1:]
+    mode = ["--pack"] if "--pack" in args else ["--native"]
+    files = [a for a in args if a != "--pack"] or DEFAULT
     ok = True
     for f in files:
         exe = os.path.join(ROOT, os.path.splitext(f)[0] + (".exe" if os.name == "nt" else ""))
         want = run([ANTARES, f])
-        code, _, err = run([ANTARES, "build", f])
+        code, _, err = run([ANTARES, "build", f] + mode)
         if code != 0:
             ok = False
             print(f"FAIL {f}: did not compile\n{err[:3000]}")

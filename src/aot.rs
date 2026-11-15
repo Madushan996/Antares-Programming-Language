@@ -4532,10 +4532,10 @@ const ICON_BUILD_RS: &str = r#"fn main() {
 }
 "#;
 
-/// An .ico file as a compiled Windows resource (.res): each picture becomes an
-/// icon resource and the list of them an icon group, as a resource compiler
-/// would make them. None if the file isn't an icon.
-fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
+/// The pictures in an .ico file, and the icon group that lists them (as a
+/// Windows RT_GROUP_ICON resource, the pictures numbered from 1). None if the
+/// file isn't an icon.
+pub(crate) fn ico_parts(ico: &[u8]) -> Option<(Vec<&[u8]>, Vec<u8>)> {
     let u16_at = |b: &[u8], i: usize| -> Option<u16> { Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?)) };
     let u32_at = |b: &[u8], i: usize| -> Option<u32> { Some(u32::from_le_bytes(b.get(i..i + 4)?.try_into().ok()?)) };
     if u16_at(ico, 0)? != 0 || u16_at(ico, 2)? != 1 {
@@ -4545,6 +4545,28 @@ fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
     if count == 0 {
         return None;
     }
+    let mut pictures = vec![];
+    let mut group = Vec::new();
+    group.extend_from_slice(&0u16.to_le_bytes());
+    group.extend_from_slice(&1u16.to_le_bytes());
+    group.extend_from_slice(&(count as u16).to_le_bytes());
+    for k in 0..count {
+        let e = 6 + 16 * k;
+        let entry = ico.get(e..e + 16)?;
+        let size = u32_at(ico, e + 8)? as usize;
+        let at = u32_at(ico, e + 12)? as usize;
+        pictures.push(ico.get(at..at.checked_add(size)?)?);
+        group.extend_from_slice(&entry[..12]); // size, colours, planes, bits, bytes
+        group.extend_from_slice(&((k + 1) as u16).to_le_bytes());
+    }
+    Some((pictures, group))
+}
+
+/// An .ico file as a compiled Windows resource (.res): each picture becomes an
+/// icon resource and the list of them an icon group, as a resource compiler
+/// would make them. None if the file isn't an icon.
+fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
+    let (pictures, group) = ico_parts(ico)?;
     // one resource: header (type and name as numbers) and data, padded to 4 bytes
     fn resource(out: &mut Vec<u8>, kind: u16, name: u16, flags: u16, data: &[u8]) {
         out.extend_from_slice(&(data.len() as u32).to_le_bytes());
@@ -4565,20 +4587,8 @@ fn ico_to_res(ico: &[u8]) -> Option<Vec<u8>> {
     }
     let mut out = Vec::new();
     resource(&mut out, 0, 0, 0, &[]); // a .res file starts with an empty entry
-    let mut group = Vec::new();
-    group.extend_from_slice(&0u16.to_le_bytes());
-    group.extend_from_slice(&1u16.to_le_bytes());
-    group.extend_from_slice(&(count as u16).to_le_bytes());
-    for k in 0..count {
-        let e = 6 + 16 * k;
-        let entry = ico.get(e..e + 16)?;
-        let size = u32_at(ico, e + 8)? as usize;
-        let at = u32_at(ico, e + 12)? as usize;
-        let picture = ico.get(at..at.checked_add(size)?)?;
-        let id = (k + 1) as u16;
-        resource(&mut out, 3, id, 0x1010, picture); // RT_ICON
-        group.extend_from_slice(&entry[..12]); // size, colours, planes, bits, bytes
-        group.extend_from_slice(&id.to_le_bytes());
+    for (k, picture) in pictures.iter().enumerate() {
+        resource(&mut out, 3, (k + 1) as u16, 0x1010, picture); // RT_ICON
     }
     resource(&mut out, 14, 1, 0x1030, &group); // RT_GROUP_ICON
     Some(out)
@@ -4654,6 +4664,28 @@ fn cache_dir() -> Option<PathBuf> {
         var("XDG_CACHE_HOME").or_else(|| var("HOME").map(|h| h.join(".cache")))
     };
     base.map(|b| b.join("antares").join(env!("CARGO_PKG_VERSION")))
+}
+
+/// The name a built program gets: the source file's name in lower case, with
+/// anything but letters and digits made `_`.
+pub(crate) fn exe_stem(path: &str) -> String {
+    PathBuf::from(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "program".into())
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect()
+}
+
+/// Whether `cargo` (and so Rust) is installed.
+pub fn have_cargo() -> bool {
+    std::process::Command::new("cargo")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// `icon`: an .ico file to show for the program in Windows (ignored elsewhere).
@@ -4756,13 +4788,7 @@ pub fn build(path: &str, out: Option<&str>, cpu: Option<&str>, embed: &[String],
     );
 
     let source = PathBuf::from(path);
-    let stem: String = source
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "program".into())
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
-        .collect();
+    let stem = exe_stem(path);
     let (dependency, work) = match find_source() {
         Some(root) => (
             format!("{{ path = {:?} }}", root.to_string_lossy().replace('\\', "/")),
