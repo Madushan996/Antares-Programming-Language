@@ -1169,7 +1169,7 @@ show sum(data.n), data.ok             # 6 yes
 
 `upper`, `lower` and `trim` change text. `split(text)` splits on spaces (or `split(text, sep)` on a separator), `lines(text)` splits into lines, `replace(text, from, to)` replaces every occurrence, and `join(list, sep)` puts items back together. `find(text, part)` gives the position where `part` first appears, or -1. `text(v)` turns any value into text, and `number(t)` reads a number from text. `code(t)` gives the number of a character and `char(n)` the character with a number.
 
-Two functions lay numbers out. `fixed(x, places)` gives `x` as text with exactly that many digits after the point, and `pad(value, width)` adds spaces to make a value `width` characters wide. Numbers are lined up on the right and text on the left, as in a table; a third input, `"left"` or `"right"`, chooses. What `fixed` gives is text, so line it up on the right yourself:
+Two functions lay numbers out. `fixed(x, places)` gives `x` as text with exactly that many digits after the point, and `pad(value, width)` adds spaces to make a value `width` characters wide. Numbers are lined up on the right and text on the left, as in a table; a third input, `"left"` or `"right"`, chooses, and a fourth fills with another character instead of spaces: `pad(5, 2, "right", "0")` is `"05"` (a minus sign stays in front of the zeros). What `fixed` gives is text, so line it up on the right yourself:
 
 ```antares
 show fixed(3.14159, 2), fixed(2, 3)
@@ -1199,7 +1199,7 @@ show split("a,b,c", ","), join(["x", "y"], "-"), replace("cat", "c", "b")
 ```antares
 t = now()
 show "Today is {t.weekday} {t.day}/{t.month}/{t.year}"
-show "It is {t.minute} minutes past {t.hour}"
+show "The time is {t.hour}:{pad(t.minute, 2, "right", "0")}"     # 9:05, not 9:5
 ```
 
 `clock()` gives the current time in seconds, as a decimal, useful for measuring how long something takes:
@@ -1464,7 +1464,7 @@ The statements `learn` and `descend` are described in Chapter 11.
 | `text(v)` | Any value as text |
 | `number(v)` | Text, yes/no or integer as an ordinary number |
 | `fixed(x, places)` | A number as text with exactly that many digits after the point |
-| `pad(v, width [, side])` | Text padded with spaces to a width; numbers on the right, text on the left |
+| `pad(v, width [, side [, fill]])` | Text padded to a width with spaces (or `fill`); numbers on the right, text on the left |
 | `code(t)`, `char(n)` | The number of a character, and the character with a number |
 
 ## Data and files

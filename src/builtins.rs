@@ -1547,12 +1547,14 @@ fn b_fixed(_: &mut Interp, a: Vec<Value>) -> Res {
     Ok(s(t))
 }
 
-/// pad(value, width [, side]): the value as text, with spaces added to make it
-/// `width` characters wide. Numbers are lined up on the right and everything
-/// else on the left, as in a table; side "left" or "right" chooses.
+/// pad(value, width [, side [, fill]]): the value as text, with spaces (or the
+/// fill character) added to make it `width` characters wide. Numbers are lined
+/// up on the right and everything else on the left, as in a table; side
+/// "left" or "right" chooses. pad(5, 2, "right", "0") is "05"; a minus sign
+/// stays in front of zeros ("-05").
 fn b_pad(_: &mut Interp, a: Vec<Value>) -> Res {
-    if a.len() != 2 && a.len() != 3 {
-        return Err(format!("pad takes a value, a width and optionally a side, but was given {} inputs", a.len()));
+    if !(2..=4).contains(&a.len()) {
+        return Err(format!("pad takes a value, a width, and optionally a side and a fill character, but was given {} inputs", a.len()));
     }
     let width = num(&a[1], "pad")?;
     if width != width.trunc() || width < 0.0 {
@@ -1566,8 +1568,25 @@ fn b_pad(_: &mut Interp, a: Vec<Value>) -> Res {
             other => return Err(format!("pad lines things up on the \"left\" or the \"right\", not \"{}\"", other)),
         },
     };
+    let fill_char = match a.get(3) {
+        None => ' ',
+        Some(v) => {
+            let f = text(v, "pad")?;
+            let mut cs = f.chars();
+            match (cs.next(), cs.next()) {
+                (Some(c), None) => c,
+                _ => return Err(format!("pad fills with one character, not \"{}\"", f)),
+            }
+        }
+    };
     let t = a[0].show();
-    let fill = " ".repeat((width as usize).saturating_sub(t.chars().count()));
+    let fill: String = std::iter::repeat_n(fill_char, (width as usize).saturating_sub(t.chars().count())).collect();
+    // zeros go after the sign of a negative number
+    if right && fill_char == '0' && !fill.is_empty() && matches!(a[0], Value::Num(_) | Value::Int(_)) {
+        if let Some(digits) = t.strip_prefix('-') {
+            return Ok(s(format!("-{}{}", fill, digits)));
+        }
+    }
     Ok(s(if right { fill + &t } else { t + &fill }))
 }
 
