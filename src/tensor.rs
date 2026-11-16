@@ -291,6 +291,39 @@ fn mat_dims(a: &T, b: &T) -> Result<(usize, usize, usize), String> {
     Ok((m, n, p))
 }
 
+/// Whether `use gpu` is on.
+static GPU_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Below about 256 x 256 x 256 multiply-adds, copying to the GPU and back
+/// takes longer than the CPU takes to do the work.
+const GPU_MIN_WORK: usize = 1 << 24;
+
+/// Turns the GPU on or off for big matrix multiplications (`use gpu`).
+pub fn set_gpu(on: bool) {
+    GPU_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The m x n matrix `a` times the n x p matrix `b` on the GPU, when the GPU
+/// is on and the work is big enough to be worth it. None: do it on the CPU
+/// (also when the GPU reports a problem).
+fn gpu_mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Option<Vec<f64>> {
+    if !GPU_ON.load(std::sync::atomic::Ordering::Relaxed) || m.saturating_mul(n).saturating_mul(p) < GPU_MIN_WORK {
+        return None;
+    }
+    crate::gpu::matmul(a, b, m, n, p).ok()
+}
+
+/// A rows x cols matrix turned on its side.
+fn transposed(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let mut t = vec![0.0; x.len()];
+    for i in 0..rows {
+        for j in 0..cols {
+            t[j * rows + i] = x[i * cols + j];
+        }
+    }
+    t
+}
+
 /// Splits `out` (rows of `width` numbers) among the CPU's cores and runs
 /// `f(first_row, rows)` on each part, when there is enough work (`work`
 /// multiply-adds) to be worth it. Each row is still worked out by one core
@@ -312,6 +345,9 @@ fn par_rows(out: &mut [f64], width: usize, work: usize, f: impl Fn(usize, &mut [
 }
 
 fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
+    if let Some(o) = gpu_mm(a, b, m, n, p) {
+        return o;
+    }
     let mut o = vec![0.0; m * p];
     par_rows(&mut o, p, m * n * p, |first, part| {
         for (r, orow) in part.chunks_mut(p.max(1)).enumerate() {
@@ -705,7 +741,22 @@ fn back(node: &Node, g: &[f64]) {
             let mut db = if b.requires { vec![0.0; n * p] } else { vec![] };
             // plain slices, so the cores can share them
             let (ad, bd) = (&ad[..], &bd[..]);
+            // with `use gpu`: da = g @ t(b) and db = t(a) @ g on the GPU
+            let mut on_gpu_a = false;
+            let mut on_gpu_b = false;
             if a.requires {
+                if let Some(d) = gpu_mm(g, &transposed(bd, n, p), m, p, n) {
+                    da = d;
+                    on_gpu_a = true;
+                }
+            }
+            if b.requires {
+                if let Some(d) = gpu_mm(&transposed(ad, m, n), g, n, m, p) {
+                    db = d;
+                    on_gpu_b = true;
+                }
+            }
+            if a.requires && !on_gpu_a {
                 // da[i, k] = sum over j of g[i, j] * b[k, j]
                 par_rows(&mut da, n, m * n * p, |first, part| {
                     for (r, drow) in part.chunks_mut(n.max(1)).enumerate() {
@@ -722,7 +773,7 @@ fn back(node: &Node, g: &[f64]) {
                     }
                 });
             }
-            if b.requires {
+            if b.requires && !on_gpu_b {
                 // db[k, j] = sum over i of a[i, k] * g[i, j], adding i in order
                 par_rows(&mut db, p, m * n * p, |first, part| {
                     let rows = part.len() / p.max(1);

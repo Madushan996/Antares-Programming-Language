@@ -36,6 +36,20 @@ pub fn b_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> Resu
     })
 }
 
+/// use_gpu(yes or no): what `use gpu` and `use cpu` do. With the GPU on,
+/// big matrix multiplications (and their gradients) run there. Without a
+/// GPU, `use gpu` says so once and everything stays on the CPU.
+pub fn b_use_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> Result<crate::value::Value, String> {
+    crate::builtins::want(&a, 1, "use_gpu")?;
+    let on = matches!(a[0], crate::value::Value::Bool(true));
+    if on && available().is_none() {
+        static TOLD: std::sync::Once = std::sync::Once::new();
+        TOLD.call_once(|| eprintln!("Note: `use gpu` found no graphics card Antares can use here, so tensor maths stays on the CPU."));
+    }
+    crate::tensor::set_gpu(on && available().is_some());
+    Ok(crate::value::Value::Nothing)
+}
+
 /// The matrix-multiply shader: each group of 16 x 16 threads works out a
 /// 16 x 16 tile of the result, reading tiles of A and B into fast shared
 /// memory once instead of every thread reading them separately.
@@ -220,8 +234,13 @@ mod win {
         let compile: CompileFn = unsafe { std::mem::transmute(load("d3dcompiler_47.dll", "D3DCompile")?) };
         type CreateFn = unsafe extern "system" fn(Ptr, u32, Ptr, u32, *const u32, u32, u32, *mut Ptr, *mut u32, *mut Ptr) -> HResult;
         let create: CreateFn = unsafe { std::mem::transmute(load("d3d11.dll", "D3D11CreateDevice")?) };
-        // ANTARES_GPU=warp uses Windows' software GPU (for tests on machines without one)
-        let warp = std::env::var("ANTARES_GPU").is_ok_and(|v| v.eq_ignore_ascii_case("warp"));
+        // ANTARES_GPU=warp uses Windows' software GPU (for tests on machines
+        // without one); ANTARES_GPU=none behaves as if there were no GPU
+        let setting = std::env::var("ANTARES_GPU").unwrap_or_default().to_ascii_lowercase();
+        if setting == "none" {
+            return None;
+        }
+        let warp = setting == "warp";
         let (adapter, name) = if warp { (Com(std::ptr::null_mut()), "Microsoft Basic Render Driver (software)".to_string()) } else { best_adapter()? };
         let levels = [0xb000u32]; // feature level 11_0: compute shaders 5.0
         let (mut device, mut context, mut level): (Ptr, Ptr, u32) = (std::ptr::null_mut(), std::ptr::null_mut(), 0);

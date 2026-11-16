@@ -1,0 +1,45 @@
+# GPU: `use gpu` sends big matrix multiplications, and their gradients, to
+# the graphics card. Without one, everything stays on the CPU and these
+# checks still pass. (ANTARES_GPU=warp uses Windows' software GPU.)
+
+to biggest(t) = max(abs(t))
+
+seed(1)
+x = randn(300, 260)
+w = randn(260, 280) * 0.1
+y = randn(300, 280)
+
+# products: the GPU works in 32-bit numbers, so they agree to about 6 digits
+use cpu
+on_cpu = x @ w
+use gpu
+on_gpu = x @ w
+check(biggest(on_gpu - on_cpu) < 0.0001 * biggest(on_cpu), "big products agree")
+check([[1, 2], [3, 4]] @ [[5], [6]] == [[17], [39]], "small products stay on the CPU, exactly")
+
+# gradients through @, for both sides
+learn lx = x
+learn lw = w
+to loss() = mean((lx @ lw - y) ^ 2)
+use cpu
+gx_cpu = grad(loss(), lx)
+gw_cpu = grad(loss(), lw)
+use gpu
+gx_gpu = grad(loss(), lx)
+gw_gpu = grad(loss(), lw)
+check(biggest(gx_gpu - gx_cpu) < 0.001 * biggest(gx_cpu), "gradients for the left side agree")
+check(biggest(gw_gpu - gw_cpu) < 0.001 * biggest(gw_cpu), "gradients for the right side agree")
+
+# training with the GPU on
+seed(2)
+learn w1 = randn(260, 300) * 0.05
+learn w2 = randn(300, 280) * 0.05
+first = mean((tanh(x @ w1) @ w2 - y) ^ 2)
+repeat 20 {
+    l = mean((tanh(x @ w1) @ w2 - y) ^ 2)
+    descend l by 0.01 using adam
+}
+check(l < first, "training on the GPU lowers the loss ({first} to {l})")
+use cpu
+
+show "gpu: products, gradients and training ok"

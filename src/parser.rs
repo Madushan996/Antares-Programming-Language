@@ -417,6 +417,16 @@ impl Parser {
     fn import(&mut self, stmts: &mut Vec<Stmt>) -> PR<()> {
         let line = self.line();
         self.advance();
+        // `use gpu` / `use cpu`: where big tensor maths runs from here on
+        if let Tok::Ident(w) = self.peek().clone() {
+            if w == "gpu" || w == "cpu" {
+                self.advance();
+                let idx = self.scopes[0].iter().position(|n| n == "use_gpu").unwrap_or(0) as u32;
+                let f = Expr::Var { depth: 0, idx, name: "use_gpu".into(), line };
+                stmts.push(Stmt::Expr(Expr::Call(Box::new(f), vec![Expr::Bool(w == "gpu")], line)));
+                return Ok(());
+            }
+        }
         let rel = match self.advance() {
             Tok::Str(parts) if parts.len() == 1 && matches!(parts[0], StrPart::Lit(_)) => match &parts[0] {
                 StrPart::Lit(s) => s.clone(),

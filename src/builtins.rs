@@ -2398,5 +2398,6 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("embed", crate::llm::b_embed),
         ("similarity", crate::llm::b_similarity),
         ("gpu", crate::gpu::b_gpu),
+        ("use_gpu", crate::gpu::b_use_gpu),
     ]
 }
