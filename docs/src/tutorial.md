@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.11.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.11.0.
+This book covers **Antares 0.11.1**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.11.1.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.11.0
+Antares 0.11.1
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.11.0 — type a line and press Enter. `exit` to leave.
+Antares 0.11.1 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -3428,6 +3428,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.9.0 | 16 Nov 2026 | Training on the graphics card: `use gpu`, many times faster, with nothing to install (Windows). |
 | 0.10.0 | 16 Nov 2026 | `use gpu` on NVIDIA graphics cards on Linux, including the free ones on Google Colab and Kaggle. |
 | 0.11.0 | 16 Nov 2026 | Agents that act: running commands, reading the web, and built-in tools that ask before they run. |
+| 0.11.1 | 16 Nov 2026 | A command stopped by its time limit stops everything it started, such as a game window. |
 
 ## Version 0.1.0: the first release
 
@@ -3588,6 +3589,10 @@ The GPU works with numbers of about 7 digits, so its answers can differ from the
 Programs, and the models they talk to, can now reach outside: `shell` runs a command and gives back what it printed, `fetch` gets anything from the web, `read_page` reads a web page as plain text, and `page_text` and `page_links` take a page apart (Chapter 16). That makes 156 built-in functions.
 
 `shell`, `read_page`, `fetch`, `read`, `write` and `files` can be given to a model as tools just as they are, and before the model runs a command or writes a file, Antares asks you first; `confirm` asks first for your own tools too. Two new examples show what this makes possible: `researcher.ant` answers questions from Wikipedia, and `coder.ant` is a programming helper that runs commands to check its work.
+
+## Version 0.11.1: timeouts stop everything
+
+When a command run with `shell` takes longer than its `timeout`, Antares stops it, and now also stops every program the command started. Before, a program like a game, started by the command, kept running in its own window after the command was stopped. This matters most for agents, which often try a program for a few seconds to see whether it starts.
 
 # Answers to the Exercises {#answers .appendix}
 
