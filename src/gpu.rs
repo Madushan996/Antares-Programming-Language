@@ -15,7 +15,7 @@
 //! macOS and Linux have no GPU support yet: `available()` is `None` there.
 
 #[cfg(windows)]
-pub use win::{available, binary, download, matmul, matmul_bufs, unary, upload, Buf};
+pub use win::{available, bin_back, binary, col_sums, download, fill, matmul, matmul_bufs, optimise, sum_all, un_back, unary, upload, Buf};
 
 #[cfg(not(windows))]
 pub use none::*;
@@ -50,7 +50,32 @@ mod none {
     pub fn unary(_: u32, _: &Buf, _: usize) -> Result<Buf, String> {
         Err(NO.into())
     }
+    pub fn fill(_: f64, _: usize) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn bin_back(_: u32, _: u32, _: &Buf, _: &Buf, _: &Buf, _: Option<&Buf>, _: usize, _: usize, _: bool, _: bool) -> Result<(Option<Buf>, Option<Buf>), String> {
+        Err(NO.into())
+    }
+    pub fn un_back(_: u32, _: &Buf, _: &Buf, _: &Buf, _: usize) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    pub fn col_sums(_: &Buf, _: usize, _: usize, _: bool) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    pub fn sum_all(_: &Buf, _: usize, _: bool) -> Result<f64, String> {
+        Err(NO.into())
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub fn optimise(_: u32, _: &Buf, _: &Buf, _: &Buf, _: &Buf, _: usize, _: [f32; 5]) -> Result<Buf, String> {
+        Err(NO.into())
+    }
 }
+
+/// Optimisers, by number, for `optimise`.
+pub const SGD: u32 = 0;
+pub const ADAM: u32 = 1;
+pub const MOMENTUM: u32 = 3;
 
 /// Two-input operations, by number: + - * / ^ and %.
 pub const ADD: u32 = 0;
@@ -171,6 +196,143 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
 }
 "#;
 
+/// Gradients of a two-input operation: for each result, how much each
+/// input moved it (full size: a repeated input's gradients are added up
+/// afterwards with REDUCE). NEED says which of GA (1) and GB (2) to write.
+#[cfg_attr(not(windows), allow(dead_code))]
+const BIN_BACK_HLSL: &str = r#"
+cbuffer C : register(b0) { uint OP; uint MODE; uint N; uint INNER; uint GX; uint NEED; uint2 unused; };
+StructuredBuffer<float> G : register(t0);
+StructuredBuffer<float> A : register(t1);
+StructuredBuffer<float> B : register(t2);
+RWStructuredBuffer<float> GA : register(u0);
+RWStructuredBuffer<float> GB : register(u1);
+float power(float a, float b) {
+    if (b == 2) return a * a;
+    if (b == 1) return a;
+    float r = pow(abs(a), b);
+    if (a < 0) {
+        if (frac(b) != 0) return asfloat(0x7fc00000);
+        if (fmod(abs(b), 2) == 1) r = -r;
+    }
+    if (a == 0 && b == 0) r = 1;
+    return r;
+}
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint i = (g.y * GX + g.x) * 256 + t.x;
+    if (i >= N) return;
+    float a;
+    float b;
+    if (MODE == 2) a = A[0]; else if (MODE == 4) a = A[i % INNER]; else a = A[i];
+    if (MODE == 1) b = B[0]; else if (MODE == 3) b = B[i % INNER]; else b = B[i];
+    float d = G[i];
+    float ga = d;
+    float gb = 0;
+    if (OP == 0) gb = d;
+    else if (OP == 1) gb = -d;
+    else if (OP == 2) { ga = d * b; gb = d * a; }
+    else if (OP == 3) { ga = d / b; gb = -d * a / (b * b); }
+    else if (OP == 4) ga = d * b * power(a, b - 1);
+    if (NEED & 1) GA[i] = ga;
+    if (NEED & 2) GB[i] = gb;
+}
+"#;
+
+/// Gradients through a one-input function: G times its slope at X (whose
+/// result was Y). Numbered like UNARY_HLSL.
+#[cfg_attr(not(windows), allow(dead_code))]
+const UN_BACK_HLSL: &str = r#"
+cbuffer C : register(b0) { uint OP; uint MODE; uint N; uint INNER; uint GX; uint3 unused; };
+StructuredBuffer<float> G : register(t0);
+StructuredBuffer<float> X : register(t1);
+StructuredBuffer<float> Y : register(t2);
+RWStructuredBuffer<float> O : register(u0);
+float safe_tanh(float x) { return 1 - 2 / (exp(2 * x) + 1); }
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint i = (g.y * GX + g.x) * 256 + t.x;
+    if (i >= N) return;
+    float x = X[i];
+    float y = Y[i];
+    float d;
+    if (OP == 0) d = y;
+    else if (OP == 1) d = 1 / x;
+    else if (OP == 2) d = 1 - y * y;
+    else if (OP == 3) d = y * (1 - y);
+    else if (OP == 4) d = (x > 0) ? 1 : 0;
+    else if (OP == 5) d = 0.5 / y;
+    else if (OP == 6) d = (x >= 0) ? 1 : -1;
+    else if (OP == 7) d = cos(x);
+    else if (OP == 8) d = -sin(x);
+    else if (OP == 9) {
+        float u = 0.7978845608 * (x + 0.044715 * x * x * x);
+        float th = safe_tanh(u);
+        d = 0.5 * (1 + th) + 0.5 * x * (1 - th * th) * 0.7978845608 * (1 + 3 * 0.044715 * x * x);
+    }
+    else if (OP == 10) { float sg = 1 / (1 + exp(-x)); d = sg * (1 + x * (1 - sg)); }
+    else if (OP == 11) d = 1 / (1 + exp(-x));
+    else if (OP == 12) d = (x > 0) ? 1 : 0.01;
+    else d = -1;
+    O[i] = G[i] * d;
+}
+"#;
+
+/// Column sums: O[j] = the sum (of squares, with SQUARE) of T[r * INNER + j]
+/// over the ROWS rows, skipping positions from N on.
+#[cfg_attr(not(windows), allow(dead_code))]
+const REDUCE_HLSL: &str = r#"
+cbuffer C : register(b0) { uint N; uint INNER; uint ROWS; uint SQUARE; uint GX; uint3 unused; };
+StructuredBuffer<float> T : register(t0);
+RWStructuredBuffer<float> O : register(u0);
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint j = (g.y * GX + g.x) * 256 + t.x;
+    if (j >= INNER) return;
+    float s = 0;
+    for (uint r = 0; r < ROWS; r++) {
+        uint k = r * INNER + j;
+        if (k < N) { float v = T[k]; s += SQUARE ? v * v : v; }
+    }
+    O[j] = s;
+}
+"#;
+
+/// One optimiser step: new values PN from P and the gradients G (times
+/// SCALE, for `clip`), updating the optimiser's memory M and V in place.
+/// METHOD: 0 sgd, 1 adam (with DECAY for adamw), 3 momentum.
+#[cfg_attr(not(windows), allow(dead_code))]
+const OPTIMISE_HLSL: &str = r#"
+cbuffer C : register(b0) { uint METHOD; uint N; uint GX; uint unused; float RATE; float C1; float C2; float DECAY; float SCALE; float3 pad; };
+StructuredBuffer<float> P : register(t0);
+StructuredBuffer<float> G : register(t1);
+RWStructuredBuffer<float> PN : register(u0);
+RWStructuredBuffer<float> M : register(u1);
+RWStructuredBuffer<float> V : register(u2);
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint i = (g.y * GX + g.x) * 256 + t.x;
+    if (i >= N) return;
+    float d = G[i] * SCALE;
+    float p = P[i];
+    if (METHOD == 1) {
+        float m = 0.9 * M[i] + 0.1 * d;
+        float v = 0.999 * V[i] + 0.001 * d * d;
+        M[i] = m;
+        V[i] = v;
+        float step = RATE * (m / C1) / (sqrt(v / C2) + 1e-8);
+        p -= step + RATE * DECAY * p;
+    } else if (METHOD == 3) {
+        float m = 0.9 * M[i] + d;
+        M[i] = m;
+        p -= RATE * m;
+    } else {
+        p -= RATE * d;
+    }
+    PN[i] = p;
+}
+"#;
+
 /// Element by element: one input through a function (the numbers match
 /// the order of UFn in tensor.rs, then 13 for minus).
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -205,7 +367,7 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
 
 #[cfg(windows)]
 mod win {
-    use super::{BINARY_HLSL, MATMUL_HLSL, UNARY_HLSL};
+    use super::{BINARY_HLSL, BIN_BACK_HLSL, MATMUL_HLSL, OPTIMISE_HLSL, REDUCE_HLSL, UNARY_HLSL, UN_BACK_HLSL};
     use std::cell::RefCell;
     use std::ffi::c_void;
 
@@ -304,6 +466,13 @@ mod win {
         matmul: [[Com; 2]; 2],
         binary: Com,
         unary: Com,
+        bin_back: Com,
+        un_back: Com,
+        reduce: Com,
+        optimise: Com,
+        /// A buffer of one number, bound where a shader's input or output
+        /// isn't used this time.
+        spare: Option<Buf>,
     }
 
     struct BufInner {
@@ -387,7 +556,20 @@ mod win {
         }
         let (device, context) = (Com(device), Com(context));
         let null = || Com(std::ptr::null_mut());
-        let mut g = Gpu { name, device, context, compile, matmul: [[null(), null()], [null(), null()]], binary: null(), unary: null() };
+        let mut g = Gpu {
+            name,
+            device,
+            context,
+            compile,
+            matmul: [[null(), null()], [null(), null()]],
+            binary: null(),
+            unary: null(),
+            bin_back: null(),
+            un_back: null(),
+            reduce: null(),
+            optimise: null(),
+            spare: None,
+        };
         for fa in 0..2 {
             for fb in 0..2 {
                 g.matmul[fa][fb] = g.shader(&format!("#define FA {}
@@ -397,6 +579,11 @@ mod win {
         }
         g.binary = g.shader(BINARY_HLSL).ok()?;
         g.unary = g.shader(UNARY_HLSL).ok()?;
+        g.bin_back = g.shader(BIN_BACK_HLSL).ok()?;
+        g.un_back = g.shader(UN_BACK_HLSL).ok()?;
+        g.reduce = g.shader(REDUCE_HLSL).ok()?;
+        g.optimise = g.shader(OPTIMISE_HLSL).ok()?;
+        g.spare = Some(g.rw(1, Some(&[0.0])).ok()?);
         Some(g)
     }
 
@@ -434,9 +621,9 @@ mod win {
         }
 
         /// Small numbers every thread can see (a constant buffer).
-        fn constants(&self, words: [u32; 8]) -> Result<Com, String> {
-            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), 32) };
-            self.buffer(BufferDesc { byte_width: 32, usage: USAGE_DEFAULT, bind_flags: BIND_CONSTANT, cpu_access: 0, misc: 0, stride: 0 }, Some(bytes))
+        fn constants<const W: usize>(&self, words: [u32; W]) -> Result<Com, String> {
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), W * 4) };
+            self.buffer(BufferDesc { byte_width: (W * 4) as u32, usage: USAGE_DEFAULT, bind_flags: BIND_CONSTANT, cpu_access: 0, misc: 0, stride: 0 }, Some(bytes))
         }
 
         /// Room for `n` numbers that shaders can write and later read,
@@ -589,6 +776,78 @@ mod win {
         .unwrap_or_else(|| Err(NO_GPU.into()))
     }
 
+    /// `n` copies of one number.
+    pub fn fill(x: f64, n: usize) -> Result<Buf, String> {
+        upload(&vec![x; n])
+    }
+
+    /// The gradients of a two-input operation (see BIN_BACK_HLSL), full size,
+    /// for the inputs asked for.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bin_back(op: u32, mode: u32, g: &Buf, a: &Buf, b: &Buf, _y: Option<&Buf>, n: usize, inner: usize, need_a: bool, need_b: bool) -> Result<(Option<Buf>, Option<Buf>), String> {
+        with_gpu(|gpu| {
+            let spare = gpu.spare.clone().ok_or("the GPU isn't ready")?;
+            let ga = if need_a { Some(gpu.rw(n, None)?) } else { None };
+            let gb = if need_b { Some(gpu.rw(n, None)?) } else { None };
+            let (gx, gy) = Gpu::spread(n);
+            let consts = gpu.constants([op, mode, n as u32, inner.max(1) as u32, gx, need_a as u32 | (need_b as u32) << 1, 0, 0])?;
+            let out_a = ga.as_ref().unwrap_or(&spare);
+            let out_b = gb.as_ref().unwrap_or(&spare);
+            gpu.run(&gpu.bin_back, &consts, &[&g.0.srv, &a.0.srv, &b.0.srv], &[&out_a.0.uav, &out_b.0.uav], (gx, gy, 1));
+            Ok((ga, gb))
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The gradient through a one-input function at x (whose result was y).
+    pub fn un_back(op: u32, g: &Buf, x: &Buf, y: &Buf, n: usize) -> Result<Buf, String> {
+        with_gpu(|gpu| {
+            let out = gpu.rw(n, None)?;
+            let (gx, gy) = Gpu::spread(n);
+            let consts = gpu.constants([op, 0, n as u32, 1, gx, 0, 0, 0])?;
+            gpu.run(&gpu.un_back, &consts, &[&g.0.srv, &x.0.srv, &y.0.srv], &[&out.0.uav], (gx, gy, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The sums (of squares, with `square`) of the columns of `n` numbers
+    /// laid out `inner` to a row.
+    pub fn col_sums(t: &Buf, n: usize, inner: usize, square: bool) -> Result<Buf, String> {
+        with_gpu(|gpu| {
+            let inner = inner.max(1);
+            let out = gpu.rw(inner, None)?;
+            let (gx, gy) = Gpu::spread(inner);
+            let consts = gpu.constants([n as u32, inner as u32, n.div_ceil(inner) as u32, square as u32, gx, 0, 0, 0])?;
+            gpu.run(&gpu.reduce, &consts, &[&t.0.srv], &[&out.0.uav], (gx, gy, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The sum (of squares, with `square`) of `n` numbers: 1024 column sums,
+    /// then their total.
+    pub fn sum_all(t: &Buf, n: usize, square: bool) -> Result<f64, String> {
+        let width = n.clamp(1, 1024);
+        let partial = col_sums(t, n, width, square)?;
+        let total = col_sums(&partial, width, 1, false)?;
+        Ok(download(&total, 1)?[0])
+    }
+
+    /// One optimiser step for `n` values `p` with gradients `g`, changing the
+    /// optimiser's memory `m` and `v` in place; gives the new values.
+    /// `k`: rate, the two Adam corrections, weight decay, and gradient scale.
+    pub fn optimise(method: u32, p: &Buf, g: &Buf, m: &Buf, v: &Buf, n: usize, k: [f32; 5]) -> Result<Buf, String> {
+        with_gpu(|gpu| {
+            let out = gpu.rw(n, None)?;
+            let (gx, gy) = Gpu::spread(n);
+            let consts = gpu.constants([method, n as u32, gx, 0, k[0].to_bits(), k[1].to_bits(), k[2].to_bits(), k[3].to_bits(), k[4].to_bits(), 0, 0, 0])?;
+            gpu.run(&gpu.optimise, &consts, &[&p.0.srv, &g.0.srv], &[&out.0.uav, &m.0.uav, &v.0.uav], (gx, gy, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
     /// The m x n matrix `a` times the n x p matrix `b`, worked out on the
     /// GPU in 32-bit numbers (sent there and brought back).
     pub fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Result<Vec<f64>, String> {
@@ -659,6 +918,41 @@ mod win {
                     assert!(close(got[i], want) || (want.is_nan() && got[i].is_nan()) || (want.is_infinite() && got[i].is_infinite()), "unary {} at x = {}: {} vs {}", op, xs[i], got[i], want);
                 }
             }
+        }
+
+        #[test]
+        fn gradients_sums_and_optimisers_match_the_cpu() {
+            if available().is_none() {
+                return;
+            }
+            let xs: Vec<f64> = (0..2048).map(|i| (i as f64 - 1000.0) / 300.0).collect();
+            let ys: Vec<f64> = (0..2048).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
+            let gs: Vec<f64> = (0..2048).map(|i| ((i % 5) as f64 - 2.0) / 3.0).collect();
+            let (a, b, g) = (upload(&xs).unwrap(), upload(&ys).unwrap(), upload(&gs).unwrap());
+            let close = |x: f64, y: f64| (x - y).abs() <= 1e-3 * (1.0 + y.abs());
+            // x * y: gradients g * y and g * x
+            let (ga, gb) = bin_back(super::super::MUL, super::super::SAME, &g, &a, &b, None, 2048, 1, true, true).unwrap();
+            let (ga, gb) = (download(&ga.unwrap(), 2048).unwrap(), download(&gb.unwrap(), 2048).unwrap());
+            assert!(close(ga[9], gs[9] * ys[9]) && close(gb[9], gs[9] * xs[9]));
+            // x ^ 3: gradient g * 3 * x^2
+            let (gp, _) = bin_back(super::super::POW, super::super::B_ONE, &g, &a, &upload(&[3.0]).unwrap(), None, 2048, 1, true, false).unwrap();
+            let gp = download(&gp.unwrap(), 2048).unwrap();
+            assert!(close(gp[3], gs[3] * 3.0 * xs[3] * xs[3]));
+            // through tanh
+            let y = unary(2, &a, 2048).unwrap();
+            let d = download(&un_back(2, &g, &a, &y, 2048).unwrap(), 2048).unwrap();
+            assert!(close(d[100], gs[100] * (1.0 - xs[100].tanh().powi(2))));
+            // column sums and totals
+            let cols = download(&col_sums(&a, 2048, 16, false).unwrap(), 16).unwrap();
+            assert!(close(cols[5], (0..128).map(|r| xs[r * 16 + 5]).sum()));
+            assert!(close(sum_all(&a, 2048, true).unwrap(), xs.iter().map(|x| x * x).sum()));
+            assert!(close(sum_all(&a, 1000, false).unwrap(), xs[..1000].iter().sum()));
+            // one Adam step from zero memory: p - rate * sign(g) (roughly)
+            let (m, v) = (fill(0.0, 2048).unwrap(), fill(0.0, 2048).unwrap());
+            let np = download(&optimise(super::super::ADAM, &a, &g, &m, &v, 2048, [0.1, 0.1, 0.001, 0.0, 1.0]).unwrap(), 2048).unwrap();
+            assert!(close(np[1], xs[1] - 0.1 * gs[1].signum()) || gs[1] == 0.0);
+            let np = download(&optimise(super::super::SGD, &a, &g, &m, &v, 2048, [0.5, 1.0, 1.0, 0.0, 2.0]).unwrap(), 2048).unwrap();
+            assert!(close(np[7], xs[7] - 0.5 * 2.0 * gs[7]));
         }
 
         #[test]

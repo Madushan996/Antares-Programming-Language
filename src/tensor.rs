@@ -95,9 +95,26 @@ pub struct Node {
     /// A copy of the numbers on the GPU, if any.
     dev: RefCell<Option<crate::gpu::Buf>>,
     pub grad: RefCell<Vec<f64>>,
+    /// The gradient, when it is on the GPU (with `use gpu`).
+    dgrad: RefCell<Option<crate::gpu::Buf>>,
     pub requires: bool,
     pub op: Op,
     pub opt: RefCell<Option<Adam>>,
+    /// The optimiser's memory, when it is on the GPU.
+    dopt: RefCell<Option<DevOpt>>,
+}
+
+/// An optimiser's memory on the GPU (as Adam's, for Adam, AdamW and momentum).
+struct DevOpt {
+    m: crate::gpu::Buf,
+    v: crate::gpu::Buf,
+    t: i32,
+}
+
+/// A gradient, wherever it is.
+enum Grad {
+    Cpu(Vec<f64>),
+    Dev(crate::gpu::Buf),
 }
 
 impl Node {
@@ -195,9 +212,11 @@ fn make(shape: Vec<usize>, data: Vec<f64>, op: Op, requires: bool) -> T {
         host_ok: std::cell::Cell::new(true),
         dev: RefCell::new(None),
         grad: RefCell::new(Vec::new()),
+        dgrad: RefCell::new(None),
         requires,
         op: if requires { op } else { Op::Leaf },
         opt: RefCell::new(None),
+        dopt: RefCell::new(None),
     })
 }
 
@@ -209,9 +228,11 @@ fn make_dev(shape: Vec<usize>, buf: crate::gpu::Buf, op: Op, requires: bool) -> 
         host_ok: std::cell::Cell::new(false),
         dev: RefCell::new(Some(buf)),
         grad: RefCell::new(Vec::new()),
+        dgrad: RefCell::new(None),
         requires,
         op: if requires { op } else { Op::Leaf },
         opt: RefCell::new(None),
+        dopt: RefCell::new(None),
     })
 }
 
@@ -796,6 +817,149 @@ fn acc(t: &T, d: &[f64]) {
     }
 }
 
+/// Adds a gradient that is on the GPU.
+fn acc_dev(t: &T, d: crate::gpu::Buf) {
+    use crate::gpu::{ADD, SAME};
+    if !t.requires {
+        return;
+    }
+    let n = t.len();
+    let prev = t.dgrad.borrow_mut().take();
+    let total = match prev {
+        Some(p) => crate::gpu::binary(ADD, SAME, &p, &d, n, 1),
+        None => Ok(d.clone()),
+    };
+    match total {
+        Ok(sum) => *t.dgrad.borrow_mut() = Some(sum),
+        // the GPU had a problem: keep going on the CPU
+        Err(_) => {
+            if let Ok(v) = crate::gpu::download(&d, n) {
+                acc(t, &v);
+            }
+        }
+    }
+}
+
+/// Takes a node's gradient, joining a CPU part and a GPU part if it has both.
+fn take_grad(n: &Node) -> Option<Grad> {
+    let cpu = std::mem::take(&mut *n.grad.borrow_mut());
+    let dev = n.dgrad.borrow_mut().take();
+    match (cpu.is_empty(), dev) {
+        (true, None) => None,
+        (false, None) => Some(Grad::Cpu(cpu)),
+        (true, Some(d)) => Some(Grad::Dev(d)),
+        (false, Some(d)) => {
+            let joined = crate::gpu::upload(&cpu).and_then(|c| crate::gpu::binary(crate::gpu::ADD, crate::gpu::SAME, &d, &c, n.len(), 1));
+            match joined {
+                Ok(j) => Some(Grad::Dev(j)),
+                Err(_) => {
+                    let mut v = crate::gpu::download(&d, n.len()).unwrap_or_else(|_| vec![0.0; n.len()]);
+                    v.iter_mut().zip(&cpu).for_each(|(x, y)| *x += y);
+                    Some(Grad::Cpu(v))
+                }
+            }
+        }
+    }
+}
+
+/// A gradient brought to the CPU.
+fn grad_vec(g: Grad, n: usize) -> Vec<f64> {
+    match g {
+        Grad::Cpu(v) => v,
+        Grad::Dev(d) => crate::gpu::download(&d, n).unwrap_or_else(|e| panic!("couldn't read a gradient back from the GPU: {}", e)),
+    }
+}
+
+/// Whether a node's gradient work is worth doing on the GPU: its numbers
+/// are there already, or it is a matrix product big enough.
+fn gpu_back_worth_it(node: &Node) -> bool {
+    match &node.op {
+        Op::MatMul(a, b) => mat_dims(a, b).is_ok_and(|(m, n, p)| m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK),
+        Op::Bin(..) | Op::Unary(..) | Op::Neg(_) | Op::Reshape(_) => node.is_on_gpu() && node.len() >= GPU_MIN_LEN,
+        _ => false,
+    }
+}
+
+/// A node's gradient work done on the GPU, with its gradient `g` there.
+/// False: this operation isn't done on the GPU (the caller does it on the
+/// CPU); nothing has been added to any gradient then.
+fn back_dev(node: &Node, g: &crate::gpu::Buf) -> bool {
+    use crate::gpu::{A_ONE, A_ROW, B_ONE, B_ROW};
+    let n = node.len();
+    match &node.op {
+        Op::MatMul(a, b) => {
+            let (m, k, p) = mat_dims(a, b).unwrap();
+            let work = || -> Result<(Option<crate::gpu::Buf>, Option<crate::gpu::Buf>), String> {
+                // da = g @ t(b), db = t(a) @ g, reading a and b as if flipped
+                let da = if a.requires { Some(crate::gpu::matmul_bufs(g, &b.on_gpu()?, m, p, k, false, true)?) } else { None };
+                let db = if b.requires { Some(crate::gpu::matmul_bufs(&a.on_gpu()?, g, k, m, p, true, false)?) } else { None };
+                Ok((da, db))
+            };
+            let Ok((da, db)) = work() else { return false };
+            if let Some(d) = da {
+                acc_dev(a, d);
+            }
+            if let Some(d) = db {
+                acc_dev(b, d);
+            }
+            true
+        }
+        Op::Bin(kind, a, b) => {
+            let Some((mode, inner)) = gpu_mode(&a.shape, &b.shape, &node.shape) else { return false };
+            if *kind == BinK::Pow && b.requires {
+                return false;
+            }
+            let work = || -> Result<(Option<crate::gpu::Buf>, Option<crate::gpu::Buf>), String> {
+                crate::gpu::bin_back(*kind as u32, mode, g, &a.on_gpu()?, &b.on_gpu()?, None, n, inner, a.requires, b.requires)
+            };
+            let Ok((ga, gb)) = work() else { return false };
+            // a repeated input's gradient is the sum over its repeats
+            let reduce = |full: crate::gpu::Buf, t: &T, one: bool, row: bool| {
+                if one {
+                    match crate::gpu::sum_all(&full, n, false) {
+                        Ok(s) => acc(t, &[s]),
+                        Err(_) => acc(t, &[crate::gpu::download(&full, n).map(|v| v.iter().sum()).unwrap_or(0.0)]),
+                    }
+                } else if row {
+                    match crate::gpu::col_sums(&full, n, inner, false) {
+                        Ok(c) => acc_dev(t, c),
+                        Err(_) => {
+                            let v = crate::gpu::download(&full, n).unwrap_or_default();
+                            let mut sums = vec![0.0; inner];
+                            v.iter().enumerate().for_each(|(i, x)| sums[i % inner] += x);
+                            acc(t, &sums);
+                        }
+                    }
+                } else {
+                    acc_dev(t, full);
+                }
+            };
+            if let Some(d) = ga {
+                reduce(d, a, mode == A_ONE, mode == A_ROW);
+            }
+            if let Some(d) = gb {
+                reduce(d, b, mode == B_ONE, mode == B_ROW);
+            }
+            true
+        }
+        Op::Unary(f, a) => {
+            let Ok(d) = a.on_gpu().and_then(|x| node.on_gpu().and_then(|y| crate::gpu::un_back(*f as u32, g, &x, &y, n))) else { return false };
+            acc_dev(a, d);
+            true
+        }
+        Op::Neg(a) => {
+            let Ok(d) = crate::gpu::unary(13, g, n) else { return false };
+            acc_dev(a, d);
+            true
+        }
+        Op::Reshape(a) => {
+            acc_dev(a, g.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
 fn topo(root: &T) -> Vec<T> {
     let mut order = vec![];
     let mut seen: HashSet<*const Node> = HashSet::new();
@@ -819,6 +983,13 @@ fn topo(root: &T) -> Vec<T> {
 }
 
 fn back(node: &Node, g: &[f64]) {
+    if gpu_on() && gpu_back_worth_it(node) {
+        if let Ok(gb) = crate::gpu::upload(g) {
+            if back_dev(node, &gb) {
+                return;
+            }
+        }
+    }
     match &node.op {
         Op::Leaf => {}
         Op::Bin(k, a, b) => {
@@ -976,10 +1147,17 @@ fn back(node: &Node, g: &[f64]) {
             };
             acc(a, &d);
         }
-        Op::Sum(a) => acc(a, &vec![g[0]; a.len()]),
-        Op::Mean(a) => {
+        Op::Sum(a) | Op::Mean(a) => {
             let n = a.len();
-            acc(a, &vec![g[0] / n.max(1) as f64; n]);
+            let each = if matches!(node.op, Op::Mean(_)) { g[0] / n.max(1) as f64 } else { g[0] };
+            // a sum over numbers on the GPU sends its gradient back there
+            if gpu_on() && a.is_on_gpu() && n >= GPU_MIN_LEN {
+                if let Ok(d) = crate::gpu::fill(each, n) {
+                    acc_dev(a, d);
+                    return;
+                }
+            }
+            acc(a, &vec![each; n]);
         }
         Op::Softmax(a) => {
             let d = node.shape.last().copied().unwrap_or(1).max(1);
@@ -1091,11 +1269,15 @@ fn backward(root: &T) -> Vec<T> {
         if matches!(n.op, Op::Leaf) {
             continue;
         }
-        let g = std::mem::take(&mut *n.grad.borrow_mut());
-        if g.is_empty() {
-            continue;
+        match take_grad(n) {
+            None => {}
+            Some(Grad::Cpu(g)) => back(n, &g),
+            Some(Grad::Dev(d)) => {
+                if !back_dev(n, &d) {
+                    back(n, &grad_vec(Grad::Dev(d), n.len()));
+                }
+            }
         }
-        back(n, &g);
     }
     order
 }
@@ -1117,63 +1299,132 @@ pub fn descend(loss: &T, rate: f64, optim: Optim, clip: Option<f64>) -> Result<(
         );
     }
     let order = backward(loss);
+    let params: Vec<&T> = order.iter().filter(|n| matches!(n.op, Op::Leaf) && n.requires).collect();
+    let grads: Vec<Option<Grad>> = params.iter().map(|n| take_grad(n)).collect();
     let mut scale = 1.0;
     if let Some(limit) = clip {
-        let total: f64 = order
+        let total: f64 = params
             .iter()
-            .filter(|n| matches!(n.op, Op::Leaf) && n.requires)
-            .map(|n| n.grad.borrow().iter().map(|x| x * x).sum::<f64>())
+            .zip(&grads)
+            .map(|(n, g)| match g {
+                Some(Grad::Cpu(v)) => v.iter().map(|x| x * x).sum::<f64>(),
+                Some(Grad::Dev(d)) => crate::gpu::sum_all(d, n.len(), true).unwrap_or_else(|_| crate::gpu::download(d, n.len()).map(|v| v.iter().map(|x| x * x).sum()).unwrap_or(0.0)),
+                None => 0.0,
+            })
             .sum();
         let norm = total.sqrt();
         if norm > limit && norm > 0.0 {
             scale = limit / norm;
         }
     }
-    for n in &order {
-        if matches!(n.op, Op::Leaf) && n.requires {
-            if scale != 1.0 {
-                n.grad.borrow_mut().iter_mut().for_each(|x| *x *= scale);
-            }
-            let g = n.grad.borrow();
-            if !g.is_empty() {
-                let mut d = n.vals_mut();
-                if optim == Optim::Adam || optim == Optim::AdamW {
-                    let mut o = n.opt.borrow_mut();
-                    let len = d.len();
-                    let st = o.get_or_insert_with(|| Adam {
-                        m: vec![0.0; len],
-                        v: vec![0.0; len],
-                        t: 0,
-                    });
-                    st.t += 1;
-                    let (b1, b2) = (0.9f64, 0.999f64);
-                    let c1 = 1.0 - b1.powi(st.t);
-                    let c2 = 1.0 - b2.powi(st.t);
-                    let decay = if optim == Optim::AdamW { 0.01 } else { 0.0 };
-                    for i in 0..len {
-                        st.m[i] = b1 * st.m[i] + (1.0 - b1) * g[i];
-                        st.v[i] = b2 * st.v[i] + (1.0 - b2) * g[i] * g[i];
-                        // (written exactly as before AdamW existed, so Adam's results don't change)
-                        let step = rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
-                        d[i] -= if decay == 0.0 { step } else { step + rate * decay * d[i] };
-                    }
-                } else if optim == Optim::Momentum {
-                    let mut o = n.opt.borrow_mut();
-                    let len = d.len();
-                    let st = o.get_or_insert_with(|| Adam { m: vec![0.0; len], v: vec![], t: 0 });
-                    for i in 0..len {
-                        st.m[i] = 0.9 * st.m[i] + g[i];
-                        d[i] -= rate * st.m[i];
-                    }
-                } else {
-                    for i in 0..d.len() {
-                        d[i] -= rate * g[i];
-                    }
+    for (n, g) in params.into_iter().zip(grads) {
+        match g {
+            None => {}
+            Some(Grad::Dev(d)) if gpu_on() => {
+                if gpu_step(n, &d, rate, optim, scale).is_err() {
+                    cpu_step(n, grad_vec(Grad::Dev(d), n.len()), rate, optim, scale);
                 }
             }
+            Some(g) => {
+                let v = grad_vec(g, n.len());
+                cpu_step(n, v, rate, optim, scale);
+            }
         }
-        n.grad.borrow_mut().clear();
     }
+    for n in &order {
+        n.grad.borrow_mut().clear();
+        *n.dgrad.borrow_mut() = None;
+    }
+    Ok(())
+}
+
+/// One optimiser step on the CPU.
+fn cpu_step(n: &Node, mut g: Vec<f64>, rate: f64, optim: Optim, scale: f64) {
+    if g.is_empty() {
+        return;
+    }
+    if scale != 1.0 {
+        g.iter_mut().for_each(|x| *x *= scale);
+    }
+    // memory kept on the GPU comes back to carry on here
+    if let Some(o) = n.dopt.borrow_mut().take() {
+        let len = n.len();
+        let m = crate::gpu::download(&o.m, len).unwrap_or_else(|_| vec![0.0; len]);
+        let v = if optim == Optim::Momentum { vec![] } else { crate::gpu::download(&o.v, len).unwrap_or_else(|_| vec![0.0; len]) };
+        *n.opt.borrow_mut() = Some(Adam { m, v, t: o.t });
+    }
+    let mut d = n.vals_mut();
+    if optim == Optim::Adam || optim == Optim::AdamW {
+        let mut o = n.opt.borrow_mut();
+        let len = d.len();
+        let st = o.get_or_insert_with(|| Adam {
+            m: vec![0.0; len],
+            v: vec![0.0; len],
+            t: 0,
+        });
+        if st.v.len() != len {
+            st.v = vec![0.0; len];
+        }
+        st.t += 1;
+        let (b1, b2) = (0.9f64, 0.999f64);
+        let c1 = 1.0 - b1.powi(st.t);
+        let c2 = 1.0 - b2.powi(st.t);
+        let decay = if optim == Optim::AdamW { 0.01 } else { 0.0 };
+        for i in 0..len {
+            st.m[i] = b1 * st.m[i] + (1.0 - b1) * g[i];
+            st.v[i] = b2 * st.v[i] + (1.0 - b2) * g[i] * g[i];
+            // (written exactly as before AdamW existed, so Adam's results don't change)
+            let step = rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
+            d[i] -= if decay == 0.0 { step } else { step + rate * decay * d[i] };
+        }
+    } else if optim == Optim::Momentum {
+        let mut o = n.opt.borrow_mut();
+        let len = d.len();
+        let st = o.get_or_insert_with(|| Adam { m: vec![0.0; len], v: vec![], t: 0 });
+        for i in 0..len {
+            st.m[i] = 0.9 * st.m[i] + g[i];
+            d[i] -= rate * st.m[i];
+        }
+    } else {
+        for i in 0..d.len() {
+            d[i] -= rate * g[i];
+        }
+    }
+}
+
+/// One optimiser step on the GPU: the values and the optimiser's memory
+/// stay there.
+fn gpu_step(n: &Node, g: &crate::gpu::Buf, rate: f64, optim: Optim, scale: f64) -> Result<(), String> {
+    let len = n.len();
+    let p = n.on_gpu()?;
+    let mut slot = n.dopt.borrow_mut();
+    if slot.is_none() {
+        // memory kept on the CPU so far moves to the GPU
+        let cpu = n.opt.borrow_mut().take();
+        *slot = Some(match cpu {
+            Some(a) => DevOpt {
+                m: if a.m.len() == len { crate::gpu::upload(&a.m)? } else { crate::gpu::fill(0.0, len)? },
+                v: if a.v.len() == len { crate::gpu::upload(&a.v)? } else { crate::gpu::fill(0.0, len)? },
+                t: a.t,
+            },
+            None => DevOpt { m: crate::gpu::fill(0.0, len)?, v: crate::gpu::fill(0.0, len)?, t: 0 },
+        });
+    }
+    let o = slot.as_mut().unwrap();
+    let (method, c1, c2, decay) = match optim {
+        Optim::Adam | Optim::AdamW => {
+            let t = o.t + 1;
+            (crate::gpu::ADAM, 1.0 - 0.9f64.powi(t), 1.0 - 0.999f64.powi(t), if optim == Optim::AdamW { 0.01 } else { 0.0 })
+        }
+        Optim::Momentum => (crate::gpu::MOMENTUM, 1.0, 1.0, 0.0),
+        Optim::Sgd => (crate::gpu::SGD, 1.0, 1.0, 0.0),
+    };
+    let fresh = crate::gpu::optimise(method, &p, g, &o.m, &o.v, len, [rate as f32, c1 as f32, c2 as f32, decay as f32, scale as f32])?;
+    if method == crate::gpu::ADAM {
+        o.t += 1;
+    }
+    *n.dev.borrow_mut() = Some(fresh);
+    n.host_ok.set(false);
     Ok(())
 }
 
@@ -1183,12 +1434,13 @@ pub fn grad_of(loss: &T, wrt: &T) -> Vec<f64> {
         return vec![0.0; wrt.len()];
     }
     let order = backward(loss);
-    let mut g = wrt.grad.borrow().clone();
-    if g.is_empty() {
-        g = vec![0.0; wrt.len()];
-    }
+    let g = match take_grad(wrt) {
+        Some(g) => grad_vec(g, wrt.len()),
+        None => vec![0.0; wrt.len()],
+    };
     for n in &order {
         n.grad.borrow_mut().clear();
+        *n.dgrad.borrow_mut() = None;
     }
     g
 }
