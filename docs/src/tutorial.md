@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.12.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.12.0.
+This book covers **Antares 0.13.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.13.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.12.0
+Antares 0.13.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.12.0 — type a line and press Enter. `exit` to leave.
+Antares 0.13.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -2995,7 +2995,7 @@ The `examples` folder that comes with Antares includes `snake.ant`, a complete S
 
 # Games in a Window {#window}
 
-The terminal is fine for Snake, but real games have colours, shapes and smooth movement. On Windows, Antares can open a window and let you draw in it: chunky pixel art like old video games, or smooth shapes, see-through colours, gradients, pictures and real fonts.
+The terminal is fine for Snake, but real games have colours, shapes and smooth movement. On Windows, Antares can open a window and let you draw in it: chunky pixel art like old video games, smooth shapes, see-through colours, gradients, pictures and real fonts, or whole worlds in 3D.
 
 ## Your first window
 
@@ -3175,6 +3175,99 @@ Three effects change the whole picture, so call them last, just before `frame()`
 
 ![examples/night.ant: a gradient sky, a glowing moon, hills drawn once on a picture, fireflies whose light adds up, and a title in a real font on a see-through card](images/night.png)
 
+## A world in 3D
+
+Everything so far has been flat. Antares can also draw in 3D: a world with depth, where things have sides, cast shadows and get smaller far away. Try this:
+
+<!-- norun -->
+```antares
+window(960, 540, "My 3D World")
+angle = 0
+while window_open() {
+    angle += 1
+    camera(0, 3, 8, 0, 0.5, 0)
+    sky("skyblue", "white")
+    plane(0, 0, 0, 40, 40, "green")
+    cube(0, 1, 0, 2, {colour: "red", turn: angle})
+    render()
+    frame()
+}
+```
+
+A red cube turns slowly on green grass, under a blue sky, with its shadow on the ground.
+
+In 3D, a position has three numbers: `x` goes right, `y` goes **up**, and `z` comes towards you. The ground is flat at `y = 0`, so the cube, 2 high, has its middle at `y = 1`.
+
+- `camera(0, 3, 8, 0, 0.5, 0)` puts the camera 3 up and 8 back, looking at the point `(0, 0.5, 0)`. Move the camera, and you see the world from somewhere else.
+- `sky(top, horizon)` fills the background with a sky. It also lights everything softly from above, just as the real sky does.
+- `plane(x, y, z, width, depth, colour)` is a flat rectangle facing up: the ground.
+- `cube(x, y, z, size, look)` is a cube. Each shape is placed by its **middle**.
+- `render()` draws the whole 3D scene into the picture. Anything you draw after it, like a score, goes on top.
+
+There is a sun even if you don't ask for one. `sun(x, y, z)` says which direction it shines from: `sun(1, 1, 0)` shines from the right, high up, and shadows fall to the left.
+
+## Shapes and how they look
+
+| Function | What it draws |
+|---|---|
+| `cube(x, y, z, size, look)` | A cube |
+| `box(x, y, z, width, height, depth, look)` | A box |
+| `sphere(x, y, z, radius, look)` | A ball |
+| `cylinder(x, y, z, radius, height, look)` | A cylinder, like a tree trunk or a can |
+| `cone(x, y, z, radius, height, look)` | A cone, like a tree top or a party hat |
+| `plane(x, y, z, width, depth, look)` | A flat rectangle facing up |
+
+The look is a colour, or a map that says more:
+
+<!-- norun -->
+```antares
+sphere(0, 1, 0, 1, {colour: "white", metal: 1, shine: 0.9})
+```
+
+That's a polished metal ball: it reflects the sky. `shine` goes from 0 (rough, like chalk) to 1 (smooth, like glass), and `metal: 1` makes it metal. A see-through colour makes glass: `{colour: [150, 200, 255, 0.3]}`. `glow: 2` makes a shape give off light of its own colour, like a lamp bulb or a neon sign. `turn` turns a shape (in degrees), and `scale` stretches it: `{scale: [1, 3, 1]}` makes it three times as tall. `{picture: p, tiles: 10}` wraps a picture round it, repeated 10 times across, which is how you make a floor of tiles or a brick wall.
+
+## Light, night and fog
+
+Light makes a 3D world feel real. `lamp(x, y, z, colour)` puts a light at a point; up to 8 can shine at once. They are part of each frame, like shapes, so a lamp can move. A night scene needs a dark sky, a dim moon, and lamps:
+
+<!-- norun -->
+```antares
+sky("#05081a", "#141c3a")
+sun(-0.4, 0.8, -0.6, "#7f8fd8", 0.15)       # a faint, bluish moon
+lamp(0, 2, 0, "orange")
+```
+
+`fog(colour, near, far)` makes far-away things fade into a colour: thin from `near` away, complete by `far`. It hides the edge of the world and makes distances feel big. `fog()` clears it.
+
+## Models
+
+Shapes like cubes and balls go a long way, but you can also draw **models** made in 3D programs such as Blender. Save them as `.obj` files and read them with `mesh`:
+
+<!-- norun -->
+```antares
+car = mesh("car.obj")
+while window_open() {
+    ...
+    draw(car, x, 0, z, {colour: "red", turn: heading})
+    render()
+    frame()
+}
+```
+
+You can also build a model yourself from its corners and triangles. This is a roof: six corners, and eight triangles that join them (the numbers in the triangles count the corners from 0):
+
+<!-- norun -->
+```antares
+roof = mesh([[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1], [0, 1, -1], [0, 1, 1]],
+            [[0, 3, 5], [0, 5, 4], [1, 4, 5], [1, 5, 2], [0, 4, 1], [3, 2, 5], [0, 1, 2], [0, 2, 3]])
+```
+
+`examples/world.ant` puts all of this together: a village of houses with such roofs, trees made of cylinders and cones, lamp posts, a pond and a ball you roll around with the arrow keys while the camera follows. Press N for night, when the lamps light up. Run it with `antares examples/world.ant`.
+
+![examples/world.ant at night: lamps light the village, the pond reflects them, and fog hides the distance](images/world.png)
+
+3D needs Windows for now, like windows themselves. The graphics card draws it; on a computer without one, Windows draws it more slowly but it looks the same.
+
 ## Sound
 
 Games are much more fun with sound. Antares can play sound effects, tones, tunes and music, and you don't need any sound files to start:
@@ -3226,6 +3319,7 @@ These game windows and sounds work on Windows. On macOS and Linux, `window()` te
 3. Make a box that jumps up by 30 pixels each time you press Space, using `pressed("space")`.
 4. Add sound to your jumping box: play `effect("jump")` each time it jumps. Then write the start of a song you know as a tune, and play it once when the program starts.
 5. Draw a sunset: fill a 320 by 180 window with a gradient from orange at the top to purple at the bottom, add a sun that glows (a circle with a `radial` gradient), and write a title in a real font with a soft shadow.
+6. Build a snowman in 3D: three white balls of different sizes stacked on a white ground, an orange cone for the nose, and a camera that circles round it (hint: put the camera at `x = sin(a) * 8` and `z = cos(a) * 8`, and make `a` bigger each frame).
 
 ## Summary
 
@@ -3235,6 +3329,7 @@ These game windows and sounds work on Windows. On macOS and Linux, `window()` te
 - `gradient` and `radial` make colours that change smoothly, and `blend("add")` makes light add up.
 - `picture` reads PNG files and makes pictures to draw on; `draw` draws them turned, scaled or faded.
 - `font` chooses a real font for labels, `shadow` adds soft shadows, and `glow`, `vignette` and `blur` change the whole picture.
+- In 3D, `camera` says where you look from, `sun`, `lamp` and `sky` light the world, shapes like `cube`, `sphere` and `plane` (or models from `mesh`) fill it, and `render()` draws it.
 - `held(key)` is for moving, `pressed(key)` for one-off actions, and `mouse()` for the mouse.
 - `effect(name)` plays a ready-made sound; `beep`, `tune`, `sound` and `music` play your own.
 
@@ -3535,6 +3630,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.11.0 | 16 Nov 2026 | Agents that act: running commands, reading the web, and built-in tools that ask before they run. |
 | 0.11.1 | 16 Nov 2026 | A command stopped by its time limit stops everything it started, such as a game window. |
 | 0.12.0 | 16 Nov 2026 | Graphics that look good: smooth shapes, see-through colours, gradients, pictures, real fonts, shadows and lighting effects. |
+| 0.13.0 | 16 Nov 2026 | 3D: a camera, shapes and models, sunlight, lamps, soft shadows, sky, fog and realistic materials, drawn on the graphics card. |
 
 ## Version 0.1.0: the first release
 
@@ -3703,6 +3799,10 @@ When a command run with `shell` takes longer than its `timeout`, Antares stops i
 ## Version 0.12.0: graphics that look good
 
 Games and pictures look much better. Shapes have smooth edges and can be placed at fractions of a pixel, so movement glides; colours can be see-through; and there are gradients, rounded corners, ellipses, rings, polygons and lines of any thickness (Chapter 19). `picture` reads PNG files, which `draw` draws turned, scaled, faded, tinted or flipped, and pictures can be drawn on and saved on every system, even without a window. Labels can use the fonts on your computer, `shadow` adds soft shadows, `blend("add")` makes light add up, and `glow`, `blur` and `vignette` change the whole picture. `fullscreen` fills the screen, and `frame()` gives the time since the last frame. Pixel-art games still work as before, and `smooth(no)` gives them hard pixel edges. The new example `night.ant` shows it all together. That makes 176 built-in functions.
+
+## Version 0.13.0: 3D
+
+Programs can draw worlds in 3D (Chapter 19). `camera` places the view; `cube`, `box`, `sphere`, `cylinder`, `cone` and `plane` are ready-made shapes, and `mesh` reads models from `.obj` files or builds them from points and triangles. The light is worked out the way real light behaves: `sun` casts soft shadows, `sky` lights everything from above, `lamp` adds lights of any colour, and surfaces can be rough or polished, plain or metal, see-through or glowing, and wrapped in pictures. `fog` fades the distance. The graphics card does the drawing, through Direct3D 11, with smooth edges; without one, Windows' own software renderer draws the same picture more slowly. 3D goes into the same picture as 2D, so labels and effects go on top, and `to_screen` puts labels next to 3D things. The new example `world.ant` is a village to roll a ball around, by day and by night. That makes 191 built-in functions.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -4493,6 +4593,28 @@ while window_open() {
 }
 ```
 
+6. For example:
+
+<!-- norun -->
+```antares
+window(960, 540, "Snowman")
+a = 0
+while window_open() {
+    a += 0.01
+    camera(sin(a) * 8, 3, cos(a) * 8, 0, 1.5, 0)
+    sky("#9ec5ee", "white")
+    plane(0, 0, 0, 40, 40, "white")
+    sphere(0, 0.8, 0, 0.8, "white")
+    sphere(0, 2, 0, 0.55, "white")
+    sphere(0, 2.85, 0, 0.38, "white")
+    cone(0, 2.85, 0.5, 0.08, 0.4, {colour: "orange", turn: [90, 0, 0]})
+    render()
+    frame()
+}
+```
+
+The nose is a cone turned 90 degrees about `x`, so that it points forwards.
+
 ## Chapter 20: Making Programs Fast
 
 1. and 2. Results depend on your computer. As a guide, on the laptop used for this book `fib(30)` took 0.28 seconds interpreted and 0.009 seconds compiled, about 30 times faster.
@@ -4567,6 +4689,7 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Games in a window | `window window_open frame fullscreen held pressed mouse screenshot` |
 | Drawing | `fill rect circle ellipse ring polygon line path pixel colour_at label font measure sprite` |
 | Pictures and effects | `picture draw canvas gradient radial hsl mix blend smooth shadow blur glow vignette` |
+| 3D | `camera cube box sphere cylinder cone plane mesh draw sun lamp sky fog shadows render to_screen` |
 | Sound | `sound music beep tune effect volume silence playing` |
 | Deep learning | `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax`, `cross_entropy`, `mse`, `bce`, `take`, `concat`, `layer_norm`, `dropout`, `causal_mask`, `he`, `xavier`, `accuracy`, `top`, `sample` |
 | Data | `read_csv`, `columns`, `shuffle`, `batches` |

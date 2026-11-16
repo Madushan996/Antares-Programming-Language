@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.12.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.13.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, in 2D and 3D, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.12.0 — type a line and press Enter. `exit` to leave.
+Antares 0.13.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1663,6 +1663,80 @@ sprite(heart, 20, 10, {r: "red"}, 3)      # three times as big
 
 Windows only for now: on macOS and Linux, `window()` stops with a problem that says so, and the functions that need a window (`frame`, `held`, `mouse` and so on) ask for one. Pictures, drawing on them and saving them work everywhere.
 
+## 3D
+
+Antares draws 3D worlds too, into the same picture as 2D drawing, so labels and effects go on top. A program describes each frame: where the camera is, the light, and the shapes; `render()` draws them (and `frame()` does if the program doesn't). The graphics card does the drawing, through Direct3D 11, which every Windows PC has; a computer without a graphics card uses Windows' own software renderer, which is slower but looks the same. Nothing needs installing.
+
+<!-- norun -->
+```antares
+window(960, 540, "3D")
+t = 0
+while window_open() {
+    t += frame()
+    camera(0, 3, 8, 0, 0.5, 0)              # where it is, and what it looks at
+    sky("#4f86d9", "#d8e6f3")
+    sun(0.5, 1, 0.3)
+    plane(0, 0, 0, 40, 40, "#6f9a4f")       # the ground
+    cube(0, 0.75, 0, 1.5, {colour: "red", turn: t * 45})
+    sphere(2.5, 1, 0, 1, {colour: "white", metal: 1, shine: 0.9})
+    render()                                # draw it, then 2D on top
+    label("Hello, 3D", 20, 20)
+}
+```
+
+The world's `y` points up, `x` to the right and `z` towards the viewer, so the ground is flat at `y = 0`. Sizes and positions are in any units you like (metres work well); every shape is placed by its middle.
+
+| Function | What it does |
+|---|---|
+| `camera(x, y, z, look_x, look_y, look_z [, options])` | Puts the camera at a point, looking at another. Options: `fov` (how wide it sees, in degrees, 60 unless given), `near` and `far` (the nearest and furthest it draws, 0.1 and 1000) |
+| `cube(x, y, z, size [, look])` | A cube |
+| `box(x, y, z, width, height, depth [, look])` | A box |
+| `sphere(x, y, z, radius [, look])` | A ball |
+| `cylinder(x, y, z, radius, height [, look])` | A cylinder, standing up |
+| `cone(x, y, z, radius, height [, look])` | A cone, point up |
+| `plane(x, y, z, width, depth [, look])` | A flat rectangle facing up, such as the ground or a floor |
+| `mesh(file)` | Reads a model from a Wavefront `.obj` file |
+| `mesh(points, triangles [, places])` | A model made from its corners `[[x, y, z], ...]` and triangles `[[a, b, c], ...]` (corner numbers, from 0), with optional places on a picture `[[u, v], ...]` |
+| `draw(model, x, y, z [, look])` | Draws a model, its own origin at `x, y, z` |
+| `sun(x, y, z [, colour [, strength]])` | Sunlight coming from that direction; `sun()` turns it off |
+| `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point, for this frame (up to 8) |
+| `sky([top [, horizon [, ground]]])` | The sky behind everything, which also lights the scene softly; `sky()` leaves the background as it is |
+| `fog([colour,] near, far)` | Things fade into fog from `near` away to `far` away; `fog()` clears it |
+| `shadows(yes or no)` | Whether the sun casts shadows (it does unless told not to) |
+| `render()` | Draws the scene described since the last render |
+| `to_screen(x, y, z)` | Where a point shows in the picture, as `[x, y]`, or `nothing` if it is behind the camera |
+
+**Looks.** The last input of a shape is its colour, or a map of options:
+
+| Option | What it does |
+|---|---|
+| `colour` | Its colour. A see-through colour, like `[120, 200, 255, 0.4]`, makes glass |
+| `shine` | From 0 (rough, like chalk) to 1 (polished, like a mirror); 0.3 unless given |
+| `metal` | From 0 to 1: metal reflects the world in its own colour |
+| `glow` | Light it gives off itself, in its colour: 1 glows softly, 3 brightly. `glow()` (the 2D effect) after `render()` makes it shine |
+| `picture` | A picture wrapped onto it (a texture) |
+| `tiles` | How many times the picture repeats across it, for floors and walls |
+| `turn` | Degrees to turn it: a number turns it about the up axis; `[x, y, z]` about each axis in turn |
+| `scale` | Stretches it: a number, or `[x, y, z]` |
+| `shadow` | `no` if it shouldn't cast a shadow |
+
+<!-- norun -->
+```antares
+cube(0, 1, 0, 2, {colour: "gold", metal: 1, shine: 0.8, turn: [0, 30, 0]})
+plane(0, 0, 0, 50, 50, {picture: picture("grass.png"), tiles: 25})
+sphere(0, 3, 0, 0.2, {colour: "orange", glow: 3})
+```
+
+**Light.** The look aims for realism with little effort. Light is worked out the way real light behaves (rough and polished, plain and metal surfaces reflect it differently), the sun casts soft shadows, the sky lights everything a little from above, and edges are smoothed. Without `sun` or `sky`, there is a gentle default sun and sky light. A lamp's `strength` is 1 unless given, and its light fades out by `reach` (12 units). For a night scene, choose a dark sky, a faint bluish sun for the moon, and lamps.
+
+**Models.** `mesh` reads the triangles of an `.obj` file, the format most 3D programs (such as Blender) can save, with its normals and its places on a picture if it has them. A file is read once however often `mesh` is called with its name; it gives `{mesh, size, triangles}`, where `size` is `[width, height, depth]`. A model made from points gets normals worked out from its faces: smooth where faces meet at gentle angles, sharp at edges. Make models once, before the loop, and `draw` them each frame.
+
+**Mixing with 2D.** `render()` draws over the picture as it is: with a sky, the sky fills it; without one, 3D shapes go over whatever was drawn before, such as a 2D background. Anything drawn after `render()`, like a score or `glow()`, goes on top; when `frame()` draws a scene that `render()` didn't, it goes over everything drawn that frame, so a program with 2D on top calls `render()` itself. `to_screen` puts 2D labels next to 3D things.
+
+**Speed.** On a graphics card, scenes of hundreds of shapes take a few milliseconds. With Windows' software renderer, each frame takes several times longer.
+
+3D is Windows-only for now: elsewhere, `render()` stops with a problem that says so. Placing shapes and making models work everywhere.
+
 ## Sound
 
 Programs can play sound files, tones, tunes written as text, ready-made effects and looping music, all at the same time, in a window or in the terminal. Antares mixes every sound itself, 44,100 numbers a second, and hands the result to the speakers.
@@ -2014,6 +2088,27 @@ The statements `model` and `ask` are described in Chapter 12.
 | `pressed(key)` | Whether a key went down since the last frame |
 | `mouse()` | `{x, y, left, right}` |
 | `screenshot(file)` | Save the picture as a PNG |
+
+## 3D
+
+| Function | Description |
+|---|---|
+| `camera(x, y, z, look_x, look_y, look_z [, options])` | Where the camera is and what it looks at; options `fov`, `near`, `far` |
+| `cube(x, y, z, size [, look])`, `box(x, y, z, width, height, depth [, look])` | A cube, a box |
+| `sphere(x, y, z, radius [, look])` | A ball |
+| `cylinder(x, y, z, radius, height [, look])`, `cone(x, y, z, radius, height [, look])` | A cylinder, a cone |
+| `plane(x, y, z, width, depth [, look])` | A flat rectangle facing up |
+| `mesh(file)`, `mesh(points, triangles [, places])` | A model from an `.obj` file, or from corners and triangles |
+| `draw(model, x, y, z [, look])` | Draw a model |
+| `sun([x, y, z [, colour [, strength]]])` | Sunlight from a direction; `sun()` turns it off |
+| `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point, for this frame |
+| `sky([top [, horizon [, ground]]])` | The sky; `sky()` leaves the background |
+| `fog([colour,] near, far)`, `fog()` | Fog, or none |
+| `shadows(yes or no)` | Whether the sun casts shadows |
+| `render()` | Draw the scene |
+| `to_screen(x, y, z)` | Where a point shows in the picture, or `nothing` |
+
+Looks: a colour, or a map with `colour`, `shine`, `metal`, `glow`, `picture`, `tiles`, `turn`, `scale`, `shadow`.
 
 ## Sound
 

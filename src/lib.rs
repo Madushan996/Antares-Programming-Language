@@ -8,6 +8,7 @@ pub mod aot;
 pub mod ast;
 pub mod builtins;
 pub mod gfx;
+pub mod gfx3d;
 pub mod gpu;
 pub mod interp;
 pub mod json;

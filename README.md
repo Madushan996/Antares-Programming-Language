@@ -65,6 +65,9 @@ show ask helper "What is 17% of 2450? And which file here is the biggest?"
 - **Graphics that look good.** Games in a window with smooth shapes,
   see-through colours, gradients, PNG pictures, real fonts, soft shadows and
   glowing light, drawn by Antares itself with nothing to install.
+- **3D worlds.** A camera, shapes and `.obj` models, sunlight with soft
+  shadows, lamps, sky, fog, and realistic shiny and metal materials, drawn
+  on the graphics card.
 - **Any model.** Claude, OpenAI and services like it, or free and private
   models on your own computer with Ollama.
 - **One file, no dependencies.** The whole language is a single small program
@@ -83,7 +86,7 @@ show ask helper "What is 17% of 2450? And which file here is the biggest?"
 - [Making an executable to share](#making-an-executable-to-share)
 - [Troubleshooting](#troubleshooting)
 - [The language in five minutes](#the-language-in-five-minutes)
-- [Deep learning](#deep-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Sound](#sound) · [Built-in functions](#built-in-functions)
+- [Deep learning](#deep-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [3D](#3d) · [Sound](#sound) · [Built-in functions](#built-in-functions)
 
 ## Install
 
@@ -113,7 +116,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.12.0`.
+You should see `Antares 0.13.0`.
 
 ### Option 2: download it yourself
 
@@ -854,6 +857,46 @@ while window_open() {
 
 Windows only for now; on macOS and Linux, `window()` says so.
 
+## 3D
+
+Antares draws 3D worlds into the same window, on the graphics card
+(through Direct3D 11, which every Windows PC has; Windows' own software
+renderer stands in on a PC without one). Light behaves the way real light
+does: the sun casts soft shadows, the sky lights everything from above,
+lamps glow, and surfaces are rough or polished, plain or metal. Edges are
+smooth, and fog fades the distance.
+
+```
+window(960, 540, "3D")
+t = 0
+while window_open() {
+    t += frame()
+    camera(0, 3, 8, 0, 0.5, 0)               # where from, and looking at what
+    sky("#4f86d9", "#d8e6f3")
+    sun(0.5, 1, 0.3)
+    plane(0, 0, 0, 40, 40, "#6f9a4f")        # the ground
+    cube(0, 0.75, 0, 1.5, {colour: "red", turn: t * 45})
+    sphere(2.5, 1, 0, 1, {colour: "white", metal: 1, shine: 0.9})
+    render()                                 # draw it; 2D goes on top
+    label("Hello, 3D", 20, 20)
+}
+```
+
+| Function | What it does |
+|---|---|
+| `camera(x, y, z, look_x, look_y, look_z [, {fov, near, far}])` | Where the camera is, and what it looks at (`y` is up) |
+| `cube`, `box`, `sphere`, `cylinder`, `cone`, `plane` | Shapes, placed by their middle: `cube(x, y, z, size [, look])` |
+| `mesh(file)`, `mesh(points, triangles)` | A model from an `.obj` file, or built from corners and triangles |
+| `draw(model, x, y, z [, look])` | Draws a model |
+| `sun(x, y, z [, colour [, strength]])` | Sunlight from that direction, with soft shadows |
+| `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point (up to 8) |
+| `sky(top [, horizon [, ground]])`, `fog([colour,] near, far)` | The sky, and fog |
+| `shadows(yes or no)`, `render()`, `to_screen(x, y, z)` | Shadows on or off; draws the scene; where a 3D point shows on screen |
+
+A look is a colour or a map: `{colour, shine, metal, glow, picture, tiles,
+turn, scale, shadow}`. `examples/world.ant` is a village to roll a ball
+around, by day and by night.
+
 ## Sound
 
 Games can play sound files, tones, tunes written as text, ready-made effects
@@ -918,6 +961,7 @@ music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
 | Commands and the web | `shell fetch read_page page_text page_links` |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
 | Games in a window | `window window_open frame fullscreen fill rect circle ellipse ring polygon line path pixel colour_at label font measure sprite picture draw canvas gradient radial hsl mix blend smooth shadow blur glow vignette held pressed mouse screenshot` |
+| 3D | `camera cube box sphere cylinder cone plane mesh draw sun lamp sky fog shadows render to_screen` |
 | Sound | `sound music beep tune effect volume silence playing` |
 | Other | `kind clock now check fail` |
 
@@ -1059,9 +1103,9 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.11. Not there yet: giving a value to a slice
-(`v[1:3] = 0`), the GPU on macOS and on non-NVIDIA Linux, and game windows
-and sound on macOS and Linux.
+This is version 0.13. Not there yet: giving a value to a slice
+(`v[1:3] = 0`), the GPU on macOS and on non-NVIDIA Linux, and game windows,
+3D and sound on macOS and Linux.
 
 ## Rebuilding the documentation
 
