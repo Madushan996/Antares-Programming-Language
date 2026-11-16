@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.6.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.7.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.6.0 — type a line and press Enter. `exit` to leave.
+Antares 0.7.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1681,7 +1681,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.6. Not there yet:
+This is version 0.7. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
 - Tools and multi-turn chat for language models.
