@@ -280,7 +280,7 @@ pub fn colour(v: &Value, name: &str) -> Result<u32, String> {
         Value::List(_) | Value::Tensor(_) | Value::Ints(_) => {
             let parts: Vec<f64> = match v {
                 Value::List(l) => l.iter().map(|x| x.scalar()).collect::<Option<Vec<f64>>>().ok_or_else(|| bad("a list with something other than numbers".into()))?,
-                Value::Tensor(t) => t.data.borrow().clone(),
+                Value::Tensor(t) => t.vals().clone(),
                 Value::Ints(n) => n.iter().map(|x| *x as f64).collect(),
                 _ => unreachable!(),
             };

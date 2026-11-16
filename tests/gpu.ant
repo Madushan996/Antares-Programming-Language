@@ -1,0 +1,89 @@
+# GPU: `use gpu` sends big matrix multiplications, and their gradients, to
+# the graphics card. Without one, everything stays on the CPU and these
+# checks still pass. (ANTARES_GPU=warp uses Windows' software GPU.)
+
+to biggest(t) = max(abs(t))
+
+seed(1)
+x = randn(300, 260)
+w = randn(260, 280) * 0.1
+y = randn(300, 280)
+
+# products: the GPU works in 32-bit numbers, so they agree to about 6 digits
+use cpu
+on_cpu = x @ w
+use gpu
+on_gpu = x @ w
+check(biggest(on_gpu - on_cpu) < 0.0001 * biggest(on_cpu), "big products agree")
+check([[1, 2], [3, 4]] @ [[5], [6]] == [[17], [39]], "small products stay on the CPU, exactly")
+
+# gradients through @, for both sides
+learn lx = x
+learn lw = w
+to loss() = mean((lx @ lw - y) ^ 2)
+use cpu
+gx_cpu = grad(loss(), lx)
+gw_cpu = grad(loss(), lw)
+use gpu
+gx_gpu = grad(loss(), lx)
+gw_gpu = grad(loss(), lw)
+check(biggest(gx_gpu - gx_cpu) < 0.001 * biggest(gx_cpu), "gradients for the left side agree")
+check(biggest(gw_gpu - gw_cpu) < 0.001 * biggest(gw_cpu), "gradients for the right side agree")
+
+# training with the GPU on
+seed(2)
+learn w1 = randn(260, 300) * 0.05
+learn w2 = randn(300, 280) * 0.05
+first = mean((tanh(x @ w1) @ w2 - y) ^ 2)
+repeat 20 {
+    l = mean((tanh(x @ w1) @ w2 - y) ^ 2)
+    descend l by 0.01 using adam
+}
+check(l < first, "training on the GPU lowers the loss ({first} to {l})")
+use cpu
+
+# a whole forward pass, keeping numbers on the GPU between steps
+learn b1 = randn(300) * 0.1
+to forward() {
+    h = gelu(x @ w1 + b1)                    # product, a bias row, an activation
+    h = h * 0.5 - h / 4 + (h - 0.1) ^ 2      # numbers, powers of negative numbers
+    r = reshape(-h, [300, 300])              # minus, and a reshape on the GPU
+    sigmoid(r) @ w2
+}
+use cpu
+cpu_out = forward()
+use gpu
+gpu_out = forward()
+check(biggest(gpu_out - cpu_out) < 0.001 * biggest(cpu_out), "a forward pass on the GPU agrees")
+check(abs(mean(gpu_out) - mean(cpu_out)) < 0.0001, "reading numbers back from the GPU (mean)")
+check(biggest(softmax(gpu_out)[3] - softmax(cpu_out)[3]) < 0.0001, "softmax and indexing on GPU results")
+check(shape(gpu_out) == [300, 280], "shapes are kept")
+seed(3)
+first = mean((forward() - y) ^ 2)
+repeat 10 { descend mean((forward() - y) ^ 2) by 0.01 using adam }
+check(mean((forward() - y) ^ 2) < first, "training through all of it")
+use cpu
+
+# every optimiser, with clip, takes the same steps on the GPU as on the CPU
+# (use_gpu is what `use gpu` and `use cpu` do, usable inside a loop)
+to steps(method, on_gpu) {
+    use_gpu(on_gpu)
+    seed(5)
+    learn p = randn(260, 280) * 0.05
+    repeat 3 {
+        l = mean((x @ p - y) ^ 2)
+        when method == "sgd" { descend l by 0.5 clip 0.05 }
+        else when method == "momentum" { descend l by 0.2 using momentum clip 0.05 }
+        else when method == "adam" { descend l by 0.01 using adam clip 0.05 }
+        else { descend l by 0.01 using adamw clip 0.05 }
+    }
+    use_gpu(no)
+    give p
+}
+each method in ["sgd", "momentum", "adam", "adamw"] {
+    on_cpu = steps(method, no)
+    on_gpu = steps(method, yes)
+    check(biggest(on_gpu - on_cpu) < 0.001 * biggest(on_cpu), "{method} on the GPU takes the same steps")
+}
+
+show "gpu: products, gradients and training ok"

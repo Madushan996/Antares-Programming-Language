@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.8.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.9.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.8.0 — type a line and press Enter. `exit` to leave.
+Antares 0.9.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1009,6 +1009,34 @@ to block(h) {
 
 `examples/tiny_gpt.ant` builds a complete character-level GPT this way: token and position embeddings with `take`, one block, and an output layer, trained with `cross_entropy` and `descend ... using adamw clip 1`. It learns a page of text in a few seconds and then writes new text with `sample`.
 
+## Training on the GPU
+
+`use gpu` sends tensor maths to the graphics card from that point in a program, and `use cpu` sends it back. `gpu()` gives the name of the graphics card Antares uses, or `nothing`.
+
+<!-- norun -->
+```antares
+use gpu
+learn w1 = he(784, 1024)
+learn w2 = xavier(1024, 10)
+repeat 10 {
+    descend cross_entropy(gelu(x @ w1) @ w2, labels) by 0.001 using adamw clip 1
+}
+```
+
+With the GPU on:
+
+- Matrix products of at least about 256 x 256 x 256 multiply-adds run on the GPU, and leave their result there.
+- Element-wise arithmetic (`+ - * / ^ %` and minus) and every activation run on the GPU when an input is already there and there are at least 4096 numbers, when the inputs have the same shape, or one is a single number, or one is a row repeated for every row (a bias). `reshape` keeps numbers where they are.
+- The backward pass works on the GPU for all of these, and for `sum` and `mean` of numbers there; the gradients of a repeated row or number are added up on the GPU.
+- `descend` runs SGD, momentum, Adam and AdamW on the GPU for gradients that are there, keeping the optimiser's memory and the new values there; `clip` measures the gradients' size on the GPU.
+- Anything else (softmax, `cross_entropy`, indexing, `show`, saving...) brings the numbers back when it reads them, and works as usual.
+
+The GPU works in 32-bit numbers (about 7 significant digits) where the CPU uses 64-bit ones, so results agree with the CPU's to about 6 digits. Programs without `use gpu` are unaffected and give exactly the results they always did. `use gpu` and `use cpu` belong at the top level of a file; `use_gpu(yes)` and `use_gpu(no)` do the same anywhere.
+
+Antares uses Direct3D 11 compute shaders, which every Windows PC with a graphics card or built-in graphics has, and picks the graphics card with the most memory of its own. The first time a program needs one of its GPU programs (shaders), it compiles it, which takes a moment, and keeps it in the local app data folder, so later programs don't wait. Without a usable GPU, and on macOS and Linux for now, `use gpu` notes this once on the error output and everything stays on the CPU. The environment variable `ANTARES_GPU=warp` uses Windows' software GPU (for testing on machines without a graphics card), and `ANTARES_GPU=none` behaves as if there were no GPU.
+
+On a laptop's Intel HD Graphics 520, training a 784-1024-1024-10 classifier for 10 steps takes 1.89 s with `use gpu` against 29.5 s on its 4-core CPU, and a 1024 x 1024 matrix product 49 ms against 360 ms.
+
 ## Data
 
 | Function | What it does |
@@ -1699,6 +1727,8 @@ Inputs in brackets `[ ]` are optional. "Tensor" means a number or any list of nu
 | `he(i, o)`, `xavier(i, o)` | Starting weights |
 | `accuracy(scores, answers)`, `top(values, k)`, `sample(p [, temperature])` | Reading results |
 | `read_csv(file)`, `columns(rows, names)`, `shuffle(x)`, `batches(x, size)` | Data |
+| `gpu()` | The graphics card's name, or `nothing` (see `use gpu` in Chapter 11) |
+| `use_gpu(yes or no)` | What `use gpu` and `use cpu` do |
 
 The statements `learn` and `descend` are described in Chapter 11.
 
@@ -1847,6 +1877,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
 | `src/value.rs` | The value kinds and how they print |
 | `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
+| `src/gpu.rs` | The GPU: Direct3D 11 compute shaders for matrix products, element-wise maths, gradients and optimisers |
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the font, PNG screenshots, and the Windows window |
@@ -1859,10 +1890,10 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.8. Not there yet:
+This is version 0.9. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
-- GPU support (planned next).
+- The GPU on macOS and Linux.
 - Game windows and sound on macOS and Linux.
 
 # Grammar Summary {#grammar .appendix}

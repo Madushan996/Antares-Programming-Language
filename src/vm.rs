@@ -540,7 +540,7 @@ impl Interp {
                                     }
                                     Value::Tensor(t) if t.shape.len() == 1 && k < t.shape[0] && !t.requires => {
                                         if let (Some(tn), Value::Num(x)) = (Rc::get_mut(t), &v) {
-                                            tn.data.get_mut()[k] = *x;
+                                            tn.host_get_mut()[k] = *x;
                                             break 'op Ok(());
                                         }
                                     }
@@ -786,7 +786,7 @@ impl Interp {
                                     let hit = match &self.stack[len - 2] {
                                         Value::List(l) if k < l.len() => Some(l[k].clone()),
                                         Value::Tensor(t) if !t.requires && t.shape.len() == 1 && k < t.shape[0] => {
-                                            Some(Value::Num(t.data.borrow()[k]))
+                                            Some(Value::Num(t.vals()[k]))
                                         }
                                         _ => None,
                                     };
@@ -871,7 +871,7 @@ impl Interp {
                         let len = self.stack.len();
                         let next = match (&self.stack[len - 2], &self.stack[len - 1]) {
                             (Value::List(l), Value::Num(i)) => l.get(*i as usize).cloned(),
-                            (Value::Tensor(t), Value::Num(i)) => t.data.borrow().get(*i as usize).map(|x| Value::Num(*x)),
+                            (Value::Tensor(t), Value::Num(i)) => t.vals().get(*i as usize).map(|x| Value::Num(*x)),
                             _ => None,
                         };
                         match next {

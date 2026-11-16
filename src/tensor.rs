@@ -86,16 +86,102 @@ pub struct Adam {
 
 pub struct Node {
     pub shape: Vec<usize>,
-    pub data: RefCell<Vec<f64>>,
+    /// The numbers, in ordinary memory. Read them with `vals()` and change
+    /// them with `vals_mut()`: with `use gpu` they may live on the GPU.
+    host: RefCell<Vec<f64>>,
+    /// Whether `host` holds the numbers (it doesn't while they exist only
+    /// on the GPU).
+    host_ok: std::cell::Cell<bool>,
+    /// A copy of the numbers on the GPU, if any.
+    dev: RefCell<Option<crate::gpu::Buf>>,
     pub grad: RefCell<Vec<f64>>,
+    /// The gradient, when it is on the GPU (with `use gpu`).
+    dgrad: RefCell<Option<crate::gpu::Buf>>,
     pub requires: bool,
     pub op: Op,
     pub opt: RefCell<Option<Adam>>,
+    /// The optimiser's memory, when it is on the GPU.
+    dopt: RefCell<Option<DevOpt>>,
+}
+
+/// An optimiser's memory on the GPU (as Adam's, for Adam, AdamW and momentum).
+struct DevOpt {
+    m: crate::gpu::Buf,
+    v: crate::gpu::Buf,
+    t: i32,
+}
+
+/// A gradient, wherever it is.
+enum Grad {
+    Cpu(Vec<f64>),
+    Dev(crate::gpu::Buf),
 }
 
 impl Node {
     pub fn len(&self) -> usize {
-        self.data.borrow().len()
+        self.shape.iter().product()
+    }
+
+    /// The numbers, brought back from the GPU first if they are only there.
+    pub fn vals(&self) -> std::cell::Ref<'_, Vec<f64>> {
+        if !self.host_ok.get() {
+            let back = self.dev.borrow().as_ref().map(|b| crate::gpu::download(b, self.len()));
+            match back {
+                Some(Ok(v)) => *self.host.borrow_mut() = v,
+                Some(Err(e)) => panic!("couldn't read numbers back from the GPU: {}", e),
+                None => panic!("a tensor lost its numbers"),
+            }
+            self.host_ok.set(true);
+        }
+        self.host.borrow()
+    }
+
+    /// The numbers, to change in place (any GPU copy is then out of date).
+    pub fn vals_mut(&self) -> std::cell::RefMut<'_, Vec<f64>> {
+        drop(self.vals());
+        *self.dev.borrow_mut() = None;
+        self.host.borrow_mut()
+    }
+
+    /// The GPU copy, uploading the numbers if there isn't one yet (it is
+    /// kept, so numbers used again aren't sent again).
+    pub fn on_gpu(&self) -> Result<crate::gpu::Buf, String> {
+        if let Some(b) = self.dev.borrow().as_ref() {
+            return Ok(b.clone());
+        }
+        let b = crate::gpu::upload(&self.vals())?;
+        *self.dev.borrow_mut() = Some(b.clone());
+        Ok(b)
+    }
+
+    /// The numbers as a raw pointer, for compiled loops that only read them.
+    #[inline(always)]
+    pub fn host_raw(&self) -> *mut Vec<f64> {
+        if !self.host_ok.get() {
+            drop(self.vals());
+        }
+        self.host.as_ptr()
+    }
+
+    /// The numbers as a raw pointer, for compiled code that changes them
+    /// (any GPU copy is then out of date).
+    #[inline(always)]
+    pub fn host_raw_mut(&self) -> *mut Vec<f64> {
+        if !self.host_ok.get() || unsafe { (*self.dev.as_ptr()).is_some() } {
+            drop(self.vals_mut());
+        }
+        self.host.as_ptr()
+    }
+
+    /// The numbers of a tensor nobody else holds, to change in place.
+    pub fn host_get_mut(&mut self) -> &mut Vec<f64> {
+        drop(self.vals_mut());
+        self.host.get_mut()
+    }
+
+    /// Whether the numbers are on the GPU already.
+    pub fn is_on_gpu(&self) -> bool {
+        self.dev.borrow().is_some()
     }
 
     fn parents(&self) -> Vec<&T> {
@@ -122,11 +208,31 @@ impl Node {
 fn make(shape: Vec<usize>, data: Vec<f64>, op: Op, requires: bool) -> T {
     Rc::new(Node {
         shape,
-        data: RefCell::new(data),
+        host: RefCell::new(data),
+        host_ok: std::cell::Cell::new(true),
+        dev: RefCell::new(None),
         grad: RefCell::new(Vec::new()),
+        dgrad: RefCell::new(None),
         requires,
         op: if requires { op } else { Op::Leaf },
         opt: RefCell::new(None),
+        dopt: RefCell::new(None),
+    })
+}
+
+/// A tensor whose numbers are only on the GPU (the result of GPU maths).
+fn make_dev(shape: Vec<usize>, buf: crate::gpu::Buf, op: Op, requires: bool) -> T {
+    Rc::new(Node {
+        shape,
+        host: RefCell::new(Vec::new()),
+        host_ok: std::cell::Cell::new(false),
+        dev: RefCell::new(Some(buf)),
+        grad: RefCell::new(Vec::new()),
+        dgrad: RefCell::new(None),
+        requires,
+        op: if requires { op } else { Op::Leaf },
+        opt: RefCell::new(None),
+        dopt: RefCell::new(None),
     })
 }
 
@@ -244,11 +350,21 @@ fn bin_fn(k: BinK, x: f64, y: f64) -> f64 {
 
 pub fn binary(k: BinK, a: &T, b: &T) -> Result<T, String> {
     let shape = bshape(&a.shape, &b.shape)?;
+    let total: usize = shape.iter().product();
+    if gpu_on() && total >= GPU_MIN_LEN && (a.is_on_gpu() || b.is_on_gpu()) {
+        if let Some((mode, inner)) = gpu_mode(&a.shape, &b.shape, &shape) {
+            if let (Ok(ab), Ok(bb)) = (a.on_gpu(), b.on_gpu()) {
+                if let Ok(out) = crate::gpu::binary(k as u32, mode, &ab, &bb, total, inner) {
+                    return Ok(make_dev(shape, out, Op::Bin(k, a.clone(), b.clone()), a.requires || b.requires));
+                }
+            }
+        }
+    }
     let ma = bmap(&a.shape, &shape);
     let mb = bmap(&b.shape, &shape);
     let n: usize = shape.iter().product();
-    let ad = a.data.borrow();
-    let bd = b.data.borrow();
+    let ad = a.vals();
+    let bd = b.vals();
     let mut out = Vec::with_capacity(n);
     match (&ma, &mb) {
         (BMap::Same, BMap::Same) => {
@@ -289,6 +405,48 @@ fn mat_dims(a: &T, b: &T) -> Result<(usize, usize, usize), String> {
         ));
     }
     Ok((m, n, p))
+}
+
+/// Whether `use gpu` is on.
+static GPU_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Below about 256 x 256 x 256 multiply-adds, copying to the GPU and back
+/// takes longer than the CPU takes to do the work.
+const GPU_MIN_WORK: usize = 1 << 24;
+
+/// Element-by-element steps run on the GPU when an input is already there
+/// and there are at least this many numbers (below it, starting the GPU
+/// costs more than the work).
+const GPU_MIN_LEN: usize = 4096;
+
+fn gpu_on() -> bool {
+    GPU_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How two shapes line up for the GPU's element-wise shader (and the length
+/// of a repeated row), or None when they line up some other way.
+fn gpu_mode(a: &[usize], b: &[usize], out: &[usize]) -> Option<(u32, usize)> {
+    use crate::gpu::{A_ONE, A_ROW, B_ONE, B_ROW, SAME};
+    let len = |s: &[usize]| s.iter().product::<usize>();
+    let suffix = |s: &[usize]| s.len() <= out.len() && &out[out.len() - s.len()..] == s;
+    if a == out && b == out {
+        Some((SAME, 1))
+    } else if a == out && len(b) == 1 {
+        Some((B_ONE, 1))
+    } else if b == out && len(a) == 1 {
+        Some((A_ONE, 1))
+    } else if a == out && suffix(b) {
+        Some((B_ROW, len(b)))
+    } else if b == out && suffix(a) {
+        Some((A_ROW, len(a)))
+    } else {
+        None
+    }
+}
+
+/// Turns the GPU on or off for big matrix multiplications (`use gpu`).
+pub fn set_gpu(on: bool) {
+    GPU_ON.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// Splits `out` (rows of `width` numbers) among the CPU's cores and runs
@@ -333,7 +491,6 @@ fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
 
 pub fn matmul(a: &T, b: &T) -> Result<T, String> {
     let (m, n, p) = mat_dims(a, b)?;
-    let out = mm(&a.data.borrow(), &b.data.borrow(), m, n, p);
     let mut shape = vec![];
     if a.shape.len() == 2 {
         shape.push(m);
@@ -342,11 +499,24 @@ pub fn matmul(a: &T, b: &T) -> Result<T, String> {
         shape.push(p);
     }
     let req = a.requires || b.requires;
+    if gpu_on() && m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK {
+        if let (Ok(ab), Ok(bb)) = (a.on_gpu(), b.on_gpu()) {
+            if let Ok(out) = crate::gpu::matmul_bufs(&ab, &bb, m, n, p, false, false) {
+                return Ok(make_dev(shape, out, Op::MatMul(a.clone(), b.clone()), req));
+            }
+        }
+    }
+    let out = mm(&a.vals(), &b.vals(), m, n, p);
     Ok(make(shape, out, Op::MatMul(a.clone(), b.clone()), req))
 }
 
 pub fn neg(a: &T) -> T {
-    let d: Vec<f64> = a.data.borrow().iter().map(|x| -x).collect();
+    if gpu_on() && a.len() >= GPU_MIN_LEN && a.is_on_gpu() {
+        if let Ok(out) = a.on_gpu().and_then(|ab| crate::gpu::unary(13, &ab, a.len())) {
+            return make_dev(a.shape.clone(), out, Op::Neg(a.clone()), a.requires);
+        }
+    }
+    let d: Vec<f64> = a.vals().iter().map(|x| -x).collect();
     make(a.shape.clone(), d, Op::Neg(a.clone()), a.requires)
 }
 
@@ -385,25 +555,30 @@ pub fn apply(f: UFn, x: f64) -> f64 {
 const GELU_K: f64 = 0.797_884_560_802_865_4;
 
 pub fn unary(f: UFn, a: &T) -> T {
-    let d: Vec<f64> = a.data.borrow().iter().map(|&x| apply(f, x)).collect();
+    if gpu_on() && a.len() >= GPU_MIN_LEN && a.is_on_gpu() {
+        if let Ok(out) = a.on_gpu().and_then(|ab| crate::gpu::unary(f as u32, &ab, a.len())) {
+            return make_dev(a.shape.clone(), out, Op::Unary(f, a.clone()), a.requires);
+        }
+    }
+    let d: Vec<f64> = a.vals().iter().map(|&x| apply(f, x)).collect();
     make(a.shape.clone(), d, Op::Unary(f, a.clone()), a.requires)
 }
 
 pub fn sum(a: &T) -> T {
-    let s: f64 = a.data.borrow().iter().sum();
+    let s: f64 = a.vals().iter().sum();
     make(vec![], vec![s], Op::Sum(a.clone()), a.requires)
 }
 
 pub fn mean(a: &T) -> T {
     let n = a.len().max(1) as f64;
-    let s: f64 = a.data.borrow().iter().sum();
+    let s: f64 = a.vals().iter().sum();
     make(vec![], vec![s / n], Op::Mean(a.clone()), a.requires)
 }
 
 /// Softmax along the last dimension.
 pub fn softmax(a: &T) -> T {
     let d = a.shape.last().copied().unwrap_or(1).max(1);
-    let src = a.data.borrow();
+    let src = a.vals();
     let mut out = vec![0.0; src.len()];
     for (row, orow) in src.chunks(d).zip(out.chunks_mut(d)) {
         let mx = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -425,7 +600,7 @@ pub fn transpose(a: &T) -> Result<T, String> {
         0 | 1 => Ok(a.clone()),
         2 => {
             let (m, n) = (a.shape[0], a.shape[1]);
-            let src = a.data.borrow();
+            let src = a.vals();
             let mut out = vec![0.0; m * n];
             for i in 0..m {
                 for j in 0..n {
@@ -448,7 +623,12 @@ pub fn reshape(a: &T, shape: Vec<usize>) -> Result<T, String> {
             fmt_shape(&shape)
         ));
     }
-    let d = a.data.borrow().clone();
+    if !a.host_ok.get() {
+        if let Some(buf) = a.dev.borrow().clone() {
+            return Ok(make_dev(shape, buf, Op::Reshape(a.clone()), a.requires));
+        }
+    }
+    let d = a.vals().clone();
     Ok(make(shape, d, Op::Reshape(a.clone()), a.requires))
 }
 
@@ -475,7 +655,7 @@ pub fn index(t: &T, idx: &[i64]) -> Result<T, String> {
         off += j as usize * size;
     }
     let shape = t.shape[idx.len()..].to_vec();
-    let data = t.data.borrow()[off..off + size].to_vec();
+    let data = t.vals()[off..off + size].to_vec();
     Ok(make(shape, data, Op::Index(t.clone(), off), t.requires))
 }
 
@@ -503,7 +683,7 @@ pub fn gather(t: &T, shape: Vec<usize>, sel: &[Vec<usize>]) -> T {
             counter[d] = 0;
         }
     }
-    let src = t.data.borrow();
+    let src = t.vals();
     let data: Vec<f64> = offsets.iter().map(|&o| src[o]).collect();
     drop(src);
     make(shape, data, Op::Gather(t.clone(), offsets), t.requires)
@@ -525,7 +705,7 @@ pub fn sum_axis(t: &T, axis: i64) -> Result<T, String> {
     }
     let ax = ax as usize;
     let (outer, n, inner) = axis_parts(&t.shape, ax);
-    let src = t.data.borrow();
+    let src = t.vals();
     let mut out = vec![0.0; outer * inner];
     for o in 0..outer {
         for j in 0..n {
@@ -550,7 +730,7 @@ pub fn mean_axis(t: &T, axis: i64) -> Result<T, String> {
 /// log(softmax(x)) along the last dimension, computed without overflow.
 pub fn log_softmax(a: &T) -> T {
     let d = a.shape.last().copied().unwrap_or(1).max(1);
-    let src = a.data.borrow();
+    let src = a.vals();
     let mut out = vec![0.0; src.len()];
     for (row, orow) in src.chunks(d).zip(out.chunks_mut(d)) {
         let mx = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -574,7 +754,7 @@ pub fn cross_entropy(logits: &T, target: Vec<f64>) -> Result<T, String> {
     let lsm = log_softmax(logits);
     let d = logits.shape.last().copied().unwrap_or(1).max(1);
     let rows = (logits.len() / d).max(1);
-    let total: f64 = lsm.data.borrow().iter().zip(&target).map(|(l, t)| if *t == 0.0 { 0.0 } else { l * t }).sum();
+    let total: f64 = lsm.vals().iter().zip(&target).map(|(l, t)| if *t == 0.0 { 0.0 } else { l * t }).sum();
     let loss = -total / rows as f64;
     Ok(make(vec![], vec![loss], Op::CrossEntropy(logits.clone(), Rc::new(target)), logits.requires))
 }
@@ -607,7 +787,7 @@ pub fn concat(parts: &[T], axis: i64) -> Result<T, String> {
     let inner: usize = first.shape[ax + 1..].iter().product();
     let total: usize = parts.iter().map(|p| p.shape[ax]).sum();
     let mut out = Vec::with_capacity(outer * total * inner);
-    let datas: Vec<_> = parts.iter().map(|p| p.data.borrow()).collect();
+    let datas: Vec<_> = parts.iter().map(|p| p.vals()).collect();
     for o in 0..outer {
         for (p, d) in parts.iter().zip(&datas) {
             let n = p.shape[ax] * inner;
@@ -637,6 +817,149 @@ fn acc(t: &T, d: &[f64]) {
     }
 }
 
+/// Adds a gradient that is on the GPU.
+fn acc_dev(t: &T, d: crate::gpu::Buf) {
+    use crate::gpu::{ADD, SAME};
+    if !t.requires {
+        return;
+    }
+    let n = t.len();
+    let prev = t.dgrad.borrow_mut().take();
+    let total = match prev {
+        Some(p) => crate::gpu::binary(ADD, SAME, &p, &d, n, 1),
+        None => Ok(d.clone()),
+    };
+    match total {
+        Ok(sum) => *t.dgrad.borrow_mut() = Some(sum),
+        // the GPU had a problem: keep going on the CPU
+        Err(_) => {
+            if let Ok(v) = crate::gpu::download(&d, n) {
+                acc(t, &v);
+            }
+        }
+    }
+}
+
+/// Takes a node's gradient, joining a CPU part and a GPU part if it has both.
+fn take_grad(n: &Node) -> Option<Grad> {
+    let cpu = std::mem::take(&mut *n.grad.borrow_mut());
+    let dev = n.dgrad.borrow_mut().take();
+    match (cpu.is_empty(), dev) {
+        (true, None) => None,
+        (false, None) => Some(Grad::Cpu(cpu)),
+        (true, Some(d)) => Some(Grad::Dev(d)),
+        (false, Some(d)) => {
+            let joined = crate::gpu::upload(&cpu).and_then(|c| crate::gpu::binary(crate::gpu::ADD, crate::gpu::SAME, &d, &c, n.len(), 1));
+            match joined {
+                Ok(j) => Some(Grad::Dev(j)),
+                Err(_) => {
+                    let mut v = crate::gpu::download(&d, n.len()).unwrap_or_else(|_| vec![0.0; n.len()]);
+                    v.iter_mut().zip(&cpu).for_each(|(x, y)| *x += y);
+                    Some(Grad::Cpu(v))
+                }
+            }
+        }
+    }
+}
+
+/// A gradient brought to the CPU.
+fn grad_vec(g: Grad, n: usize) -> Vec<f64> {
+    match g {
+        Grad::Cpu(v) => v,
+        Grad::Dev(d) => crate::gpu::download(&d, n).unwrap_or_else(|e| panic!("couldn't read a gradient back from the GPU: {}", e)),
+    }
+}
+
+/// Whether a node's gradient work is worth doing on the GPU: its numbers
+/// are there already, or it is a matrix product big enough.
+fn gpu_back_worth_it(node: &Node) -> bool {
+    match &node.op {
+        Op::MatMul(a, b) => mat_dims(a, b).is_ok_and(|(m, n, p)| m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK),
+        Op::Bin(..) | Op::Unary(..) | Op::Neg(_) | Op::Reshape(_) => node.is_on_gpu() && node.len() >= GPU_MIN_LEN,
+        _ => false,
+    }
+}
+
+/// A node's gradient work done on the GPU, with its gradient `g` there.
+/// False: this operation isn't done on the GPU (the caller does it on the
+/// CPU); nothing has been added to any gradient then.
+fn back_dev(node: &Node, g: &crate::gpu::Buf) -> bool {
+    use crate::gpu::{A_ONE, A_ROW, B_ONE, B_ROW};
+    let n = node.len();
+    match &node.op {
+        Op::MatMul(a, b) => {
+            let (m, k, p) = mat_dims(a, b).unwrap();
+            let work = || -> Result<(Option<crate::gpu::Buf>, Option<crate::gpu::Buf>), String> {
+                // da = g @ t(b), db = t(a) @ g, reading a and b as if flipped
+                let da = if a.requires { Some(crate::gpu::matmul_bufs(g, &b.on_gpu()?, m, p, k, false, true)?) } else { None };
+                let db = if b.requires { Some(crate::gpu::matmul_bufs(&a.on_gpu()?, g, k, m, p, true, false)?) } else { None };
+                Ok((da, db))
+            };
+            let Ok((da, db)) = work() else { return false };
+            if let Some(d) = da {
+                acc_dev(a, d);
+            }
+            if let Some(d) = db {
+                acc_dev(b, d);
+            }
+            true
+        }
+        Op::Bin(kind, a, b) => {
+            let Some((mode, inner)) = gpu_mode(&a.shape, &b.shape, &node.shape) else { return false };
+            if *kind == BinK::Pow && b.requires {
+                return false;
+            }
+            let work = || -> Result<(Option<crate::gpu::Buf>, Option<crate::gpu::Buf>), String> {
+                crate::gpu::bin_back(*kind as u32, mode, g, &a.on_gpu()?, &b.on_gpu()?, None, n, inner, a.requires, b.requires)
+            };
+            let Ok((ga, gb)) = work() else { return false };
+            // a repeated input's gradient is the sum over its repeats
+            let reduce = |full: crate::gpu::Buf, t: &T, one: bool, row: bool| {
+                if one {
+                    match crate::gpu::sum_all(&full, n, false) {
+                        Ok(s) => acc(t, &[s]),
+                        Err(_) => acc(t, &[crate::gpu::download(&full, n).map(|v| v.iter().sum()).unwrap_or(0.0)]),
+                    }
+                } else if row {
+                    match crate::gpu::col_sums(&full, n, inner, false) {
+                        Ok(c) => acc_dev(t, c),
+                        Err(_) => {
+                            let v = crate::gpu::download(&full, n).unwrap_or_default();
+                            let mut sums = vec![0.0; inner];
+                            v.iter().enumerate().for_each(|(i, x)| sums[i % inner] += x);
+                            acc(t, &sums);
+                        }
+                    }
+                } else {
+                    acc_dev(t, full);
+                }
+            };
+            if let Some(d) = ga {
+                reduce(d, a, mode == A_ONE, mode == A_ROW);
+            }
+            if let Some(d) = gb {
+                reduce(d, b, mode == B_ONE, mode == B_ROW);
+            }
+            true
+        }
+        Op::Unary(f, a) => {
+            let Ok(d) = a.on_gpu().and_then(|x| node.on_gpu().and_then(|y| crate::gpu::un_back(*f as u32, g, &x, &y, n))) else { return false };
+            acc_dev(a, d);
+            true
+        }
+        Op::Neg(a) => {
+            let Ok(d) = crate::gpu::unary(13, g, n) else { return false };
+            acc_dev(a, d);
+            true
+        }
+        Op::Reshape(a) => {
+            acc_dev(a, g.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
 fn topo(root: &T) -> Vec<T> {
     let mut order = vec![];
     let mut seen: HashSet<*const Node> = HashSet::new();
@@ -660,14 +983,21 @@ fn topo(root: &T) -> Vec<T> {
 }
 
 fn back(node: &Node, g: &[f64]) {
+    if gpu_on() && gpu_back_worth_it(node) {
+        if let Ok(gb) = crate::gpu::upload(g) {
+            if back_dev(node, &gb) {
+                return;
+            }
+        }
+    }
     match &node.op {
         Op::Leaf => {}
         Op::Bin(k, a, b) => {
             let ma = bmap(&a.shape, &node.shape);
             let mb = bmap(&b.shape, &node.shape);
-            let ad = a.data.borrow();
-            let bd = b.data.borrow();
-            let od = node.data.borrow();
+            let ad = a.vals();
+            let bd = b.vals();
+            let od = node.vals();
             let mut da = if a.requires { vec![0.0; ad.len()] } else { vec![] };
             let mut db = if b.requires { vec![0.0; bd.len()] } else { vec![] };
             for i in 0..g.len() {
@@ -699,14 +1029,32 @@ fn back(node: &Node, g: &[f64]) {
         }
         Op::MatMul(a, b) => {
             let (m, n, p) = mat_dims(a, b).unwrap();
-            let ad = a.data.borrow();
-            let bd = b.data.borrow();
             let mut da = if a.requires { vec![0.0; m * n] } else { vec![] };
             let mut db = if b.requires { vec![0.0; n * p] } else { vec![] };
-            // plain slices, so the cores can share them
-            let (ad, bd) = (&ad[..], &bd[..]);
-            if a.requires {
+            // with `use gpu`: da = g @ t(b) and db = t(a) @ g on the GPU,
+            // reading a and b as if flipped, where they already are
+            let mut on_gpu_a = false;
+            let mut on_gpu_b = false;
+            if gpu_on() && m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK {
+                if let Ok(gb) = crate::gpu::upload(g) {
+                    if a.requires {
+                        if let Some(d) = b.on_gpu().and_then(|bb| crate::gpu::matmul_bufs(&gb, &bb, m, p, n, false, true)).and_then(|o| crate::gpu::download(&o, m * n)).ok() {
+                            da = d;
+                            on_gpu_a = true;
+                        }
+                    }
+                    if b.requires {
+                        if let Some(d) = a.on_gpu().and_then(|ab| crate::gpu::matmul_bufs(&ab, &gb, n, m, p, true, false)).and_then(|o| crate::gpu::download(&o, n * p)).ok() {
+                            db = d;
+                            on_gpu_b = true;
+                        }
+                    }
+                }
+            }
+            if a.requires && !on_gpu_a {
                 // da[i, k] = sum over j of g[i, j] * b[k, j]
+                let bd_ref = b.vals();
+                let bd = &bd_ref[..]; // a plain slice, so the cores can share it
                 par_rows(&mut da, n, m * n * p, |first, part| {
                     for (r, drow) in part.chunks_mut(n.max(1)).enumerate() {
                         let i = first + r;
@@ -722,8 +1070,10 @@ fn back(node: &Node, g: &[f64]) {
                     }
                 });
             }
-            if b.requires {
+            if b.requires && !on_gpu_b {
                 // db[k, j] = sum over i of a[i, k] * g[i, j], adding i in order
+                let ad_ref = a.vals();
+                let ad = &ad_ref[..];
                 par_rows(&mut db, p, m * n * p, |first, part| {
                     let rows = part.len() / p.max(1);
                     for i in 0..m {
@@ -747,8 +1097,8 @@ fn back(node: &Node, g: &[f64]) {
         }
         Op::Unary(f, a) => {
             let d: Vec<f64> = {
-                let xd = a.data.borrow();
-                let yd = node.data.borrow();
+                let xd = a.vals();
+                let yd = node.vals();
                 (0..g.len())
                     .map(|i| {
                         let (x, y) = (xd[i], yd[i]);
@@ -797,16 +1147,23 @@ fn back(node: &Node, g: &[f64]) {
             };
             acc(a, &d);
         }
-        Op::Sum(a) => acc(a, &vec![g[0]; a.len()]),
-        Op::Mean(a) => {
+        Op::Sum(a) | Op::Mean(a) => {
             let n = a.len();
-            acc(a, &vec![g[0] / n.max(1) as f64; n]);
+            let each = if matches!(node.op, Op::Mean(_)) { g[0] / n.max(1) as f64 } else { g[0] };
+            // a sum over numbers on the GPU sends its gradient back there
+            if gpu_on() && a.is_on_gpu() && n >= GPU_MIN_LEN {
+                if let Ok(d) = crate::gpu::fill(each, n) {
+                    acc_dev(a, d);
+                    return;
+                }
+            }
+            acc(a, &vec![each; n]);
         }
         Op::Softmax(a) => {
             let d = node.shape.last().copied().unwrap_or(1).max(1);
             let mut out = vec![0.0; g.len()];
             {
-                let s = node.data.borrow();
+                let s = node.vals();
                 for ((srow, grow), orow) in s.chunks(d).zip(g.chunks(d)).zip(out.chunks_mut(d)) {
                     let dot: f64 = srow.iter().zip(grow).map(|(a, b)| a * b).sum();
                     for j in 0..srow.len() {
@@ -856,7 +1213,7 @@ fn back(node: &Node, g: &[f64]) {
             let d = node.shape.last().copied().unwrap_or(1).max(1);
             let mut out = vec![0.0; g.len()];
             {
-                let y = node.data.borrow();
+                let y = node.vals();
                 for ((yrow, grow), orow) in y.chunks(d).zip(g.chunks(d)).zip(out.chunks_mut(d)) {
                     let total: f64 = grow.iter().sum();
                     for j in 0..yrow.len() {
@@ -872,7 +1229,7 @@ fn back(node: &Node, g: &[f64]) {
             let rows = (a.len() / d).max(1) as f64;
             let mut out = vec![0.0; a.len()];
             {
-                let x = a.data.borrow();
+                let x = a.vals();
                 for ((xrow, trow), orow) in x.chunks(d).zip(target.chunks(d)).zip(out.chunks_mut(d)) {
                     let mx = xrow.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let total: f64 = xrow.iter().map(|v| (v - mx).exp()).sum();
@@ -912,11 +1269,15 @@ fn backward(root: &T) -> Vec<T> {
         if matches!(n.op, Op::Leaf) {
             continue;
         }
-        let g = std::mem::take(&mut *n.grad.borrow_mut());
-        if g.is_empty() {
-            continue;
+        match take_grad(n) {
+            None => {}
+            Some(Grad::Cpu(g)) => back(n, &g),
+            Some(Grad::Dev(d)) => {
+                if !back_dev(n, &d) {
+                    back(n, &grad_vec(Grad::Dev(d), n.len()));
+                }
+            }
         }
-        back(n, &g);
     }
     order
 }
@@ -931,70 +1292,139 @@ pub fn descend(loss: &T, rate: f64, optim: Optim, clip: Option<f64>) -> Result<(
                 .into(),
         );
     }
-    if loss.data.borrow().iter().any(|x| !x.is_finite()) {
+    if loss.vals().iter().any(|x| !x.is_finite()) {
         return Err(
             "the value being minimised is no longer a real number (it blew up). Try a smaller rate after `by`"
                 .into(),
         );
     }
     let order = backward(loss);
+    let params: Vec<&T> = order.iter().filter(|n| matches!(n.op, Op::Leaf) && n.requires).collect();
+    let grads: Vec<Option<Grad>> = params.iter().map(|n| take_grad(n)).collect();
     let mut scale = 1.0;
     if let Some(limit) = clip {
-        let total: f64 = order
+        let total: f64 = params
             .iter()
-            .filter(|n| matches!(n.op, Op::Leaf) && n.requires)
-            .map(|n| n.grad.borrow().iter().map(|x| x * x).sum::<f64>())
+            .zip(&grads)
+            .map(|(n, g)| match g {
+                Some(Grad::Cpu(v)) => v.iter().map(|x| x * x).sum::<f64>(),
+                Some(Grad::Dev(d)) => crate::gpu::sum_all(d, n.len(), true).unwrap_or_else(|_| crate::gpu::download(d, n.len()).map(|v| v.iter().map(|x| x * x).sum()).unwrap_or(0.0)),
+                None => 0.0,
+            })
             .sum();
         let norm = total.sqrt();
         if norm > limit && norm > 0.0 {
             scale = limit / norm;
         }
     }
-    for n in &order {
-        if matches!(n.op, Op::Leaf) && n.requires {
-            if scale != 1.0 {
-                n.grad.borrow_mut().iter_mut().for_each(|x| *x *= scale);
-            }
-            let g = n.grad.borrow();
-            if !g.is_empty() {
-                let mut d = n.data.borrow_mut();
-                if optim == Optim::Adam || optim == Optim::AdamW {
-                    let mut o = n.opt.borrow_mut();
-                    let len = d.len();
-                    let st = o.get_or_insert_with(|| Adam {
-                        m: vec![0.0; len],
-                        v: vec![0.0; len],
-                        t: 0,
-                    });
-                    st.t += 1;
-                    let (b1, b2) = (0.9f64, 0.999f64);
-                    let c1 = 1.0 - b1.powi(st.t);
-                    let c2 = 1.0 - b2.powi(st.t);
-                    let decay = if optim == Optim::AdamW { 0.01 } else { 0.0 };
-                    for i in 0..len {
-                        st.m[i] = b1 * st.m[i] + (1.0 - b1) * g[i];
-                        st.v[i] = b2 * st.v[i] + (1.0 - b2) * g[i] * g[i];
-                        // (written exactly as before AdamW existed, so Adam's results don't change)
-                        let step = rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
-                        d[i] -= if decay == 0.0 { step } else { step + rate * decay * d[i] };
-                    }
-                } else if optim == Optim::Momentum {
-                    let mut o = n.opt.borrow_mut();
-                    let len = d.len();
-                    let st = o.get_or_insert_with(|| Adam { m: vec![0.0; len], v: vec![], t: 0 });
-                    for i in 0..len {
-                        st.m[i] = 0.9 * st.m[i] + g[i];
-                        d[i] -= rate * st.m[i];
-                    }
-                } else {
-                    for i in 0..d.len() {
-                        d[i] -= rate * g[i];
-                    }
+    for (n, g) in params.into_iter().zip(grads) {
+        match g {
+            None => {}
+            Some(Grad::Dev(d)) if gpu_on() => {
+                if gpu_step(n, &d, rate, optim, scale).is_err() {
+                    cpu_step(n, grad_vec(Grad::Dev(d), n.len()), rate, optim, scale);
                 }
             }
+            Some(g) => {
+                let v = grad_vec(g, n.len());
+                cpu_step(n, v, rate, optim, scale);
+            }
         }
-        n.grad.borrow_mut().clear();
     }
+    for n in &order {
+        n.grad.borrow_mut().clear();
+        *n.dgrad.borrow_mut() = None;
+    }
+    Ok(())
+}
+
+/// One optimiser step on the CPU.
+fn cpu_step(n: &Node, mut g: Vec<f64>, rate: f64, optim: Optim, scale: f64) {
+    if g.is_empty() {
+        return;
+    }
+    if scale != 1.0 {
+        g.iter_mut().for_each(|x| *x *= scale);
+    }
+    // memory kept on the GPU comes back to carry on here
+    if let Some(o) = n.dopt.borrow_mut().take() {
+        let len = n.len();
+        let m = crate::gpu::download(&o.m, len).unwrap_or_else(|_| vec![0.0; len]);
+        let v = if optim == Optim::Momentum { vec![] } else { crate::gpu::download(&o.v, len).unwrap_or_else(|_| vec![0.0; len]) };
+        *n.opt.borrow_mut() = Some(Adam { m, v, t: o.t });
+    }
+    let mut d = n.vals_mut();
+    if optim == Optim::Adam || optim == Optim::AdamW {
+        let mut o = n.opt.borrow_mut();
+        let len = d.len();
+        let st = o.get_or_insert_with(|| Adam {
+            m: vec![0.0; len],
+            v: vec![0.0; len],
+            t: 0,
+        });
+        if st.v.len() != len {
+            st.v = vec![0.0; len];
+        }
+        st.t += 1;
+        let (b1, b2) = (0.9f64, 0.999f64);
+        let c1 = 1.0 - b1.powi(st.t);
+        let c2 = 1.0 - b2.powi(st.t);
+        let decay = if optim == Optim::AdamW { 0.01 } else { 0.0 };
+        for i in 0..len {
+            st.m[i] = b1 * st.m[i] + (1.0 - b1) * g[i];
+            st.v[i] = b2 * st.v[i] + (1.0 - b2) * g[i] * g[i];
+            // (written exactly as before AdamW existed, so Adam's results don't change)
+            let step = rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
+            d[i] -= if decay == 0.0 { step } else { step + rate * decay * d[i] };
+        }
+    } else if optim == Optim::Momentum {
+        let mut o = n.opt.borrow_mut();
+        let len = d.len();
+        let st = o.get_or_insert_with(|| Adam { m: vec![0.0; len], v: vec![], t: 0 });
+        for i in 0..len {
+            st.m[i] = 0.9 * st.m[i] + g[i];
+            d[i] -= rate * st.m[i];
+        }
+    } else {
+        for i in 0..d.len() {
+            d[i] -= rate * g[i];
+        }
+    }
+}
+
+/// One optimiser step on the GPU: the values and the optimiser's memory
+/// stay there.
+fn gpu_step(n: &Node, g: &crate::gpu::Buf, rate: f64, optim: Optim, scale: f64) -> Result<(), String> {
+    let len = n.len();
+    let p = n.on_gpu()?;
+    let mut slot = n.dopt.borrow_mut();
+    if slot.is_none() {
+        // memory kept on the CPU so far moves to the GPU
+        let cpu = n.opt.borrow_mut().take();
+        *slot = Some(match cpu {
+            Some(a) => DevOpt {
+                m: if a.m.len() == len { crate::gpu::upload(&a.m)? } else { crate::gpu::fill(0.0, len)? },
+                v: if a.v.len() == len { crate::gpu::upload(&a.v)? } else { crate::gpu::fill(0.0, len)? },
+                t: a.t,
+            },
+            None => DevOpt { m: crate::gpu::fill(0.0, len)?, v: crate::gpu::fill(0.0, len)?, t: 0 },
+        });
+    }
+    let o = slot.as_mut().unwrap();
+    let (method, c1, c2, decay) = match optim {
+        Optim::Adam | Optim::AdamW => {
+            let t = o.t + 1;
+            (crate::gpu::ADAM, 1.0 - 0.9f64.powi(t), 1.0 - 0.999f64.powi(t), if optim == Optim::AdamW { 0.01 } else { 0.0 })
+        }
+        Optim::Momentum => (crate::gpu::MOMENTUM, 1.0, 1.0, 0.0),
+        Optim::Sgd => (crate::gpu::SGD, 1.0, 1.0, 0.0),
+    };
+    let fresh = crate::gpu::optimise(method, &p, g, &o.m, &o.v, len, [rate as f32, c1 as f32, c2 as f32, decay as f32, scale as f32])?;
+    if method == crate::gpu::ADAM {
+        o.t += 1;
+    }
+    *n.dev.borrow_mut() = Some(fresh);
+    n.host_ok.set(false);
     Ok(())
 }
 
@@ -1004,12 +1434,13 @@ pub fn grad_of(loss: &T, wrt: &T) -> Vec<f64> {
         return vec![0.0; wrt.len()];
     }
     let order = backward(loss);
-    let mut g = wrt.grad.borrow().clone();
-    if g.is_empty() {
-        g = vec![0.0; wrt.len()];
-    }
+    let g = match take_grad(wrt) {
+        Some(g) => grad_vec(g, wrt.len()),
+        None => vec![0.0; wrt.len()],
+    };
     for n in &order {
         n.grad.borrow_mut().clear();
+        *n.dgrad.borrow_mut() = None;
     }
     g
 }

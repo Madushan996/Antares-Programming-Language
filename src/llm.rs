@@ -1098,8 +1098,8 @@ pub fn b_similarity(_: &mut crate::interp::Interp, a: Vec<Value>) -> Result<Valu
     crate::builtins::want(&a, 2, "similarity")?;
     let q = crate::builtins::ten(&a[0], "similarity")?;
     let t = crate::builtins::ten(&a[1], "similarity")?;
-    let qd = q.data.borrow();
-    let td = t.data.borrow();
+    let qd = q.vals();
+    let td = t.vals();
     if q.shape.len() != 1 || qd.is_empty() {
         return Err("similarity needs a row of numbers first, like the result of embed".into());
     }

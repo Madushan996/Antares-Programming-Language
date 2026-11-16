@@ -23,11 +23,16 @@ jobs:
 
       - name: Unit tests
         run: cargo test --release
+        env:
+          # machines without a graphics card test the GPU code with Windows' software GPU
+          ANTARES_GPU: warp
 
       - name: Self-check suites
         shell: bash
+        env:
+          ANTARES_GPU: warp
         run: |
-          for t in check features engine integers graphics sound deep_learning; do
+          for t in check features engine integers graphics sound deep_learning gpu; do
             ./target/release/antares tests/$t.ant
           done
 
