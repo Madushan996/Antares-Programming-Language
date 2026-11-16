@@ -39,6 +39,12 @@ jobs:
             ./target/release/antares examples/$e.ant
           done
 
+      - name: Language models (offline, against a pretend service)
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" tests/check_models.py
+
       - name: Packed programs match the interpreter
         shell: bash
         run: |

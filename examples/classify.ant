@@ -1,0 +1,40 @@
+# Two spirals: teach a network to tell two interleaved spirals apart.
+# Shows: making data, shuffle and batches, he/xavier starting weights, gelu,
+# cross_entropy, descend using adamw with clip, and accuracy.
+
+seed(42)
+
+# 200 points on each of two spirals, labelled 0 and 1
+points = []
+labels = []
+repeat 200 as i {
+    r = i / 200 * 5
+    each arm in [0, 1] {
+        a = r * 1.6 + arm * 3.14159
+        points = push(points, [r * cos(a), r * sin(a)])
+        labels = push(labels, arm)
+    }
+}
+x = points / 5           # a list of rows of numbers is a table
+y = labels
+
+# a network with two hidden layers
+learn w1 = he(2, 32)
+learn b1 = zeros(32)
+learn w2 = he(32, 32)
+learn b2 = zeros(32)
+learn w3 = xavier(32, 2)
+learn b3 = zeros(2)
+
+to scores(input) = gelu(gelu(input @ w1 + b1) @ w2 + b2) @ w3 + b3
+
+repeat 60 as epoch {
+    order = shuffle(range(len(y)))
+    each batch in batches(order, 50) {
+        loss = cross_entropy(scores(take(x, batch)), take(y, batch))
+        descend loss by 0.01 using adamw clip 1
+    }
+    when epoch % 15 == 0 { show "epoch {epoch}: loss {fixed(loss, 3)}" }
+}
+
+show "accuracy: {round(accuracy(scores(x), y) * 100)}%"

@@ -1,0 +1,94 @@
+# Tiny GPT: a small transformer, the kind of model behind modern AI
+# chatbots, that learns to write text one character at a time.
+#
+# It has everything a real GPT has, only smaller: token and position
+# embeddings, self-attention with a causal mask, a feed-forward layer,
+# layer normalisation and residual connections. Trained on the verse
+# below for a few seconds, it learns the pattern and writes new lines.
+
+text = "the moon is a lantern over the sea.
+the sea is a mirror under the moon.
+the wind is a song over the hills.
+the hills are a cradle under the wind.
+the stars are seeds over the night.
+the night is a garden under the stars.
+the sun is a fire over the fields.
+the fields are a blanket under the sun.
+the rain is a drum over the roofs.
+the roofs are a choir under the rain.
+the snow is a letter over the town.
+the town is a story under the snow.
+"
+
+# ----- the alphabet: every character gets a number -----
+chars = sort(unique(map(text, c => c)))
+number_of = {}
+each i in range(len(chars)) { number_of[chars[i]] = i }
+to encode(s) = map(s, c => number_of[c])
+to decode(ids) = join(map(ids, i => chars[i]), "")
+data = encode(text)
+vocab = len(chars)
+
+# ----- the model -----
+seed(11)
+context = 24                     # how many characters it looks at
+width = 48                       # numbers per character inside the model
+
+learn token_emb = randn(vocab, width) * 0.1
+learn pos_emb = randn(context, width) * 0.1
+learn wq = xavier(width, width)
+learn wk = xavier(width, width)
+learn wv = xavier(width, width)
+learn wo = xavier(width, width) * 0.5
+learn g1 = ones(width)
+learn g2 = ones(width)
+learn g3 = ones(width)
+learn w_up = he(width, 4 * width)
+learn b_up = zeros(4 * width)
+learn w_down = xavier(4 * width, width) * 0.5
+learn b_down = zeros(width)
+learn w_out = xavier(width, vocab)
+
+# self-attention: every position looks back at the ones before it
+to attention(h) {
+    n = shape(h)[0]
+    q = h @ wq
+    k = h @ wk
+    v = h @ wv
+    weights = softmax(q @ t(k) / sqrt(width) + causal_mask(n))
+    weights @ v @ wo
+}
+
+# scores for the next character, at every position
+to forward(ids) {
+    n = len(ids)
+    h = take(token_emb, ids) + take(pos_emb, range(n))
+    h = h + attention(layer_norm(h) * g1)
+    h = h + gelu(layer_norm(h) * g2 @ w_up + b_up) @ w_down + b_down
+    layer_norm(h) * g3 @ w_out
+}
+
+# ----- training: guess each next character, and learn from mistakes -----
+repeat 1500 as step {
+    start = floor(rand() * (len(data) - context - 1))
+    inputs = data[start:start + context]
+    targets = data[start + 1:start + context + 1]
+    loss = cross_entropy(forward(inputs), targets)
+    descend loss by 0.003 using adamw clip 1
+    when step % 300 == 0 { show "step {step}: loss {fixed(loss, 3)}" }
+}
+show ""
+
+# ----- writing: pick each next character from the model's guesses -----
+to write(prompt, length) {
+    ids = encode(prompt)
+    repeat length {
+        recent = ids[max(0, len(ids) - context):len(ids)]
+        scores = forward(recent)
+        probabilities = softmax(scores[len(recent) - 1])
+        ids = push(ids, sample(probabilities, 0.7))
+    }
+    give decode(ids)
+}
+
+show write("the ", 160)

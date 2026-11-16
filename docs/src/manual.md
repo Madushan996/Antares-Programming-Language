@@ -1,6 +1,6 @@
 # Introduction {#intro}
 
-Antares is a small programming language for artificial intelligence. Tensors, automatic differentiation and calls to large language models are part of the language itself, not libraries you have to install and import. A model that learns, a neural network, and a program that asks Claude a question are each a few lines of plain, readable code.
+Antares is the programming language for artificial intelligence. Tensors, automatic differentiation, the building blocks of deep learning (attention, layer normalisation, cross-entropy, AdamW) and calls to large language models (Claude, OpenAI and local models) are part of the language itself, not libraries you have to install and import. A model that learns, a GPT-style transformer, a chatbot that remembers, and an agent that calls your own functions are each a few lines of plain, readable code.
 
 ## Design principles
 
@@ -867,15 +867,20 @@ descend loss by 0.05
 
 Behind the scenes, Antares records how every number was computed from learnable values (reverse-mode automatic differentiation). `descend` works backwards through that record to find the gradient of the loss with respect to each learnable value, then takes a step in the direction that reduces the loss.
 
-## Optimisers: sgd and adam
+## Optimisers
 
 ```antares
 descend loss by 0.05                 # plain gradient descent
 descend loss by 0.05 using sgd       # the same, said explicitly
+descend loss by 0.05 using momentum  # gradient descent with momentum (0.9)
 descend loss by 0.05 using adam      # the Adam optimiser
+descend loss by 0.05 using adamw     # Adam with weight decay (0.01)
+descend loss by 0.05 using adam clip 1
 ```
 
-The number after `by` is the learning rate. Adam keeps a running memory of past gradients for each learnable value and usually trains neural networks much faster.
+The number after `by` is the learning rate. Adam keeps a running memory of past gradients for each learnable value and usually trains neural networks much faster. AdamW also pulls every learnable value slightly towards zero at each step, which helps large networks generalise. Momentum keeps a running sum of past gradients, so steps build up speed in a steady direction.
+
+`clip <limit>` works with every method. Before the step, the gradients' overall size (the square root of the sum of the squares of every gradient of every learnable value) is measured; when it is above the limit, all gradients are scaled down so that it equals the limit. This keeps training steady when an occasional batch would otherwise make a huge step.
 
 ## Gradients without changing anything
 
@@ -888,7 +893,7 @@ show grad(sum(w ^ 2), w)             # [2, 4, 6]
 
 ## What gradients flow through
 
-Gradients flow through `+ - * / ^ @`, indexing and slices, the functions `exp log tanh sigmoid relu sqrt abs sin cos`, and `sum mean softmax t reshape` (including `sum` and `mean` along a dimension). `floor`, `round`, `trunc` and comparisons produce plain values that do not carry a gradient.
+Gradients flow through `+ - * / ^ @`, indexing and slices, the functions `exp log tanh sigmoid relu sqrt abs sin cos gelu silu softplus leaky_relu`, `sum mean softmax log_softmax t reshape` (including `sum` and `mean` along a dimension), `take concat layer_norm dropout`, and the losses `cross_entropy mse bce`. `floor`, `round`, `trunc` and comparisons produce plain values that do not carry a gradient.
 
 ## Example: learning a straight line
 
@@ -947,18 +952,88 @@ show net(x) -> round
  [0]]
 ```
 
-## Classification with softmax
+## Classification
 
-Cross-entropy classification is written directly from the formula:
+`cross_entropy(scores, answers)` is the usual loss for choosing between classes. `scores` has one row per example and one column per class, and holds raw scores: softmax is part of the loss, computed in a way that can't overflow. `answers` are the right class numbers, one per row, or the right probabilities, shaped like the scores:
 
 ```antares
-target = onehot(labels, 2)
 learn cw = zeros(2, 2)
 repeat 200 {
-    ce = -sum(target * log(softmax(pts @ cw))) / 60
-    descend ce by 0.5
+    descend cross_entropy(pts @ cw, labels) by 0.5
+}
+show accuracy(pts @ cw, labels)
+```
+
+The same loss can be written from the formula, `-sum(onehot(labels, 2) * log_softmax(scores)) / rows`, which gives the same result.
+
+## Deep learning building blocks
+
+| Function | What it does |
+|---|---|
+| `gelu(x)`, `silu(x)`, `softplus(x)`, `leaky_relu(x)` | Activations. GELU (the tanh form used by GPT models), SiLU (x times sigmoid(x)), log(1 + e^x), and relu that lets 1% through below zero |
+| `log_softmax(x)` | The log of softmax along the last dimension, without overflow |
+| `cross_entropy(scores, answers)` | The classification loss above |
+| `mse(guess, target)` | Mean squared error |
+| `bce(probability, target)` | Binary cross-entropy, for yes/no predictions made with `sigmoid` |
+| `take(table, positions)` | The rows of `table` at those positions, in order: an embedding lookup. Gradients reach exactly the rows taken. A single position gives a single row |
+| `concat(tensors [, dimension])` | Joins a list of tensors along a dimension (0 unless given); the other dimensions must match |
+| `layer_norm(x [, eps])` | Each row scaled to mean 0 and spread 1 along the last dimension. Multiply by a learned gain and add a learned bias afterwards |
+| `dropout(x, p)` | Sets each value to 0 with probability `p` and scales the rest by 1 / (1 - p); `dropout(x, 0)` is `x` |
+| `causal_mask(n)` | An n by n table: 0 on and below the diagonal, -1000000000 above. Added to attention scores, it stops a position from seeing later ones |
+| `he(inputs, outputs)`, `xavier(inputs, outputs)` | Random starting weights scaled for relu-like and for tanh-like activations |
+| `accuracy(scores, answers)` | The fraction of rows whose highest score is the right class |
+| `top(values, k)` | The positions of the k largest values, largest first |
+| `sample(probabilities [, temperature])` | A random position, chosen with those probabilities. Below 1, the temperature favours likely choices; above 1, it spreads them out |
+
+`seed` controls `dropout`, `sample`, `shuffle`, `he` and `xavier` as well as `rand` and `randn`.
+
+## Attention and transformers
+
+With these, a transformer block is written directly. Self-attention, where every position of a sequence looks back at the ones before it:
+
+```antares
+to attention(h) {
+    n = shape(h)[0]
+    q = h @ wq
+    k = h @ wk
+    v = h @ wv
+    weights = softmax(q @ t(k) / sqrt(width) + causal_mask(n))
+    weights @ v @ wo
+}
+
+to block(h) {
+    h = h + attention(layer_norm(h) * g1)
+    h + gelu(layer_norm(h) * g2 @ w_up + b_up) @ w_down + b_down
 }
 ```
+
+`examples/tiny_gpt.ant` builds a complete character-level GPT this way: token and position embeddings with `take`, one block, and an output layer, trained with `cross_entropy` and `descend ... using adamw clip 1`. It learns a page of text in a few seconds and then writes new text with `sample`.
+
+## Data
+
+| Function | What it does |
+|---|---|
+| `read_csv(file)` | A CSV file as a list of maps, named by the first line. Numbers become numbers, empty fields `nothing`, and quoted fields may hold commas. Embedded files (`"embedded:<name>"`) work too |
+| `columns(rows, names)` | Numbers from a list of maps as a table, one row per map and one column per name. With a single name (not a list), one row of numbers |
+| `shuffle(x)` | The items of a list, or the rows of a tensor, in random order |
+| `batches(x, size)` | A list of pieces of a list or tensor, each `size` items or rows long (the last may be shorter) |
+
+Shuffling positions, rather than the data itself, keeps inputs and answers together:
+
+```antares
+rows = read_csv("houses.csv")
+x = columns(rows, ["size", "rooms"])
+y = columns(rows, "price")
+repeat 50 {
+    each batch in batches(shuffle(range(len(y))), 32) {
+        descend mse(take(x, batch) @ w + b, take(y, batch)) by 0.01 using adam
+    }
+}
+```
+
+## Speed
+
+Large matrix multiplications, and their gradients, are shared across all the CPU's cores. Each number is still added up by one core, in the same order as on one core, so results are exactly the same however many cores a computer has.
 
 ## Learnable values inside functions and maps
 
@@ -994,12 +1069,26 @@ learn w1 = saved.w1                  # carry on training, or just use it
 model claude = "anthropic:claude-opus-5-5" with {system: "Be brief."}
 ```
 
-The text names the provider and model, separated by a colon. A name that starts with `claude` may leave out the `anthropic:` prefix. The optional `with` map sets options:
+The text names the provider and model, separated by a colon. A name that starts with `claude` may leave out the `anthropic:` prefix.
+
+| Provider | Example | Needs |
+|---|---|---|
+| `anthropic` | `"anthropic:claude-opus-5-5"` | `ANTHROPIC_API_KEY` |
+| `openai` | `"openai:gpt-5"` | `OPENAI_API_KEY` |
+| `openai` with `url` | `"openai:llama-3.3"` with `{url: "http://localhost:1234/v1"}` | Any service with OpenAI's interface; its key in `OPENAI_API_KEY` if it needs one |
+| `ollama` | `"ollama:llama3.2"` | Ollama running on this computer, and the model fetched with `ollama pull llama3.2` |
+| `echo` | `"echo"` | Nothing: a pretend model for working offline |
+
+The optional `with` map sets options:
 
 | Option | Kind | Meaning | Default |
 |---|---|---|---|
 | `system` | text | A system prompt that guides every answer | none |
-| `max_tokens` | number | The longest answer allowed, in tokens | 16000 |
+| `max_tokens` | number | The longest answer allowed, in tokens | 16000 (64000 when streaming) for Anthropic; the service's own for others |
+| `effort` | text | How hard Claude thinks: `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"` (Anthropic only) | the model's own |
+| `stream` | yes/no | Show the reply as it arrives | `no` |
+| `tools` | list | Functions the model may call (below) | none |
+| `url` | text | The service's address, for proxies and OpenAI-style services | the provider's own |
 
 ## Asking
 
@@ -1009,14 +1098,15 @@ The text names the provider and model, separated by a colon. A name that starts 
 answer = ask claude "Explain {topic} in one sentence."
 ```
 
-## Typed answers
+## Answers as values
 
 `as` turns the reply into a real value you can calculate with:
 
 ```antares
-count = ask claude "How many moons does Mars have?" as number
-sure  = ask claude "Is 91 a prime number?" as yes/no
-ideas = ask claude "Give me five names for a cat." as list
+count  = ask claude "How many moons does Mars have?" as number
+sure   = ask claude "Is 91 a prime number?" as yes/no
+ideas  = ask claude "Give me five names for a cat." as list
+person = ask claude "Describe Ada Lovelace." as {name: text, born: number, known_for: list of text}
 ```
 
 | Form | Result |
@@ -1025,16 +1115,83 @@ ideas = ask claude "Give me five names for a cat." as list
 | `as number` | The number in the reply |
 | `as yes/no` | `yes` or `no` |
 | `as list` | A list of text, one item per line of the reply |
+| `as list of <shape>` | A list whose items have that shape: `list of number`, `list of {name: text}` |
+| `as {field: <shape>, ...}` | A map with exactly those fields; shapes can nest |
 
-If the reply cannot be read as the requested kind, that is a problem that `try` can catch.
+Shapes (`list of ...` and maps) are sent to the model as a JSON schema and use its structured output, so the answer always fits. If a reply can't be read as the requested kind, that is a problem that `try` can catch.
+
+## Conversations
+
+`conversation(model)` makes a model that remembers: every `ask` sends what was said before, and adds the new question and answer.
+
+```antares
+chat = conversation(claude)
+ask chat "My name is Ada."
+show ask chat "What is my name?"
+show history(chat)          # [{role: "user", text: "My name is Ada."}, ...]
+```
+
+`history(chat)` is the conversation so far, as a list of `{role, text}` maps (roles are `user`, `assistant` and `tool`). `conversation(chat)` starts a new conversation from a copy of an existing one, so the two can go different ways.
+
+## Tools: models that call your functions
+
+A model given `tools` can call those Antares functions while it answers. Antares runs each call with the inputs the model chose, gives the result back to the model, and repeats until the model gives its final answer:
+
+<!-- norun -->
+```antares
+to weather(city) = "sunny and 31 degrees in {city}"
+to percent(amount, rate) = amount * rate / 100
+
+model helper = "anthropic:claude-opus-5-5" with {tools: [weather, percent]}
+show ask helper "Is it hot in Kandy today? And what is 17% of 2450?"
+```
+
+The model sees each function's name and the names of its inputs. A map describes a tool more fully:
+
+```antares
+{run: weather, name: "today_weather", about: "Today's weather for a city", inputs: {city: "text"}}
+```
+
+`run` is the function; `name` (letters, digits, `_` and `-`), `about` and `inputs` are optional. Inputs are `"number"`, `"text"`, `"yes/no"` or `"list"`, in the function's order. A function's result goes back to the model as text (maps and lists as JSON). A problem in a tool doesn't stop the program: it is reported to the model, which can try something else. A model may call several tools at once and up to 25 rounds of tools per `ask`. Tools work in conversations, where the calls and results are remembered too.
+
+## Images
+
+`image(file)` reads a .png, .jpg, .gif or .webp file for a prompt, after `with`:
+
+<!-- norun -->
+```antares
+show ask claude "What is in this picture?" with image("photo.jpg")
+show ask claude "Which is bigger?" with [image("a.png"), image("b.png")]
+```
+
+A prompt can also be a list of text and images: `ask claude ["Compare", image("a.png"), image("b.png")]` when the list is held in a variable.
+
+## Streaming
+
+With `stream: yes`, the reply is shown as it arrives and still given back as the value of `ask`. It works with every provider, with tools and in conversations. Structured answers (`as` with a shape) stream too, but aren't shown, since they are JSON.
+
+## Embeddings
+
+`embed(model, text)` gives a row of numbers that stands for the meaning of a text; with a list of texts, one row per text. `similarity(a, b)` is the cosine similarity of two rows (from -1 to 1), or with a table as `b`, one score per row:
+
+<!-- norun -->
+```antares
+model embedder = "openai:text-embedding-3-small"
+notes = ["The museum is closed on Mondays.", "Bus 138 goes to Colombo every half hour."]
+vectors = embed(embedder, notes)
+scores = similarity(embed(embedder, "When can I visit the museum?"), vectors)
+show notes[top(scores, 1)[0]]
+```
+
+Anthropic doesn't make embeddings: use OpenAI, an OpenAI-style service, Ollama (for example `"ollama:nomic-embed-text"`), or `"echo"`, whose embeddings count letter triples so that texts sharing words come out similar. `examples/search.ant` answers questions from a set of notes this way.
 
 ## Setting up access
 
-Set the `ANTHROPIC_API_KEY` environment variable to your API key before running the program. Requests are sent with the `curl` program that comes with Windows, macOS and Linux, so Antares needs no networking library and stays small.
+Set the API key for the provider (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`) before running the program; Ollama needs none. Requests are sent with the `curl` program that comes with Windows, macOS and Linux, so Antares needs no networking library and stays small. Keys are passed to curl through its standard input, so they never appear in the list of running programs.
 
 ## Working offline: the echo model
 
-`model fake = "echo"` makes a pretend model that repeats the prompt back. Programs can be written and tested without a network connection or API key, then switched to a real model by changing one line:
+`model fake = "echo"` makes a pretend model that repeats the prompt back. Programs can be written and tested without a network connection or API key, then switched to a real model by changing one line. Asked for a shape, it makes up an answer of that shape (0, empty lists, and the prompt as text):
 
 ```antares
 model claude = "echo"
@@ -1059,7 +1216,7 @@ Explain red giant stars in one sentence.
 
 ## Handling failures
 
-Network errors, a missing key and unreadable answers are ordinary problems, so wrap calls that must not stop the program in `try`:
+Network errors, a missing key, a refusal and unreadable answers are ordinary problems, so wrap calls that must not stop the program in `try`:
 
 ```antares
 try {
@@ -1534,8 +1691,28 @@ Inputs in brackets `[ ]` are optional. "Tensor" means a number or any list of nu
 | Function | Description |
 |---|---|
 | `grad(loss, w)` | Gradient of `loss` with respect to the learnable value `w` |
+| `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax` | Activations |
+| `cross_entropy(scores, answers)`, `mse(a, b)`, `bce(p, y)` | Losses |
+| `take(table, positions)` | Rows by position (embedding lookup) |
+| `concat(tensors [, dim])` | Join tensors |
+| `layer_norm(x [, eps])`, `dropout(x, p)`, `causal_mask(n)` | Layers |
+| `he(i, o)`, `xavier(i, o)` | Starting weights |
+| `accuracy(scores, answers)`, `top(values, k)`, `sample(p [, temperature])` | Reading results |
+| `read_csv(file)`, `columns(rows, names)`, `shuffle(x)`, `batches(x, size)` | Data |
 
 The statements `learn` and `descend` are described in Chapter 11.
+
+## Language models
+
+| Function | Description |
+|---|---|
+| `conversation(model)` | A model that remembers the conversation |
+| `history(chat)` | A conversation so far, as `{role, text}` maps |
+| `image(file)` | A picture for a prompt |
+| `embed(model, text)` | A row of numbers for a text (a table for a list of texts) |
+| `similarity(a, b)` | Cosine similarity (one score per row when `b` is a table) |
+
+The statements `model` and `ask` are described in Chapter 12.
 
 ## Lists and maps
 
@@ -1669,7 +1846,8 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/vm.rs` | The fast engine: translates functions to instructions and runs them |
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
 | `src/value.rs` | The value kinds and how they print |
-| `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, SGD and Adam |
+| `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
+| `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the font, PNG screenshots, and the Windows window |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
@@ -1684,9 +1862,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 This is version 0.7. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
-- Tools and multi-turn chat for language models.
-- Model providers other than Anthropic.
-- GPU support.
+- GPU support (planned next).
 - Game windows and sound on macOS and Linux.
 
 # Grammar Summary {#grammar .appendix}

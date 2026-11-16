@@ -17,6 +17,7 @@ ANTARES = os.path.join(ROOT, "target", "release", "antares.exe" if os.name == "n
 DEFAULT = [
     "tests/check.ant", "tests/features.ant", "tests/engine.ant", "tests/integers.ant", "tests/counters.ant", "tests/rows.ant", "tests/lists.ant", "tests/tables.ant", "tests/compact.ant", "tests/while_loops.ant", "tests/argmax.ant", "tests/nothing.ant", "tests/ranges.ant", "tests/within.ant", "tests/everyday.ant",
     "examples/hello.ant", "examples/line.ant", "examples/xor.ant", "examples/ask.ant",
+    "examples/classify.ant", "examples/tiny_gpt.ant", "examples/search.ant", "tests/deep_learning.ant",
 ]
 
 

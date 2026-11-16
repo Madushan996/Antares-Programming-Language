@@ -3,10 +3,13 @@
 [![CI](https://github.com/Madushan996/Antares-Programming-Language/actions/workflows/ci.yml/badge.svg)](https://github.com/Madushan996/Antares-Programming-Language/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A small programming language for AI. Tensors, automatic differentiation and
-language-model calls are part of the language itself, not libraries.
+**The programming language for AI.** Train neural networks, talk to
+language models, and build AI agents in one small, friendly language.
+Tensors, automatic differentiation, the building blocks of transformers, and
+calls to Claude, OpenAI and local models are part of the language itself, not
+libraries you install.
 
-> **Status: experimental preview (0.1).** Antares is ready to try, learn and
+> **Status: experimental preview.** Antares is ready to try, learn and
 > experiment with. The language may still change between versions, so programs
 > written today may need small updates later. Feedback and bug reports are very
 > welcome in [Issues](https://github.com/Madushan996/Antares-Programming-Language/issues).
@@ -17,27 +20,49 @@ covers the whole language, every built-in function, and complete examples.
 📗 **New to programming?** [Learn Antares: A Beginner's Guide (PDF)](docs/Learn_Antares.pdf)
 teaches programming from the very first step, with exercises and answers.
 
-- **One file, no dependencies.** The whole language is a single ~680 KB
-  program written in Rust with zero external crates. It starts instantly.
+**Train a model.** `learn` marks what may change; `descend` improves it.
+Layers, losses and optimisers are built in, and matrix maths uses every core:
+
+```
+learn w1 = he(2, 32)
+learn w2 = xavier(32, 2)
+
+repeat 500 {
+    loss = cross_entropy(gelu(x @ w1) @ w2, labels)
+    descend loss by 0.01 using adamw clip 1
+}
+```
+
+**Ask a model.** Answers come back as real values in the shape you ask for:
+
+```
+model claude = "anthropic:claude-opus-5-5"
+
+person = ask claude "Who wrote Gitanjali?" as {name: text, born: number}
+show person.born + 100
+```
+
+**Build an agent.** Give a model your own functions as tools, and it calls them:
+
+```
+to percent(amount, rate) = amount * rate / 100
+
+model helper = "anthropic:claude-opus-5-5" with {tools: [percent]}
+show ask helper "What is 17% of 2450?"
+```
+
+- **AI in the language.** Conversations, tools, structured answers, images,
+  streaming and embeddings for language models; tensors, autodiff,
+  attention, layer norm, cross-entropy and AdamW for training your own.
+  `examples/tiny_gpt.ant` is a working GPT-style transformer in about 100 lines.
+- **Any model.** Claude, OpenAI and services like it, or free and private
+  models on your own computer with Ollama.
+- **One file, no dependencies.** The whole language is a single small program
+  written in Rust with zero external crates. It starts instantly.
 - **Reads like plain verbs.** `learn`, `descend`, `ask`, `show`, `repeat`,
   `each`, `when`, `to`, `give`.
 - **Friendly errors.** Every problem names the line, shows it, and says what
   to do in plain words.
-
-```
-learn slope = 0
-learn offset = 0
-
-repeat 400 {
-    loss = mean((slope * x + offset - y) ^ 2)
-    descend loss by 0.05
-}
-```
-
-```
-model claude = "anthropic:claude-opus-5-5"
-count = ask claude "How many moons does Mars have?" as number
-```
 
 ## Contents
 
@@ -48,7 +73,7 @@ count = ask claude "How many moons does Mars have?" as number
 - [Making an executable to share](#making-an-executable-to-share)
 - [Troubleshooting](#troubleshooting)
 - [The language in five minutes](#the-language-in-five-minutes)
-- [Machine learning](#machine-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Sound](#sound) · [Built-in functions](#built-in-functions)
+- [Deep learning](#deep-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Sound](#sound) · [Built-in functions](#built-in-functions)
 
 ## Install
 
@@ -454,7 +479,7 @@ to put(piece within 0 to 15, square within 0 to 63) {
 put(3, 64)      # problem: square only holds numbers from 0 to 63, not 64
 ```
 
-## Machine learning
+## Deep learning
 
 `learn` declares a value the program is allowed to adjust. `descend`
 adjusts every `learn` variable that a number depends on, to make that
@@ -495,8 +520,54 @@ learn w1 = saved.w1                      # carry on training, or just use it
 `examples/train_save.ant` trains a network on the first run and reuses it on
 later runs.
 
-Gradients flow through: `+ - * / ^ @`, indexing, `exp log tanh sigmoid relu
-sqrt abs sin cos`, `sum mean softmax t reshape`, and slices.
+Gradients flow through: `+ - * / ^ @`, indexing, slices, `exp log tanh
+sigmoid relu sqrt abs sin cos`, `gelu silu softplus leaky_relu`, `sum mean
+softmax log_softmax t reshape`, `take concat layer_norm dropout`, and the
+losses.
+
+### Building blocks
+
+| Kind | Functions |
+|---|---|
+| Activations | `relu`, `gelu`, `silu`, `tanh`, `sigmoid`, `softplus`, `leaky_relu`, `softmax`, `log_softmax` |
+| Losses | `cross_entropy(scores, answers)` (softmax built in; answers as class numbers or probabilities), `mse(guess, target)`, `bce(probability, target)` |
+| Layers | `take(table, positions)` (rows by position: an embedding lookup), `concat(tensors [, dimension])`, `layer_norm(x)`, `dropout(x, p)`, `causal_mask(n)` (for attention) |
+| Starting weights | `he(inputs, outputs)` for relu and gelu, `xavier(inputs, outputs)` for tanh and sigmoid |
+| Results | `accuracy(scores, answers)`, `top(values, k)` (positions of the largest), `sample(probabilities [, temperature])` |
+
+### Optimisers
+
+```
+descend loss by 0.1                          # plain gradient descent
+descend loss by 0.05 using momentum
+descend loss by 0.01 using adam
+descend loss by 0.01 using adamw clip 1      # weight decay, and gradients limited to size 1
+```
+
+`clip` works with any method: when the gradients' overall size is larger
+than the limit, they are scaled down to it, which keeps training steady.
+
+### Data
+
+```
+rows = read_csv("houses.csv")                # a list of maps, numbers already numbers
+x = columns(rows, ["size", "rooms"])         # a table: one row per house
+y = columns(rows, "price")                   # one number per house
+
+each batch in batches(shuffle(range(len(y))), 32) {
+    loss = mse(take(x, batch) @ w, take(y, batch))
+    descend loss by 0.01 using adam
+}
+```
+
+### A tiny GPT
+
+`examples/tiny_gpt.ant` is a GPT-style transformer, the kind of model behind
+modern chatbots, in about 100 lines: token and position embeddings,
+self-attention with a causal mask, a feed-forward layer, layer norm and
+residual connections. It learns a page of verse in a few seconds and then
+writes new lines one character at a time. `examples/classify.ant` teaches a
+network to tell two spirals apart.
 
 ## Language models
 
@@ -507,15 +578,78 @@ answer = ask claude "Explain {topic} in one sentence."
 count  = ask claude "How many moons does Mars have?" as number
 sure   = ask claude "Is 91 a prime number?" as yes/no
 ideas  = ask claude "Give me five names for a cat." as list
+person = ask claude "Describe Ada Lovelace." as {name: text, born: number, known_for: list of text}
 ```
 
-`as number`, `as yes/no` and `as list` turn the reply into a real value you
-can calculate with. Set the `ANTHROPIC_API_KEY` environment variable first.
-Requests are sent with the `curl` program that comes with Windows, macOS and
-Linux. Options after `with`: `system` (text) and `max_tokens` (number).
+`as` turns the reply into a real value you can calculate with: `number`,
+`yes/no`, `text`, `list` (one item per line), `list of <shape>`, or a map
+shape like `{name: text, born: number}`, which can nest. Shapes use the
+model's structured output, so the answer always fits.
 
-`model fake = "echo"` makes a pretend model that repeats the prompt, for
-trying things offline (see `examples/ask.ant`).
+### Models
+
+| Write | Model | Needs |
+|---|---|---|
+| `"anthropic:claude-opus-5-5"` | Claude | `ANTHROPIC_API_KEY` |
+| `"openai:gpt-5"` | OpenAI | `OPENAI_API_KEY` |
+| `"openai:<name>"` with `{url: "..."}` | Any service with OpenAI's interface (LM Studio, Groq, vLLM, ...) | its key in `OPENAI_API_KEY`, if it needs one |
+| `"ollama:llama3.2"` | A free model on your own computer, with [Ollama](https://ollama.com) | Ollama running, and `ollama pull llama3.2` |
+| `"echo"` | A pretend model that repeats the prompt, for trying things offline | nothing |
+
+Options after `with`: `system` (text), `max_tokens` (number), `effort`
+(`"low"` to `"max"`, Claude only), `stream` (yes/no), `tools` (a list), and
+`url` (the service's address).
+
+### Conversations
+
+```
+chat = conversation(claude)
+ask chat "My name is Ada."
+show ask chat "What is my name?"         # it remembers
+show history(chat)                       # [{role: "user", text: "My name is Ada."}, ...]
+```
+
+`conversation(chat)` starts a new conversation from a copy of an old one.
+
+### Tools: models that call your functions
+
+```
+to weather(city) = "sunny and 31 degrees in {city}"
+
+model helper = "anthropic:claude-opus-5-5" with {tools: [weather]}
+show ask helper "Should I take an umbrella in Kandy today?"
+```
+
+The model decides when to call a tool. Antares runs your function with the
+inputs the model chose and gives it the result, as many times as it needs,
+then you get the final answer. Describe a tool to help the model use it well:
+`{run: weather, about: "Today's weather for a city", inputs: {city: "text"}}`
+(inputs are `"number"`, `"text"`, `"yes/no"` or `"list"`).
+`examples/agent.ant` is a complete agent.
+
+### Images, streaming and embeddings
+
+```
+show ask claude "What is in this picture?" with image("photo.jpg")
+
+model talker = "anthropic:claude-opus-5-5" with {stream: yes}
+ask talker "Tell me a short story."      # the reply appears word by word
+
+model embedder = "openai:text-embedding-3-small"
+notes = embed(embedder, ["The museum is closed on Mondays.", "Bus 138 goes to Colombo."])
+scores = similarity(embed(embedder, "When can I visit the museum?"), notes)
+show top(scores, 1)                      # [0]: the first note is the closest
+```
+
+`image(file)` reads a .png, .jpg, .gif or .webp file; put several in a list
+after `with`. `embed` gives one row of numbers per text, so that texts with
+similar meanings get similar rows, and `similarity` compares them.
+Anthropic doesn't make embeddings, so use OpenAI, Ollama (for example
+`"ollama:nomic-embed-text"`) or `"echo"`. `examples/search.ant` answers
+questions from your own notes this way, and `examples/chat.ant` is a chatbot.
+
+Requests are sent with the `curl` program that comes with Windows, macOS and
+Linux, and API keys never appear in the list of running programs.
 
 ## Games in a window
 
@@ -626,6 +760,9 @@ music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
 | Integers | `int ints popcount lowest_bit highest_bit div rand_bits within` |
 | Compact numbers | `compact` (whole numbers stored in 2 bytes instead of 8, for the row built-ins), `expand` |
 | Learning | `grad` (plus the `learn` and `descend` statements) |
+| Deep learning | `gelu silu softplus leaky_relu log_softmax cross_entropy mse bce take concat layer_norm dropout causal_mask he xavier accuracy top sample` |
+| Data | `read_csv columns shuffle batches` |
+| Models | `conversation history image embed similarity` (plus the `model` and `ask` statements) |
 | Lists and maps | `push insert remove find unique map filter reduce sort sort_by reverse slice has keys values join` |
 | Text | `upper lower trim split lines replace find text number fixed pad code char` |
 | Data and files | `save load exists program_folder json to_json read write append delete files read_binary input input_waiting` |
@@ -652,7 +789,10 @@ them in a tight loop. Measured on one Windows laptop, best of 7 runs
 Antares is faster than Python on all of these (1.3 to 5.5 times on ordinary
 code). It is much slower than Node on ordinary code, because Node turns hot
 code into machine code while it runs and Antares does not. Tensor maths runs
-as compiled code, which is why the matrix test beats both.
+as compiled code, which is why the matrix test beats both. Large matrix
+multiplications, and their gradients, are shared across all the CPU's cores:
+training a 256-512-10 network takes 5.5 times less time on 4 cores than on
+one, with exactly the same results.
 
 ## Compiling
 
@@ -748,11 +888,12 @@ Things to know:
 | `src/rt.rs` | Support code linked into compiled programs |
 | `src/vm.rs` | The fast engine: translates functions to instructions and runs them |
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
-| `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, SGD and Adam |
+| `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
+| `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
-| `src/llm.rs`, `src/json.rs` | Model calls and JSON |
+| `src/llm.rs`, `src/json.rs` | Language models (Claude, OpenAI-style, Ollama): conversations, tools, shapes, images, streaming, embeddings; and JSON |
 
 ## A real program: a chess engine
 
@@ -766,8 +907,8 @@ the original C++ generic build.
 ## Current limits
 
 This is version 0.7. Not there yet: giving a value to a slice
-(`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
-than Anthropic, GPU support, and game windows and sound on macOS and Linux.
+(`v[1:3] = 0`), GPU support (planned next), and game windows and sound on
+macOS and Linux.
 
 ## Rebuilding the documentation
 
