@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.11.1**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.12.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.11.1 — type a line and press Enter. `exit` to leave.
+Antares 0.12.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1546,20 +1546,42 @@ Run it in a terminal with `antares examples/snake.ant`. Steer with the arrow key
 
 ## Games in a window
 
-On Windows, a program can open a window and draw in it pixel by pixel. Antares draws every picture itself and the window only shows it, scaled up by a whole number so pixels stay square and sharp, so nothing else needs to be installed. Positions are in the game's own pixels, from (0, 0) at the top-left; fractions are rounded down.
+On Windows, a program can open a window and draw in it. Antares draws every picture itself and the window only shows it, so nothing else needs to be installed. Shapes have smooth edges, colours can be see-through, and there are gradients, pictures from PNG files, real fonts, soft shadows and lighting effects. Small pixel-art games work as well as detailed ones: a 160 by 120 game is scaled up in whole steps so its pixels stay square and sharp, and a large one, like 1280 by 720, is shown as it is (or shrunk smoothly if the screen is smaller). Positions are in the picture's own pixels, from (0, 0) at the top-left, and can have fractions: something at x = 10.5 is drawn half a pixel further right, so slow movement glides instead of jumping a pixel at a time.
 
 | Function | What it does |
 |---|---|
-| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled up to fit the screen (or by `scale`) |
+| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled to fit the screen (or by a whole-number `scale`) |
 | `window_open()` | `yes` until the player closes the window |
-| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second |
+| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second. Gives the seconds since the last frame |
+| `fullscreen([yes or no])` | Fills the screen with the game, or goes back to a window; `fullscreen()` says which it is |
 | `fill([colour])` | Paints the whole picture (black if no colour is given) |
-| `rect(x, y, width, height [, colour])` | A filled rectangle, its top-left corner at `x`, `y` |
+| `rect(x, y, width, height [, colour [, radius]])` | A filled rectangle, its top-left corner at `x`, `y`; `radius` rounds the corners |
 | `circle(x, y, radius [, colour])` | A filled circle centred on `x`, `y` |
-| `line(x1, y1, x2, y2 [, colour])` | A line |
+| `ellipse(x, y, radius_x, radius_y [, colour])` | A filled ellipse |
+| `ring(x, y, radius, thickness [, colour])` | The outline of a circle |
+| `polygon(points [, colour])` | A filled shape with corners at the points, given as `[[x, y], [x, y], ...]` |
+| `line(x1, y1, x2, y2 [, colour [, width]])` | A line, 1 pixel wide unless a width is given, with round ends |
+| `path(points [, colour [, width]])` | Lines joining the points; a closed outline when the last point is the first |
 | `pixel(x, y [, colour])` | One pixel |
-| `label(text, x, y [, colour [, size]])` | Text in the built-in font: 6 by 8 pixels a character, times `size` |
+| `label(text, x, y [, colour [, size]])` | Text, its top-left corner at `x`, `y` |
+| `font([name [, size [, style]]])` | The font labels use, like `font("Segoe UI", 24, "bold")`; `font()` goes back to the pixel font |
+| `measure(text [, size])` | `{width, height}`: the size a label of the text would take |
 | `sprite(rows, x, y, colours [, size])` | Pixel art written as rows of text (see below) |
+| `picture(file)` | Reads a PNG file as a picture |
+| `picture(width, height)` | A new, see-through picture to draw on |
+| `draw(picture, x, y [, options])` | Draws a picture, its top-left corner at `x`, `y`: scaled, turned, faded, flipped or in part (see below) |
+| `canvas([picture])` | Drawing goes on the picture from now on; `canvas()` goes back to the window |
+| `colour_at(x, y)` | The colour of a pixel, as `[red, green, blue]` (with an alpha if it is see-through) |
+| `gradient(x1, y1, x2, y2, colours)` | Colours changing smoothly along a line, to use anywhere a colour goes |
+| `radial(x, y, radius, colours)` | Colours changing smoothly outwards from a centre |
+| `hsl(hue, saturation, lightness [, alpha])` | A colour from its hue (0 to 360 round the colour wheel) and its saturation and lightness (0 to 1) |
+| `mix(colour1, colour2, amount)` | A colour between two: `amount` from 0 (the first) to 1 (the second) |
+| `blend([mode])` | How what is drawn next combines with what is there: `"normal"`, `"add"`, `"multiply"` or `"screen"` |
+| `smooth(yes or no)` | Smooth edges (the default), or hard pixel edges for the classic pixel-art look |
+| `shadow([across, down, softness [, colour]])` | What is drawn next casts a soft shadow; `shadow()` turns shadows off |
+| `blur(radius [, x, y, width, height])` | Softens the picture, or part of it |
+| `glow(amount [, radius [, threshold]])` | Makes the bright parts of the picture glow |
+| `vignette(amount)` | Darkens the edges and corners, from 0 (not at all) to 1 |
 | `held(key)` | `yes` while a key is held down |
 | `pressed(key)` | `yes` if a key went down since the last frame |
 | `mouse()` | `{x, y, left, right}`: where the mouse is, in the game's pixels, and which buttons are held |
@@ -1581,15 +1603,53 @@ while window_open() {
 }
 ```
 
-`examples/catch.ant` is a complete game built this way, with sound, in under 90 lines.
+`examples/catch.ant` is a complete pixel-art game built this way, with sound, in under 90 lines, and `examples/night.ant` is a night scene that uses gradients, see-through light, glow, shadows and real fonts.
 
-**The window.** Without a scale, the window is as large as fits comfortably on the screen. A program has one window at a time. Closing it makes `window_open()` give `no`; a program that calls `frame()` after that ends, so `while yes` loops end too. A program built with `antares build` and started by double-clicking hides its own console window, and a problem that stops it is then shown in a message box. With `--icon`, the window shows the program's icon.
+**The window.** Without a scale, the window is as large as fits comfortably on the screen. A program has one window at a time. Closing it makes `window_open()` give `no`; a program that calls `frame()` after that ends, so `while yes` loops end too. `fullscreen(yes)` fills the screen, with black bars where the shapes of the game and the screen differ; `fullscreen(not fullscreen())` switches between the two. A program built with `antares build` and started by double-clicking hides its own console window, and a problem that stops it is then shown in a message box. With `--icon`, the window shows the program's icon.
 
-**Colours** are names, codes or lists. The names are the usual web colours: `black`, `white`, `gray`, `grey`, `lightgray`, `darkgray`, `silver`, `red`, `maroon`, `orange`, `gold`, `yellow`, `olive`, `lime`, `green`, `teal`, `cyan`, `skyblue`, `blue`, `navy`, `purple`, `magenta`, `pink`, `brown`. Codes are `"#rrggbb"` or `"#rgb"`, and lists are `[red, green, blue]` with each part from 0 to 255. Without a colour, shapes and text are white, and `fill()` is black.
+**Smooth movement.** `frame()` gives the seconds since the last frame, about 1/60. Moving things by a speed times that time keeps a game running at the same pace when a frame is slow: `x += 120 * dt` moves 120 pixels a second.
+
+**Colours** are names, codes or lists. The names are the usual web colours: `black`, `white`, `gray`, `grey`, `lightgray`, `darkgray`, `silver`, `red`, `maroon`, `orange`, `gold`, `yellow`, `olive`, `lime`, `green`, `teal`, `cyan`, `skyblue`, `blue`, `navy`, `purple`, `magenta`, `pink`, `brown`, and `transparent`. Codes are `"#rrggbb"` or `"#rgb"`, and lists are `[red, green, blue]` with each part from 0 to 255. Without a colour, shapes and text are white, and `fill()` is black.
+
+**See-through colours** have a fourth part, the **alpha**, from 0 (invisible) to 1 (solid): `[255, 0, 0, 0.5]` is half-see-through red, and so are the codes `"#ff000080"` and `"#f008"`. What is under a see-through colour shows through it. `fill` with a see-through colour paints over the picture (a quick way to leave fading trails behind moving things), and `fill("transparent")` empties a picture.
+
+**Gradients** go anywhere a colour does, in shapes, text and `fill`. `gradient(0, 0, 0, 240, ["skyblue", "navy"])` changes from sky blue at the top to navy 240 pixels down; `radial(x, y, r, ["white", "#fff0"])` fades from white at the centre to nothing at radius `r`, which makes lights and glows. A gradient can have any number of colours, spaced evenly, and the positions are in the picture, not in the shape, so one gradient can colour many shapes.
+
+**Edges and positions.** Shapes are drawn with smooth edges: a pixel half covered by a shape gets half its colour. Shapes at whole-number positions cover whole pixels exactly, and lines run through the middle of pixels, so a line at whole numbers is sharp. `smooth(no)` switches to hard pixel edges and whole-number positions (fractions are rounded down), the look of classic pixel-art games; `smooth(yes)` switches back.
+
+**Blending.** `blend("add")` adds what is drawn to what is there, so light builds up where things overlap: fire, sparks, lasers and glows. `blend("multiply")` darkens, like tinted glass or a shadow, and `blend("screen")` lightens more softly. `blend()` goes back to normal painting.
+
+**Shadows.** After `shadow(4, 6, 10)`, everything drawn casts a shadow 4 pixels right and 6 down, softened by 10 pixels, until `shadow()`. The colour is half-see-through black unless one is given. Shadows follow the shape of what casts them, including the see-through parts of pictures and the letters of text.
+
+**Pictures.** `ship = picture("ship.png")` reads a PNG file, with its see-through parts; `ship.width` and `ship.height` give its size. A file is read only once, however often `picture` is called with its name. JPEG and other formats can be saved as PNG with any image editor. `draw(ship, x, y)` draws it, and a map of options changes how:
+
+| Option | What it does |
+|---|---|
+| `scale` | How many times as big: 2 is twice the size, 0.5 half |
+| `width`, `height` | The size to draw it at, in pixels |
+| `angle` | Turns it, in degrees clockwise, about its middle |
+| `alpha` | How solid it is, from 0 (invisible) to 1 |
+| `flip` | `yes` mirrors it left to right; `"vertical"` top to bottom; `"both"` both |
+| `part` | `[x, y, width, height]`: only that part of the picture, such as one frame of a sprite sheet |
+| `tint` | A colour it is multiplied by: `"red"` makes it reddish, `[255, 255, 255, 0.5]` half see-through |
+| `smooth` | `no` keeps the pixels sharp when it is scaled up, for pixel art |
+
+<!-- norun -->
+```antares
+ship = picture("ship.png")
+draw(ship, 100, 80, {angle: 30, scale: 2})
+draw(explosion, 40, 40, {part: [64 * step, 0, 64, 64]})   # frame `step` of a strip
+```
+
+**Drawing on pictures.** `picture(width, height)` makes a new, see-through picture, and `canvas(p)` sends drawing to it until `canvas()`. Parts of a scene that don't change can be drawn once on a picture and the picture drawn every frame, which is much quicker. Pictures work on every system, even without a window, so a program on Linux or macOS can draw pictures and save them with `screenshot(file)`, which saves the picture being drawn on.
+
+**Text.** Labels are in the built-in pixel font until `font` chooses another. In the pixel font, each character is 5 by 7 pixels in a 6 by 8 cell, times `size`, a whole number; characters outside plain English letters, digits and punctuation show as `?`. With a font such as `font("Segoe UI", 20)`, `"Arial"`, `"Georgia"` or `"Consolas"`, text is smooth, any character works, and `size` is the height of the letters in pixels. The style can be `"bold"`, `"italic"` or `"bold italic"`. `measure(text)` gives the size a label takes, to centre it: `label(t, (W - measure(t).width) / 2, 10)`. Fonts come from Windows; elsewhere, labels in pictures use the pixel font.
+
+**Effects** change the whole picture, so they come after everything else in the frame, just before `frame()`. `glow(1)` makes the bright parts shine into their surroundings, as light does in a camera; the radius sets how far, and the threshold (0 to 1) how bright something must be to glow. `vignette(0.5)` darkens the corners, which draws the eye to the middle. `blur(8)` softens everything, for a paused game behind a menu; `blur(8, x, y, w, h)` softens only a rectangle, like frosted glass.
+
+**Speed.** Shapes, text, pictures and gradients are quick, and thousands can be drawn each frame in a small game. Effects work on every pixel, so they cost more in big windows: at 1280 by 720, `glow` and a large `blur` each take a noticeable part of a frame on a slow laptop. Drawing what doesn't change once, on a picture, and smaller game sizes like 960 by 540 keep big scenes smooth.
 
 **Keys** are named `"left"`, `"right"`, `"up"`, `"down"`, `"space"`, `"enter"`, `"escape"`, `"backspace"`, `"tab"`, `"shift"`, `"ctrl"`, `"alt"`, `"delete"`, `"a"` to `"z"`, `"0"` to `"9"` and `"f1"` to `"f12"`, and `"click"` and `"right click"` are the mouse buttons. `held` is for movement (it stays `yes` while the key is down); `pressed` is for actions like jumping (it is `yes` for one frame per press). A name `held` and `pressed` don't know is a problem, which catches typing mistakes. While a window is open, `key()` gives the keys pressed in it, including a key's repeats when it is held, and `wait()` keeps the window answering.
-
-**Text** uses the built-in font, 5 by 7 pixels in a 6 by 8 cell, so a label is 6 pixels wide per character, times its size. Characters outside plain English letters, digits and punctuation show as `?`.
 
 **Sprites** are pixel art written as text, one character per pixel. The map says which character is which colour, and every other character (`.` by convention) shows what's behind:
 
@@ -1601,7 +1661,7 @@ sprite(heart, 20, 10, {r: "red"}, 3)      # three times as big
 
 **Screenshots.** `screenshot(file)` saves the picture at its own size, as a PNG file, and gives back the file name.
 
-Windows only for now: on macOS and Linux, `window()` stops with a problem that says so, and the other functions ask for a window first.
+Windows only for now: on macOS and Linux, `window()` stops with a problem that says so, and the functions that need a window (`frame`, `held`, `mouse` and so on) ask for one. Pictures, drawing on them and saving them work everywhere.
 
 ## Sound
 
@@ -1924,14 +1984,32 @@ The statements `model` and `ask` are described in Chapter 12.
 |---|---|
 | `window(width, height [, title [, scale]])` | Open a window (Windows) |
 | `window_open()` | `yes` until the window is closed |
-| `frame()` | Show the picture; wait for the next of 60 frames a second |
+| `frame()` | Show the picture; wait for the next of 60 frames a second; gives the seconds since the last frame |
+| `fullscreen([yes or no])` | Fill the screen, or go back to a window; with nothing, whether it is fullscreen |
 | `fill([colour])` | Paint the whole picture |
-| `rect(x, y, width, height [, colour])` | Filled rectangle |
+| `rect(x, y, width, height [, colour [, radius]])` | Filled rectangle, with rounded corners if a radius is given |
 | `circle(x, y, radius [, colour])` | Filled circle |
-| `line(x1, y1, x2, y2 [, colour])` | Line |
+| `ellipse(x, y, radius_x, radius_y [, colour])` | Filled ellipse |
+| `ring(x, y, radius, thickness [, colour])` | Outline of a circle |
+| `polygon(points [, colour])` | Filled shape through `[[x, y], ...]` |
+| `line(x1, y1, x2, y2 [, colour [, width]])` | Line |
+| `path(points [, colour [, width]])` | Lines joining points |
 | `pixel(x, y [, colour])` | One pixel |
-| `label(text, x, y [, colour [, size]])` | Text in the built-in font |
+| `colour_at(x, y)` | A pixel's colour |
+| `label(text, x, y [, colour [, size]])` | Text |
+| `font([name [, size [, style]]])` | The font for labels; `font()` is the pixel font |
+| `measure(text [, size])` | `{width, height}` of a label |
 | `sprite(rows, x, y, colours [, size])` | Pixel art written as text |
+| `picture(file)`, `picture(width, height)` | Read a PNG file; make a new picture |
+| `draw(picture, x, y [, options])` | Draw a picture: `scale`, `width`, `height`, `angle`, `alpha`, `flip`, `part`, `tint`, `smooth` |
+| `canvas([picture])` | Draw on a picture; `canvas()` goes back to the window |
+| `gradient(x1, y1, x2, y2, colours)`, `radial(x, y, radius, colours)` | Gradients, used as colours |
+| `hsl(hue, saturation, lightness [, alpha])` | A colour from its hue |
+| `mix(colour1, colour2, amount)` | A colour between two |
+| `blend([mode])` | `"normal"`, `"add"`, `"multiply"` or `"screen"` |
+| `smooth(yes or no)` | Smooth or hard pixel edges |
+| `shadow([across, down, softness [, colour]])` | Soft shadows for what is drawn next |
+| `blur(radius [, x, y, width, height])`, `glow(amount [, radius [, threshold]])`, `vignette(amount)` | Effects on the whole picture |
 | `held(key)` | Whether a key is held down |
 | `pressed(key)` | Whether a key went down since the last frame |
 | `mouse()` | `{x, y, left, right}` |

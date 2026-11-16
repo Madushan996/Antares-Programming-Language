@@ -1,11 +1,12 @@
-//! Graphics for games: a window to draw pictures in, and the keyboard and
-//! mouse.
+//! Graphics for games: a window to draw pictures in, pictures to draw, and
+//! the keyboard and mouse.
 //!
-//! Antares draws every picture itself into a `Canvas` (a row of 0xRRGGBB
-//! pixels) and the window only shows the finished picture, scaled up so
-//! pixel art stays sharp. Drawing works the same on every system; opening a
-//! window is Windows-only for now (`win` below), using only what Windows
-//! itself provides.
+//! Antares draws every picture itself (raster.rs does the drawing: smooth
+//! edges, see-through colours, gradients, pictures, shadows and effects)
+//! and the window only shows the finished picture, scaled to fit. Drawing
+//! works the same on every system, so pictures can be made and saved
+//! anywhere; opening a window is Windows-only for now (`win` below), using
+//! only what Windows itself provides, and so are smooth fonts.
 //!
 //! Everything runs on the program's own thread: the window belongs to it,
 //! and its messages are handled whenever the program calls `window_open`,
@@ -13,218 +14,14 @@
 
 use crate::builtins::{num, s, text, want};
 use crate::interp::Interp;
+use crate::raster::{self, Blend, Canvas, Mask, Paint, Rgba};
 use crate::value::Value;
-use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 type Res = Result<Value, String>;
-
-// ---------- the picture ----------
-
-/// A picture: `w` by `h` pixels, each 0xRRGGBB, row by row from the top.
-pub struct Canvas {
-    pub w: usize,
-    pub h: usize,
-    pub px: Vec<u32>,
-}
-
-impl Canvas {
-    pub fn new(w: usize, h: usize) -> Canvas {
-        Canvas { w, h, px: vec![0; w * h] }
-    }
-
-    pub fn fill(&mut self, c: u32) {
-        self.px.fill(c);
-    }
-
-    pub fn put(&mut self, x: i64, y: i64, c: u32) {
-        if x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h {
-            self.px[y as usize * self.w + x as usize] = c;
-        }
-    }
-
-    pub fn get(&self, x: i64, y: i64) -> Option<u32> {
-        (x >= 0 && y >= 0 && (x as usize) < self.w && (y as usize) < self.h).then(|| self.px[y as usize * self.w + x as usize])
-    }
-
-    /// A filled rectangle, its top-left corner at (x, y).
-    pub fn rect(&mut self, x: i64, y: i64, w: i64, h: i64, c: u32) {
-        // x0 is kept inside the row too: a rectangle starting past the right
-        // edge must not index past the end of the last row.
-        let (x0, y0) = (x.clamp(0, self.w as i64), y.max(0));
-        let (x1, y1) = (x.saturating_add(w).min(self.w as i64), y.saturating_add(h).min(self.h as i64));
-        for yy in y0..y1 {
-            let row = yy as usize * self.w;
-            self.px[row + x0 as usize..row + x1.max(x0) as usize].fill(c);
-        }
-    }
-
-    /// A filled circle centred on (cx, cy).
-    pub fn circle(&mut self, cx: i64, cy: i64, r: f64, c: u32) {
-        if !(r >= 0.0) {
-            return;
-        }
-        let ri = r.floor().min(1e9) as i64;
-        let limit = (r + 0.5) * (r + 0.5);
-        // only the rows inside the picture
-        for dy in (-ri).max(-cy)..=ri.min(self.h as i64 - 1 - cy) {
-            let half = (limit - (dy as f64) * (dy as f64)).max(0.0).sqrt().floor() as i64;
-            let half = half.min(ri);
-            self.rect(cx - half, cy + dy, 2 * half + 1, 1, c);
-        }
-    }
-
-    /// A line from (x0, y0) to (x1, y1), both ends included.
-    pub fn line(&mut self, x0: i64, y0: i64, x1: i64, y1: i64, c: u32) {
-        // Ends far outside the picture are first moved to its edge, so a line
-        // a million pixels long costs no more than one across the picture.
-        let far = |v: i64, n: usize| v < -1 || v > n as i64;
-        let (mut x0, mut y0, x1, y1) = if far(x0, self.w) || far(x1, self.w) || far(y0, self.h) || far(y1, self.h) {
-            let (fx0, fy0, dxf, dyf) = (x0 as f64, y0 as f64, (x1 - x0) as f64, (y1 - y0) as f64);
-            let (mut t0, mut t1) = (0.0f64, 1.0f64);
-            let edges = [(-dxf, fx0 + 1.0), (dxf, self.w as f64 - fx0), (-dyf, fy0 + 1.0), (dyf, self.h as f64 - fy0)];
-            for (p, q) in edges {
-                if p == 0.0 {
-                    if q < 0.0 {
-                        return;
-                    }
-                } else if p < 0.0 {
-                    t0 = t0.max(q / p);
-                } else {
-                    t1 = t1.min(q / p);
-                }
-            }
-            if t0 > t1 {
-                return;
-            }
-            let at = |t: f64| ((fx0 + t * dxf).round() as i64, (fy0 + t * dyf).round() as i64);
-            let ((a, b), (c2, d)) = (at(t0), at(t1));
-            (a, b, c2, d)
-        } else {
-            (x0, y0, x1, y1)
-        };
-        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
-        let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
-        let mut err = dx + dy;
-        loop {
-            self.put(x0, y0, c);
-            if x0 == x1 && y0 == y1 {
-                break;
-            }
-            let e2 = 2 * err;
-            if e2 >= dy {
-                err += dy;
-                x0 += sx;
-            }
-            if e2 <= dx {
-                err += dx;
-                y0 += sy;
-            }
-        }
-    }
-
-    /// Text in the built-in font, its top-left corner at (x, y). Each
-    /// character is 6 pixels wide and each line 8 pixels tall, times `size`.
-    pub fn text(&mut self, t: &str, x: i64, y: i64, c: u32, size: i64) {
-        let (mut cx, mut cy) = (x, y);
-        for ch in t.chars() {
-            if ch == '\n' {
-                cx = x;
-                cy += 8 * size;
-                continue;
-            }
-            let glyph = glyph(ch);
-            for (row, bits) in glyph.iter().enumerate() {
-                for (col, b) in bits.bytes().enumerate() {
-                    if b == b'#' {
-                        self.rect(cx + col as i64 * size, cy + row as i64 * size, size, size, c);
-                    }
-                }
-            }
-            cx += 6 * size;
-        }
-    }
-
-    /// Pixel art: each row a list of colours, `None` showing what's behind.
-    pub fn sprite(&mut self, rows: &[Vec<Option<u32>>], x: i64, y: i64, size: i64) {
-        for (r, row) in rows.iter().enumerate() {
-            for (k, c) in row.iter().enumerate() {
-                if let Some(c) = c {
-                    self.rect(x + k as i64 * size, y + r as i64 * size, size, size, *c);
-                }
-            }
-        }
-    }
-
-    /// The picture as a PNG file.
-    pub fn png(&self) -> Vec<u8> {
-        let mut raw = Vec::with_capacity(self.h * (1 + 3 * self.w));
-        for row in self.px.chunks(self.w.max(1)) {
-            raw.push(0); // no filter
-            for p in row {
-                raw.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8]);
-            }
-        }
-        // zlib data made of uncompressed ("stored") blocks
-        let mut z = vec![0x78, 0x01];
-        let mut blocks = raw.chunks(65535).peekable();
-        if blocks.peek().is_none() {
-            z.extend_from_slice(&[1, 0, 0, 0xFF, 0xFF]);
-        }
-        while let Some(b) = blocks.next() {
-            z.push(if blocks.peek().is_none() { 1 } else { 0 });
-            z.extend_from_slice(&(b.len() as u16).to_le_bytes());
-            z.extend_from_slice(&(!(b.len() as u16)).to_le_bytes());
-            z.extend_from_slice(b);
-        }
-        z.extend_from_slice(&adler32(&raw).to_be_bytes());
-
-        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-        let mut header = vec![];
-        header.extend_from_slice(&(self.w as u32).to_be_bytes());
-        header.extend_from_slice(&(self.h as u32).to_be_bytes());
-        header.extend_from_slice(&[8, 2, 0, 0, 0]); // 8 bits, RGB
-        chunk(&mut out, b"IHDR", &header);
-        chunk(&mut out, b"IDAT", &z);
-        chunk(&mut out, b"IEND", &[]);
-        out
-    }
-}
-
-fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    let start = out.len();
-    out.extend_from_slice(kind);
-    out.extend_from_slice(data);
-    let crc = crc32(&out[start..]);
-    out.extend_from_slice(&crc.to_be_bytes());
-}
-
-fn crc32(data: &[u8]) -> u32 {
-    let mut crc = !0u32;
-    for &b in data {
-        crc ^= b as u32;
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
-        }
-    }
-    !crc
-}
-
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    for chunk in data.chunks(5552) {
-        for &x in chunk {
-            a += x as u32;
-            b += a;
-        }
-        a %= 65521;
-        b %= 65521;
-    }
-    (b << 16) | a
-}
 
 // ---------- colours ----------
 
@@ -257,25 +54,38 @@ const COLOURS: &[(&str, u32)] = &[
     ("brown", 0xA52A2A),
 ];
 
-/// A colour given as a name ("red"), "#rgb", "#rrggbb", or [red, green, blue]
-/// with each part from 0 to 255.
-pub fn colour(v: &Value, name: &str) -> Result<u32, String> {
-    let bad = |what: String| {
-        format!("{} needs a colour: a name like \"red\", a code like \"#ff8800\", or [red, green, blue] from 0 to 255, not {}", name, what)
-    };
+const COLOUR_HELP: &str = "a name like \"red\", a code like \"#ff8800\", or [red, green, blue] from 0 to 255 (with a fourth part from 0 to 1 to make it see-through)";
+
+/// A colour given as a name ("red", "transparent"), "#rgb", "#rgba",
+/// "#rrggbb", "#rrggbbaa", or [red, green, blue] from 0 to 255 with an
+/// optional fourth part, the alpha, from 0 (see-through) to 1 (solid).
+pub fn colour(v: &Value, name: &str) -> Result<Rgba, String> {
+    let bad = |what: String| format!("{} needs a colour: {}, not {}", name, COLOUR_HELP, what);
     match v {
         Value::Str(t) => {
             let t = t.trim().to_ascii_lowercase();
             if let Some(hex) = t.strip_prefix('#') {
-                let digits: Option<Vec<u32>> = hex.chars().map(|c| c.to_digit(16)).collect();
-                return match digits.as_deref() {
-                    Some([r, g, b]) => Ok((r * 17) << 16 | (g * 17) << 8 | b * 17),
-                    Some(d) if d.len() == 6 => Ok(d.iter().fold(0, |acc, x| acc << 4 | x)),
+                let d: Option<Vec<f64>> = hex.chars().map(|c| c.to_digit(16).map(|x| x as f64)).collect();
+                return match d.as_deref() {
+                    Some([r, g, b]) => Ok(Rgba::new(r * 17.0, g * 17.0, b * 17.0, 1.0)),
+                    Some([r, g, b, a]) => Ok(Rgba::new(r * 17.0, g * 17.0, b * 17.0, a * 17.0 / 255.0)),
+                    Some(d) if d.len() == 6 || d.len() == 8 => {
+                        let byte = |i: usize| d[i] * 16.0 + d[i + 1];
+                        let a = if d.len() == 8 { byte(6) / 255.0 } else { 1.0 };
+                        Ok(Rgba::new(byte(0), byte(2), byte(4), a))
+                    }
                     _ => Err(bad(format!("\"{}\"", t))),
                 };
             }
             let key: String = t.chars().filter(|c| !c.is_whitespace()).collect();
-            COLOURS.iter().find(|(n, _)| *n == key).map(|(_, c)| *c).ok_or_else(|| bad(format!("\"{}\" (a colour I don't know)", t)))
+            if key == "transparent" || key == "clear" || key == "none" {
+                return Ok(Rgba::CLEAR);
+            }
+            COLOURS
+                .iter()
+                .find(|(n, _)| *n == key)
+                .map(|(_, c)| Rgba::new((c >> 16) as f64, ((c >> 8) & 255) as f64, (c & 255) as f64, 1.0))
+                .ok_or_else(|| bad(format!("\"{}\" (a colour I don't know)", t)))
         }
         Value::List(_) | Value::Tensor(_) | Value::Ints(_) => {
             let parts: Vec<f64> = match v {
@@ -284,15 +94,99 @@ pub fn colour(v: &Value, name: &str) -> Result<u32, String> {
                 Value::Ints(n) => n.iter().map(|x| *x as f64).collect(),
                 _ => unreachable!(),
             };
-            if parts.len() != 3 {
-                return Err(bad(format!("a list of {} numbers", parts.len())));
+            match parts[..] {
+                [r, g, b] => Ok(Rgba::new(r, g, b, 1.0)),
+                [r, g, b, a] => {
+                    if !(0.0..=1.0).contains(&a) {
+                        return Err(format!("{}: the fourth part of a colour, its alpha, goes from 0 (see-through) to 1 (solid), not {}", name, crate::value::fmt_num(a)));
+                    }
+                    Ok(Rgba::new(r, g, b, a))
+                }
+                _ => Err(bad(format!("a list of {} numbers", parts.len()))),
             }
-            let part = |x: f64| x.round().clamp(0.0, 255.0) as u32;
-            Ok(part(parts[0]) << 16 | part(parts[1]) << 8 | part(parts[2]))
         }
         other => Err(bad(format!("a {}", other.kind()))),
     }
 }
+
+/// A colour as a list: [red, green, blue], with the alpha as a fourth part
+/// if it isn't solid.
+fn colour_value(c: Rgba) -> Value {
+    let (r, g, b, a) = c.straight();
+    let mut parts = vec![Value::Num(r), Value::Num(g), Value::Num(b)];
+    if a < 1.0 {
+        parts.push(Value::Num((a * 1000.0).round() / 1000.0));
+    }
+    crate::value::pack_list(parts)
+}
+
+fn field<'a>(m: &'a [(Rc<str>, Value)], key: &str) -> Option<&'a Value> {
+    m.iter().find(|(k, _)| &**k == key).map(|(_, v)| v)
+}
+
+fn numbers(v: &Value, n: usize, name: &str, what: &str) -> Result<Vec<f64>, String> {
+    let parts: Option<Vec<f64>> = match v {
+        Value::List(l) => l.iter().map(|x| x.scalar()).collect(),
+        Value::Tensor(t) => Some(t.vals().clone()),
+        Value::Ints(i) => Some(i.iter().map(|x| *x as f64).collect()),
+        _ => None,
+    };
+    match parts {
+        Some(p) if p.len() == n => Ok(p),
+        _ => Err(format!("{} needs {} as a list of {} numbers, not {}", name, what, n, v.show())),
+    }
+}
+
+fn stops(v: &Value, name: &str) -> Result<Vec<Rgba>, String> {
+    // colours all given as lists of numbers make a table of numbers
+    if let Value::Tensor(t) = v {
+        if t.shape.len() == 2 && t.shape[0] > 0 && (t.shape[1] == 3 || t.shape[1] == 4) {
+            let rows: Vec<Value> = t.vals().chunks(t.shape[1]).map(|c| Value::List(Rc::new(c.iter().map(|x| Value::Num(*x)).collect()))).collect();
+            return rows.iter().map(|c| colour(c, name)).collect();
+        }
+    }
+    let Value::List(l) = v else {
+        return Err(format!("{} needs a list of colours, like [\"skyblue\", \"navy\"], not {}", name, v.show()));
+    };
+    if l.is_empty() {
+        return Err(format!("{} needs at least one colour", name));
+    }
+    l.iter().map(|c| colour(c, name)).collect()
+}
+
+/// What fills a shape: a colour, or a gradient made by `gradient` or
+/// `radial`.
+fn paint(v: &Value, name: &str) -> Result<Paint<'static>, String> {
+    if let Value::Map(m) = v {
+        let kind = field(m, "gradient").map(|k| k.show());
+        let colours = field(m, "colours").ok_or_else(|| format!("{} needs a colour or a gradient, not a map without colours", name))?;
+        let cs = stops(colours, name)?;
+        return match kind.as_deref() {
+            Some("linear") => {
+                let from = numbers(field(m, "from").unwrap_or(&Value::Nothing), 2, name, "a gradient's start")?;
+                let to = numbers(field(m, "to").unwrap_or(&Value::Nothing), 2, name, "a gradient's end")?;
+                Ok(Paint::linear(from[0], from[1], to[0], to[1], &cs))
+            }
+            Some("radial") => {
+                let c = numbers(field(m, "centre").unwrap_or(&Value::Nothing), 2, name, "a gradient's centre")?;
+                let r = num(field(m, "radius").unwrap_or(&Value::Nothing), name)?;
+                Ok(Paint::radial(c[0], c[1], r, &cs))
+            }
+            _ => Err(format!("{} needs a colour or a gradient made by gradient(...) or radial(...)", name)),
+        };
+    }
+    Ok(Paint::solid(colour(v, name)?))
+}
+
+fn opt_paint(a: &[Value], i: usize, name: &str) -> Result<Paint<'static>, String> {
+    match a.get(i) {
+        Some(v) => paint(v, name),
+        None => Ok(Paint::solid(WHITE)),
+    }
+}
+
+const WHITE: Rgba = Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
+const BLACK: Rgba = Rgba { r: 0.0, g: 0.0, b: 0.0, a: 1.0 };
 
 // ---------- the font ----------
 
@@ -405,6 +299,143 @@ fn glyph(c: char) -> &'static [&'static str; 7] {
     }
 }
 
+/// Text in the built-in font as a mask: each character 6 by 8 pixels (5 by 7
+/// and a gap), times `size`.
+fn pixel_text(t: &str, size: usize) -> (usize, usize, Vec<f32>) {
+    let lines: Vec<&str> = t.split('\n').collect();
+    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) * 6 * size;
+    let h = lines.len() * 8 * size;
+    let mut cov = vec![0f32; w * h];
+    for (li, line) in lines.iter().enumerate() {
+        for (ci, ch) in line.chars().enumerate() {
+            for (row, bits) in glyph(ch).iter().enumerate() {
+                for (col, b) in bits.bytes().enumerate() {
+                    if b == b'#' {
+                        for dy in 0..size {
+                            let y = li * 8 * size + row * size + dy;
+                            let x = ci * 6 * size + col * size;
+                            cov[y * w + x..y * w + x + size].fill(1.0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (w, h, cov)
+}
+
+/// A font chosen with `font`: its name, size in pixels, and style.
+#[derive(Clone, PartialEq)]
+struct FontSpec {
+    name: String,
+    size: f64,
+    bold: bool,
+    italic: bool,
+}
+
+type TextImage = Rc<(usize, usize, Vec<f32>)>;
+
+thread_local! {
+    /// Text already drawn, kept so labels that don't change each frame are
+    /// quick.
+    static TEXT_CACHE: RefCell<HashMap<(String, u32, bool, bool, String), TextImage>> = RefCell::new(HashMap::new());
+}
+
+/// Text in a font, as coverage: width, height, and how much of each pixel
+/// the letters cover.
+fn font_text(spec: &FontSpec, size: f64, t: &str) -> TextImage {
+    let key = (spec.name.clone(), (size * 16.0).round() as u32, spec.bold, spec.italic, t.to_string());
+    if let Some(hit) = TEXT_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    #[cfg(windows)]
+    let made = win::render_text(&spec.name, size, spec.bold, spec.italic, t);
+    #[cfg(not(windows))]
+    let made = pixel_text(t, ((size / 8.0).round() as usize).max(1));
+    let made = Rc::new(made);
+    TEXT_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() > 2000 {
+            c.clear();
+        }
+        c.insert(key, made.clone());
+    });
+    made
+}
+
+// ---------- drawing state ----------
+
+/// How shapes are drawn: set by `blend`, `smooth`, `shadow` and `font`, and
+/// kept until changed.
+#[derive(Clone)]
+struct Style {
+    blend: Blend,
+    smooth: bool,
+    /// Offset across, offset down, softness, colour.
+    shadow: Option<(f64, f64, f64, Rgba)>,
+    font: Option<FontSpec>,
+}
+
+thread_local! {
+    static STYLE: RefCell<Style> = const { RefCell::new(Style { blend: Blend::Normal, smooth: true, shadow: None, font: None }) };
+    /// Pictures made by `picture`, by number.
+    static PICTURES: RefCell<Vec<Canvas>> = const { RefCell::new(vec![]) };
+    /// Picture files already read, by file name, so reading one in a loop
+    /// costs nothing.
+    static LOADED: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
+    /// The picture being drawn on (`canvas`), or none for the window.
+    static TARGET: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn style() -> Style {
+    STYLE.with(|s| s.borrow().clone())
+}
+
+/// Runs `f` on the picture being drawn on: the window's, or one chosen
+/// with `canvas`.
+fn with_target<R>(name: &str, f: impl FnOnce(&mut Canvas) -> R) -> Result<R, String> {
+    if let Some(id) = TARGET.with(|t| t.get()) {
+        return PICTURES.with(|p| Ok(f(&mut p.borrow_mut()[id])));
+    }
+    SCREEN.with(|s| match s.borrow_mut().as_mut() {
+        Some(sc) => Ok(f(&mut sc.canvas)),
+        None => Err(format!("{} draws in a window; open one first with window(width, height), or draw on a picture with canvas(picture)", name)),
+    })
+}
+
+/// Draws a mask with a paint, and its shadow first if shadows are on.
+fn draw_mask(c: &mut Canvas, m: &Mask, p: &Paint, st: &Style) {
+    if let Some((dx, dy, soft, col)) = st.shadow {
+        let sm = m.alpha_of(p).shadow(dx.round() as i64, dy.round() as i64, soft);
+        c.paint_mask(&sm, &Paint::solid(col), Blend::Normal);
+    }
+    c.paint_mask(m, p, st.blend);
+}
+
+/// The area shapes may cover: the picture, and around it as far as a shadow
+/// could reach into it.
+fn reach(c: &Canvas, st: &Style) -> (f64, f64, f64, f64) {
+    let (w, h) = (c.w as f64, c.h as f64);
+    match st.shadow {
+        Some((dx, dy, soft, _)) => {
+            let pad = 3.0 * (soft / 2.0).round().max(1.0) + 1.0;
+            ((-dx).min(0.0) - pad, (-dy).min(0.0) - pad, w + dx.max(0.0) + pad, h + dy.max(0.0) + pad)
+        }
+        None => (0.0, 0.0, w, h),
+    }
+}
+
+/// Draws a shape made of outlines.
+fn shape(name: &str, outlines: Vec<Vec<(f64, f64)>>, p: Paint) -> Res {
+    let st = style();
+    with_target(name, |c| {
+        if let Some(m) = raster::fill_in(&outlines, reach(c, &st), st.smooth) {
+            draw_mask(c, &m, &p, &st);
+        }
+    })?;
+    Ok(Value::Nothing)
+}
+
 // ---------- the window and its input ----------
 
 /// What the keyboard and mouse are doing, as the window reports it.
@@ -416,8 +447,8 @@ struct Input {
     pressed: Vec<&'static str>,
     /// Keys pressed (with repeats), for `key()`.
     typed: VecDeque<&'static str>,
-    mouse_x: i64,
-    mouse_y: i64,
+    mouse_x: f64,
+    mouse_y: f64,
 }
 
 // (only the window code reports keys)
@@ -442,13 +473,32 @@ impl Input {
     }
 }
 
+/// Where the picture goes in the window: how much it is scaled, and how far
+/// in from the top-left corner (in fullscreen, where black bars fill the
+/// rest).
+#[derive(Clone, Copy)]
+#[cfg_attr(not(windows), allow(dead_code))]
+struct View {
+    zoom: f64,
+    x: i32,
+    y: i32,
+    /// The window's inside, when fullscreen.
+    full: Option<(i32, i32)>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Screen {
     canvas: Canvas,
-    #[cfg_attr(not(windows), allow(dead_code))]
-    scale: usize,
+    view: View,
+    /// The scale in a window, kept for leaving fullscreen.
+    window_zoom: f64,
+    /// Where the window was before going fullscreen.
+    saved: [i32; 4],
     input: Input,
     /// When the next frame is due.
     next: Instant,
+    /// When the last frame was shown.
+    last: Instant,
     closed: bool,
     #[cfg(windows)]
     hwnd: win::Hwnd,
@@ -476,7 +526,7 @@ fn key_name(k: &str) -> Option<&'static str> {
 fn with_screen<R>(name: &str, f: impl FnOnce(&mut Screen) -> R) -> Result<R, String> {
     SCREEN.with(|s| match s.borrow_mut().as_mut() {
         Some(sc) => Ok(f(sc)),
-        None => Err(format!("{} draws in a window; open one first with window(width, height)", name)),
+        None => Err(format!("{} works with a window; open one first with window(width, height)", name)),
     })
 }
 
@@ -522,23 +572,21 @@ pub fn tell_problem(msg: &str) {
     let _ = msg;
 }
 
-/// Whole numbers for positions: fractions are rounded down.
-fn pos(v: &Value, name: &str) -> Result<i64, String> {
+/// A position or size: any ordinary number.
+fn coord(v: &Value, name: &str) -> Result<f64, String> {
     let x = num(v, name)?;
     if !x.is_finite() {
         return Err(format!("{} needs an ordinary number, not {}", name, x));
     }
-    Ok(x.floor() as i64)
+    Ok(x)
 }
 
-fn opt_colour(a: &[Value], i: usize, name: &str, default: u32) -> Result<u32, String> {
-    match a.get(i) {
-        Some(v) => colour(v, name),
-        None => Ok(default),
-    }
+/// Whole numbers, for the classic look: fractions are rounded down.
+fn pos(v: &Value, name: &str) -> Result<i64, String> {
+    Ok(coord(v, name)?.floor() as i64)
 }
 
-fn opt_size(a: &[Value], i: usize, name: &str) -> Result<i64, String> {
+fn opt_size(a: &[Value], i: usize, name: &str) -> Result<usize, String> {
     match a.get(i) {
         None => Ok(1),
         Some(v) => {
@@ -546,7 +594,7 @@ fn opt_size(a: &[Value], i: usize, name: &str) -> Result<i64, String> {
             if n != n.trunc() || !(1.0..=64.0).contains(&n) {
                 return Err(format!("{} needs a size that is a whole number from 1 to 64, not {}", name, v.show()));
             }
-            Ok(n as i64)
+            Ok(n as usize)
         }
     }
 }
@@ -558,9 +606,14 @@ fn inputs(a: &[Value], lo: usize, hi: usize, name: &str, what: &str) -> Result<(
     Ok(())
 }
 
-const WHITE: u32 = 0xFFFFFF;
+fn yes_no(v: &Value, name: &str) -> Result<bool, String> {
+    match v {
+        Value::Bool(b) => Ok(*b),
+        _ => Err(format!("{} needs yes or no, not {}", name, v.show())),
+    }
+}
 
-// ---------- the built-in functions ----------
+// ---------- the built-in functions: the window ----------
 
 /// window(width, height [, title [, scale]])
 pub fn b_window(_: &mut Interp, a: Vec<Value>) -> Res {
@@ -572,8 +625,8 @@ pub fn b_window(_: &mut Interp, a: Vec<Value>) -> Res {
         }
         Ok(n as usize)
     };
-    let w = whole(&a[0], "width", 4096.0)?;
-    let h = whole(&a[1], "height", 4096.0)?;
+    let w = whole(&a[0], "width", 8192.0)?;
+    let h = whole(&a[1], "height", 8192.0)?;
     let title = match a.get(2) {
         Some(v) => text(v, "window")?.to_string(),
         None => "Antares".to_string(),
@@ -591,9 +644,20 @@ pub fn b_window(_: &mut Interp, a: Vec<Value>) -> Res {
 
 #[cfg(windows)]
 fn open(w: usize, h: usize, title: &str, scale: Option<usize>) -> Result<(), String> {
-    let (hwnd, scale) = win::open(w, h, title, scale)?;
+    let (hwnd, zoom) = win::open(w, h, title, scale)?;
+    let now = Instant::now();
     SCREEN.with(|s| {
-        *s.borrow_mut() = Some(Screen { canvas: Canvas::new(w, h), scale, input: Input::default(), next: Instant::now(), closed: false, hwnd })
+        *s.borrow_mut() = Some(Screen {
+            canvas: Canvas::opaque(w, h),
+            view: View { zoom, x: 0, y: 0, full: None },
+            window_zoom: zoom,
+            saved: [0; 4],
+            input: Input::default(),
+            next: now,
+            last: now,
+            closed: false,
+            hwnd,
+        })
     });
     win::show(hwnd);
     pump();
@@ -602,7 +666,7 @@ fn open(w: usize, h: usize, title: &str, scale: Option<usize>) -> Result<(), Str
 
 #[cfg(not(windows))]
 fn open(_: usize, _: usize, _: &str, _: Option<usize>) -> Result<(), String> {
-    Err("graphics windows work on Windows for now; macOS and Linux are coming".into())
+    Err("graphics windows work on Windows for now; macOS and Linux are coming (pictures made with picture(width, height) work everywhere)".into())
 }
 
 /// window_open(): yes until the player closes the window.
@@ -615,7 +679,8 @@ pub fn b_window_open(_: &mut Interp, a: Vec<Value>) -> Res {
     })
 }
 
-/// frame(): shows the picture, then waits for the next of 60 frames a second.
+/// frame(): shows the picture, then waits for the next of 60 frames a
+/// second. Gives the seconds since the last frame, for smooth movement.
 pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 0, "frame")?;
     let closed = with_screen("frame", |sc| sc.closed)?;
@@ -626,7 +691,7 @@ pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
         std::process::exit(0);
     }
     #[cfg(windows)]
-    with_screen("frame", |sc| win::present(sc.hwnd, &sc.canvas, sc.scale))?;
+    with_screen("frame", |sc| win::present(sc.hwnd, &sc.canvas, sc.view))?;
     let next = with_screen("frame", |sc| {
         sc.input.pressed.clear();
         let step = Duration::from_secs_f64(1.0 / 60.0);
@@ -648,61 +713,607 @@ pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
         }
     }
     pump();
+    let dt = with_screen("frame", |sc| {
+        let now = Instant::now();
+        let dt = (now - sc.last).as_secs_f64();
+        sc.last = now;
+        dt.min(0.25)
+    })?;
+    Ok(Value::Num(dt))
+}
+
+/// fullscreen([yes or no]): fills the screen with the window, or goes back
+/// to a window; with nothing, says whether it is fullscreen.
+pub fn b_fullscreen(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 0, 1, "fullscreen", "yes or no")?;
+    let Some(v) = a.first() else {
+        return Ok(Value::Bool(with_screen("fullscreen", |sc| sc.view.full.is_some())?));
+    };
+    let on = yes_no(v, "fullscreen")?;
+    let crisp = !style().smooth;
+    #[cfg(windows)]
+    with_screen("fullscreen", |sc| win::fullscreen(sc, on, crisp))?;
+    #[cfg(not(windows))]
+    let _ = (on, crisp, with_screen("fullscreen", |_| ())?);
     Ok(Value::Nothing)
 }
 
-/// fill([colour]): the whole picture in one colour (black if none is given).
+// ---------- the built-in functions: shapes ----------
+
+/// fill([colour]): paints the whole picture (black if no colour is given).
+/// A see-through colour paints over what is there, and "transparent"
+/// empties a picture.
 pub fn b_fill(_: &mut Interp, a: Vec<Value>) -> Res {
     inputs(&a, 0, 1, "fill", "a colour")?;
-    let c = opt_colour(&a, 0, "fill", 0)?;
-    with_screen("fill", |sc| sc.canvas.fill(c))?;
+    let p = match a.first() {
+        Some(v) => paint(v, "fill")?,
+        None => Paint::solid(BLACK),
+    };
+    let st = style();
+    with_target("fill", |c| match p {
+        Paint::Solid(0) => c.clear(0),
+        _ => c.fill(&p, st.blend),
+    })?;
     Ok(Value::Nothing)
 }
 
-/// rect(x, y, width, height [, colour])
+/// rect(x, y, width, height [, colour [, radius]]): radius rounds the corners.
 pub fn b_rect(_: &mut Interp, a: Vec<Value>) -> Res {
-    inputs(&a, 4, 5, "rect", "x, y, a width and a height, and optionally a colour")?;
-    let (x, y, w, h) = (pos(&a[0], "rect")?, pos(&a[1], "rect")?, pos(&a[2], "rect")?, pos(&a[3], "rect")?);
-    let c = opt_colour(&a, 4, "rect", WHITE)?;
-    with_screen("rect", |sc| sc.canvas.rect(x, y, w, h, c))?;
-    Ok(Value::Nothing)
+    inputs(&a, 4, 6, "rect", "x, y, a width and a height, and optionally a colour and a corner radius")?;
+    let st = style();
+    let p = opt_paint(&a, 4, "rect")?;
+    let radius = match a.get(5) {
+        Some(v) => coord(v, "rect")?,
+        None => 0.0,
+    };
+    let [mut x, mut y, mut w, mut h] = [coord(&a[0], "rect")?, coord(&a[1], "rect")?, coord(&a[2], "rect")?, coord(&a[3], "rect")?];
+    if !st.smooth {
+        [x, y, w, h] = [x.floor(), y.floor(), w.floor(), h.floor()];
+    }
+    if w <= 0.0 || h <= 0.0 {
+        return Ok(Value::Nothing);
+    }
+    shape("rect", vec![raster::rect(x, y, w, h, radius)], p)
 }
 
 /// circle(x, y, radius [, colour])
 pub fn b_circle(_: &mut Interp, a: Vec<Value>) -> Res {
     inputs(&a, 3, 4, "circle", "x, y and a radius, and optionally a colour")?;
-    let (x, y, r) = (pos(&a[0], "circle")?, pos(&a[1], "circle")?, num(&a[2], "circle")?);
-    let c = opt_colour(&a, 3, "circle", WHITE)?;
-    with_screen("circle", |sc| sc.canvas.circle(x, y, r, c))?;
-    Ok(Value::Nothing)
+    let (x, y, r) = (coord(&a[0], "circle")?, coord(&a[1], "circle")?, coord(&a[2], "circle")?);
+    let p = opt_paint(&a, 3, "circle")?;
+    if r < 0.0 {
+        return Ok(Value::Nothing);
+    }
+    if !style().smooth {
+        // the classic look: centred on a pixel, 2 r + 1 pixels across
+        return shape("circle", vec![pixel_circle(x.floor(), y.floor(), r)], p);
+    }
+    shape("circle", vec![raster::ellipse(x, y, r, r)], p)
 }
 
-/// line(x1, y1, x2, y2 [, colour])
+/// The outline of a circle drawn the classic way: whole rows of pixels.
+fn pixel_circle(cx: f64, cy: f64, r: f64) -> Vec<(f64, f64)> {
+    let ri = r.floor().min(1e6) as i64;
+    let limit = (r + 0.5) * (r + 0.5);
+    let half = |dy: i64| ((limit - (dy * dy) as f64).max(0.0).sqrt().floor() as i64).min(ri) as f64;
+    let mut right = vec![];
+    let mut left = vec![];
+    for dy in -ri..=ri {
+        let hw = half(dy);
+        let (top, bot) = (cy + dy as f64, cy + dy as f64 + 1.0);
+        right.push((cx + hw + 1.0, top));
+        right.push((cx + hw + 1.0, bot));
+        left.push((cx - hw, top));
+        left.push((cx - hw, bot));
+    }
+    left.reverse();
+    right.extend(left);
+    right
+}
+
+/// ellipse(x, y, radius across, radius down [, colour])
+pub fn b_ellipse(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 4, 5, "ellipse", "x, y, a radius across and a radius down, and optionally a colour")?;
+    let (x, y, rx, ry) = (coord(&a[0], "ellipse")?, coord(&a[1], "ellipse")?, coord(&a[2], "ellipse")?, coord(&a[3], "ellipse")?);
+    let p = opt_paint(&a, 4, "ellipse")?;
+    if rx <= 0.0 || ry <= 0.0 {
+        return Ok(Value::Nothing);
+    }
+    shape("ellipse", vec![raster::ellipse(x, y, rx, ry)], p)
+}
+
+/// ring(x, y, radius, thickness [, colour]): the outline of a circle.
+pub fn b_ring(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 4, 5, "ring", "x, y, a radius and a thickness, and optionally a colour")?;
+    let (x, y, r, t) = (coord(&a[0], "ring")?, coord(&a[1], "ring")?, coord(&a[2], "ring")?, coord(&a[3], "ring")?);
+    let p = opt_paint(&a, 4, "ring")?;
+    if r <= 0.0 || t <= 0.0 {
+        return Ok(Value::Nothing);
+    }
+    // the thickness is centred on the radius
+    let (outer, inner) = (r + t / 2.0, (r - t / 2.0).max(0.0));
+    let mut outlines = vec![raster::clockwise(raster::ellipse(x, y, outer, outer))];
+    if inner > 0.0 {
+        outlines.push(raster::anticlockwise(raster::ellipse(x, y, inner, inner)));
+    }
+    shape("ring", outlines, p)
+}
+
+/// The points of a polygon or path: [[x, y], [x, y], ...].
+fn points(v: &Value, name: &str) -> Result<Vec<(f64, f64)>, String> {
+    let bad = || format!("{} needs a list of points, like [[10, 10], [50, 20], [30, 40]], not {}", name, v.show());
+    let rows: Vec<Vec<f64>> = match v {
+        Value::List(l) => l.iter().map(|p| numbers(p, 2, name, "each point").map_err(|_| bad())).collect::<Result<_, _>>()?,
+        Value::Tensor(t) if t.shape.len() == 2 && t.shape[1] == 2 => t.vals().chunks(2).map(|c| c.to_vec()).collect(),
+        _ => return Err(bad()),
+    };
+    if rows.iter().flatten().any(|x| !x.is_finite()) {
+        return Err(format!("{} needs ordinary numbers for its points", name));
+    }
+    Ok(rows.into_iter().map(|p| (p[0], p[1])).collect())
+}
+
+/// polygon(points [, colour]): a filled shape with corners at the points.
+pub fn b_polygon(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 1, 2, "polygon", "a list of points, and optionally a colour")?;
+    let pts = points(&a[0], "polygon")?;
+    let p = opt_paint(&a, 1, "polygon")?;
+    if pts.len() < 3 {
+        return Ok(Value::Nothing);
+    }
+    shape("polygon", vec![pts], p)
+}
+
+/// Lines run through the middle of pixels, so a line at whole numbers is
+/// sharp.
+fn centred(pts: &[(f64, f64)]) -> Vec<(f64, f64)> {
+    pts.iter().map(|(x, y)| (x + 0.5, y + 0.5)).collect()
+}
+
+/// line(x1, y1, x2, y2 [, colour [, width]])
 pub fn b_line(_: &mut Interp, a: Vec<Value>) -> Res {
-    inputs(&a, 4, 5, "line", "x1, y1, x2 and y2, and optionally a colour")?;
-    let (x0, y0, x1, y1) = (pos(&a[0], "line")?, pos(&a[1], "line")?, pos(&a[2], "line")?, pos(&a[3], "line")?);
-    let c = opt_colour(&a, 4, "line", WHITE)?;
-    with_screen("line", |sc| sc.canvas.line(x0, y0, x1, y1, c))?;
-    Ok(Value::Nothing)
+    inputs(&a, 4, 6, "line", "x1, y1, x2 and y2, and optionally a colour and a width")?;
+    let c = [coord(&a[0], "line")?, coord(&a[1], "line")?, coord(&a[2], "line")?, coord(&a[3], "line")?];
+    let p = opt_paint(&a, 4, "line")?;
+    let width = match a.get(5) {
+        Some(v) => coord(v, "line")?,
+        None => 1.0,
+    };
+    let st = style();
+    if !st.smooth && width <= 1.0 && st.shadow.is_none() {
+        // the classic one-pixel line
+        let [x0, y0, x1, y1] = c.map(|v| v.floor() as i64);
+        with_target("line", |cv| {
+            let col = p.at(x0 as f64 + 0.5, y0 as f64 + 0.5);
+            cv.hard_line(x0, y0, x1, y1, col, st.blend);
+        })?;
+        return Ok(Value::Nothing);
+    }
+    shape("line", raster::stroke(&centred(&[(c[0], c[1]), (c[2], c[3])]), width, false), p)
+}
+
+/// path(points [, colour [, width]]): lines joining the points; it closes
+/// into a loop when the last point is the first.
+pub fn b_path(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 1, 3, "path", "a list of points, and optionally a colour and a width")?;
+    let mut pts = points(&a[0], "path")?;
+    let p = opt_paint(&a, 1, "path")?;
+    let width = match a.get(2) {
+        Some(v) => coord(v, "path")?,
+        None => 1.0,
+    };
+    let closed = pts.len() > 2 && pts.first() == pts.last();
+    if closed {
+        pts.pop();
+    }
+    if pts.is_empty() {
+        return Ok(Value::Nothing);
+    }
+    shape("path", raster::stroke(&centred(&pts), width, closed), p)
 }
 
 /// pixel(x, y [, colour])
 pub fn b_pixel(_: &mut Interp, a: Vec<Value>) -> Res {
     inputs(&a, 2, 3, "pixel", "x and y, and optionally a colour")?;
     let (x, y) = (pos(&a[0], "pixel")?, pos(&a[1], "pixel")?);
-    let c = opt_colour(&a, 2, "pixel", WHITE)?;
-    with_screen("pixel", |sc| sc.canvas.put(x, y, c))?;
+    let p = opt_paint(&a, 2, "pixel")?;
+    let mode = style().blend;
+    with_target("pixel", |c| c.put(x, y, p.at(x as f64 + 0.5, y as f64 + 0.5), mode))?;
     Ok(Value::Nothing)
 }
 
-/// label(text, x, y [, colour [, size]])
+/// colour_at(x, y): the colour of a pixel, as [red, green, blue] (with a
+/// fourth part if it is see-through).
+pub fn b_colour_at(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 2, "colour_at")?;
+    let (x, y) = (pos(&a[0], "colour_at")?, pos(&a[1], "colour_at")?);
+    let p = with_target("colour_at", |c| c.get(x, y))?;
+    Ok(match p {
+        Some(p) => colour_value(Rgba::from_px(p)),
+        None => Value::Nothing,
+    })
+}
+
+// ---------- the built-in functions: colours and gradients ----------
+
+/// gradient(x1, y1, x2, y2, colours): colours changing smoothly along a line,
+/// to use anywhere a colour goes.
+pub fn b_gradient(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 5, "gradient")?;
+    let c = [coord(&a[0], "gradient")?, coord(&a[1], "gradient")?, coord(&a[2], "gradient")?, coord(&a[3], "gradient")?];
+    stops(&a[4], "gradient")?;
+    let pair = |x: f64, y: f64| crate::value::pack_list(vec![Value::Num(x), Value::Num(y)]);
+    Ok(Value::Map(Rc::new(vec![
+        ("gradient".into(), s("linear")),
+        ("from".into(), pair(c[0], c[1])),
+        ("to".into(), pair(c[2], c[3])),
+        ("colours".into(), a[4].clone()),
+    ])))
+}
+
+/// radial(x, y, radius, colours): colours changing smoothly outwards from a
+/// centre: glows, lights, spheres.
+pub fn b_radial(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 4, "radial")?;
+    let (x, y, r) = (coord(&a[0], "radial")?, coord(&a[1], "radial")?, coord(&a[2], "radial")?);
+    stops(&a[3], "radial")?;
+    Ok(Value::Map(Rc::new(vec![
+        ("gradient".into(), s("radial")),
+        ("centre".into(), crate::value::pack_list(vec![Value::Num(x), Value::Num(y)])),
+        ("radius".into(), Value::Num(r)),
+        ("colours".into(), a[3].clone()),
+    ])))
+}
+
+/// hsl(hue, saturation, lightness [, alpha]): a colour from its hue (0 to
+/// 360 degrees round the colour wheel), saturation and lightness (0 to 1).
+pub fn b_hsl(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 3, 4, "hsl", "a hue, a saturation and a lightness, and optionally an alpha")?;
+    let h = num(&a[0], "hsl")?.rem_euclid(360.0) / 60.0;
+    let (sat, l) = (num(&a[1], "hsl")?.clamp(0.0, 1.0), num(&a[2], "hsl")?.clamp(0.0, 1.0));
+    let alpha = match a.get(3) {
+        Some(v) => num(v, "hsl")?.clamp(0.0, 1.0),
+        None => 1.0,
+    };
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * sat;
+    let x = c * (1.0 - (h % 2.0 - 1.0).abs());
+    let (r, g, b) = match h as i64 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    let k = |v: f64| ((v + m) * 255.0).round();
+    Ok(colour_value(Rgba::new(k(r), k(g), k(b), alpha)))
+}
+
+/// mix(colour1, colour2, amount): a colour between two, from 0 (the first)
+/// to 1 (the second).
+pub fn b_mix(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 3, "mix")?;
+    let (p, q) = (colour(&a[0], "mix")?, colour(&a[1], "mix")?);
+    let t = num(&a[2], "mix")?.clamp(0.0, 1.0) as f32;
+    let m = Rgba { r: p.r + (q.r - p.r) * t, g: p.g + (q.g - p.g) * t, b: p.b + (q.b - p.b) * t, a: p.a + (q.a - p.a) * t };
+    Ok(colour_value(m))
+}
+
+// ---------- the built-in functions: how things are drawn ----------
+
+/// blend(mode): how what is drawn next combines with what is there:
+/// "normal", "add" (light: glows, fire), "multiply" (darken) or "screen"
+/// (lighten softly). blend() goes back to normal.
+pub fn b_blend(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 0, 1, "blend", "a mode: \"normal\", \"add\", \"multiply\" or \"screen\"")?;
+    let mode = match a.first() {
+        None => Blend::Normal,
+        Some(v) => match &*text(v, "blend")?.to_ascii_lowercase() {
+            "normal" => Blend::Normal,
+            "add" | "light" => Blend::Add,
+            "multiply" => Blend::Multiply,
+            "screen" => Blend::Screen,
+            other => return Err(format!("blend knows \"normal\", \"add\", \"multiply\" and \"screen\", not \"{}\"", other)),
+        },
+    };
+    STYLE.with(|s| s.borrow_mut().blend = mode);
+    Ok(Value::Nothing)
+}
+
+/// smooth(yes or no): smooth edges (the default), or hard pixel edges for
+/// the classic pixel-art look.
+pub fn b_smooth(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "smooth")?;
+    let on = yes_no(&a[0], "smooth")?;
+    STYLE.with(|s| s.borrow_mut().smooth = on);
+    Ok(Value::Nothing)
+}
+
+/// shadow(across, down, softness [, colour]): what is drawn next casts a
+/// soft shadow; shadow() turns shadows off.
+pub fn b_shadow(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.is_empty() {
+        STYLE.with(|s| s.borrow_mut().shadow = None);
+        return Ok(Value::Nothing);
+    }
+    inputs(&a, 3, 4, "shadow", "how far across and down it falls and its softness, and optionally a colour (or nothing, to turn shadows off)")?;
+    let (dx, dy, soft) = (coord(&a[0], "shadow")?, coord(&a[1], "shadow")?, coord(&a[2], "shadow")?);
+    if !(0.0..=200.0).contains(&soft) {
+        return Err(format!("shadow needs a softness from 0 to 200, not {}", a[2].show()));
+    }
+    let col = match a.get(3) {
+        Some(v) => colour(v, "shadow")?,
+        None => Rgba::new(0.0, 0.0, 0.0, 0.5),
+    };
+    STYLE.with(|s| s.borrow_mut().shadow = Some((dx.clamp(-500.0, 500.0), dy.clamp(-500.0, 500.0), soft, col)));
+    Ok(Value::Nothing)
+}
+
+/// font(name [, size [, style]]): the font labels are written in, like
+/// font("Segoe UI", 24, "bold"); font() goes back to the built-in pixel font.
+pub fn b_font(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 0, 3, "font", "a font name, and optionally a size and a style (\"bold\", \"italic\" or \"bold italic\")")?;
+    let Some(n) = a.first() else {
+        STYLE.with(|s| s.borrow_mut().font = None);
+        return Ok(Value::Nothing);
+    };
+    let name = text(n, "font")?.trim().to_string();
+    if name.is_empty() || name.eq_ignore_ascii_case("pixel") {
+        STYLE.with(|s| s.borrow_mut().font = None);
+        return Ok(Value::Nothing);
+    }
+    let size = match a.get(1) {
+        Some(v) => font_size(v, "font")?,
+        None => 16.0,
+    };
+    let st = match a.get(2) {
+        Some(v) => text(v, "font")?.to_ascii_lowercase(),
+        None => "".into(),
+    };
+    let words: Vec<&str> = st.split_whitespace().collect();
+    if let Some(w) = words.iter().find(|w| !["bold", "italic", "normal", "regular"].contains(w)) {
+        return Err(format!("font knows the styles \"bold\", \"italic\" and \"bold italic\", not \"{}\"", w));
+    }
+    let spec = FontSpec { name, size, bold: words.contains(&"bold"), italic: words.contains(&"italic") };
+    STYLE.with(|s| s.borrow_mut().font = Some(spec));
+    Ok(Value::Nothing)
+}
+
+fn font_size(v: &Value, name: &str) -> Result<f64, String> {
+    let n = num(v, name)?;
+    if !(1.0..=1000.0).contains(&n) {
+        return Err(format!("{} needs a font size from 1 to 1000 pixels, not {}", name, v.show()));
+    }
+    Ok(n)
+}
+
+/// The mask of some text in the current font, its top-left corner at (x, y).
+fn text_mask(t: &str, x: f64, y: f64, size: Option<&Value>, name: &str) -> Result<Mask, String> {
+    let (w, h, cov) = text_image(t, size, name)?;
+    Ok(Mask { x: x.round() as i64, y: y.round() as i64, w, h, cov })
+}
+
+fn text_image(t: &str, size: Option<&Value>, name: &str) -> Result<(usize, usize, Vec<f32>), String> {
+    match style().font {
+        None => {
+            let size = match size {
+                Some(v) => opt_size(std::slice::from_ref(v), 0, name)?,
+                None => 1,
+            };
+            Ok(pixel_text(t, size))
+        }
+        Some(spec) => {
+            let px = match size {
+                Some(v) => font_size(v, name)?,
+                None => spec.size,
+            };
+            let img = font_text(&spec, px, t);
+            Ok((img.0, img.1, img.2.clone()))
+        }
+    }
+}
+
+/// label(text, x, y [, colour [, size]]): text, its top-left corner at x, y.
+/// In the built-in pixel font, size makes it that many times as big; in a
+/// font chosen with `font`, it is the size in pixels.
 pub fn b_label(_: &mut Interp, a: Vec<Value>) -> Res {
     inputs(&a, 3, 5, "label", "some text, x and y, and optionally a colour and a size")?;
     let t = a[0].show();
-    let (x, y) = (pos(&a[1], "label")?, pos(&a[2], "label")?);
-    let c = opt_colour(&a, 3, "label", WHITE)?;
-    let size = opt_size(&a, 4, "label")?;
-    with_screen("label", |sc| sc.canvas.text(&t, x, y, c, size))?;
+    let (x, y) = (coord(&a[1], "label")?, coord(&a[2], "label")?);
+    let p = opt_paint(&a, 3, "label")?;
+    let m = text_mask(&t, x, y, a.get(4), "label")?;
+    let st = style();
+    with_target("label", |c| draw_mask(c, &m, &p, &st))?;
+    Ok(Value::Nothing)
+}
+
+/// measure(text [, size]): {width, height}, the size the text takes as a
+/// label, to centre it or fit it in a box.
+pub fn b_measure(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 1, 2, "measure", "some text, and optionally a size")?;
+    let (w, h, _) = text_image(&a[0].show(), a.get(1), "measure")?;
+    Ok(Value::Map(Rc::new(vec![("width".into(), Value::Num(w as f64)), ("height".into(), Value::Num(h as f64))])))
+}
+
+// ---------- the built-in functions: pictures ----------
+
+/// A picture as a value: {picture, width, height}.
+fn picture_value(id: usize, w: usize, h: usize) -> Value {
+    Value::Map(Rc::new(vec![("picture".into(), Value::Num(id as f64)), ("width".into(), Value::Num(w as f64)), ("height".into(), Value::Num(h as f64))]))
+}
+
+fn picture_id(v: &Value, name: &str) -> Result<usize, String> {
+    if let Value::Map(m) = v {
+        if let Some(Value::Num(n)) = field(m, "picture") {
+            let id = *n as usize;
+            if PICTURES.with(|p| id < p.borrow().len()) && *n == id as f64 {
+                return Ok(id);
+            }
+        }
+    }
+    Err(format!("{} needs a picture made by picture(file) or picture(width, height), not {}", name, v.show()))
+}
+
+fn add_picture(c: Canvas) -> Result<usize, String> {
+    PICTURES.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.len() >= 100_000 {
+            return Err("there are already 100000 pictures: make pictures once, before the game loop, and draw them many times".to_string());
+        }
+        p.push(c);
+        Ok(p.len() - 1)
+    })
+}
+
+/// picture(file): reads a PNG file; picture(width, height): a new,
+/// see-through picture to draw on with canvas.
+pub fn b_picture(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 1, 2, "picture", "a PNG file's name, or a width and a height")?;
+    if a.len() == 2 {
+        let whole = |v: &Value| -> Result<usize, String> {
+            let n = num(v, "picture")?;
+            if n != n.trunc() || !(1.0..=16384.0).contains(&n) {
+                return Err(format!("picture needs a width and height that are whole numbers from 1 to 16384, not {}", v.show()));
+            }
+            Ok(n as usize)
+        };
+        let (w, h) = (whole(&a[0])?, whole(&a[1])?);
+        let id = add_picture(Canvas::new(w, h))?;
+        return Ok(picture_value(id, w, h));
+    }
+    let file = text(&a[0], "picture")?.to_string();
+    if let Some(id) = LOADED.with(|l| l.borrow().get(&file).copied()) {
+        let (w, h) = PICTURES.with(|p| (p.borrow()[id].w, p.borrow()[id].h));
+        return Ok(picture_value(id, w, h));
+    }
+    let owned;
+    let data: &[u8] = match crate::builtins::embedded_file(&file) {
+        Some(Some(b)) => b,
+        Some(None) => return Err(format!("picture couldn't find \"{}\": no file of that name was embedded", file)),
+        None => {
+            owned = std::fs::read(&file).map_err(|e| format!("couldn't read the picture \"{}\": {}", file, e))?;
+            &owned
+        }
+    };
+    if data.starts_with(&[0xFF, 0xD8]) {
+        return Err(format!("\"{}\" is a JPEG file; picture reads PNG files, so save it as PNG first (any image editor can)", file));
+    }
+    let (w, h, px) = crate::png::decode(data).map_err(|e| format!("couldn't read the picture \"{}\": {}", file, e))?;
+    let id = add_picture(Canvas { w, h, px })?;
+    LOADED.with(|l| l.borrow_mut().insert(file, id));
+    Ok(picture_value(id, w, h))
+}
+
+/// canvas(picture): what is drawn next goes on the picture; canvas() goes
+/// back to the window.
+pub fn b_canvas(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 0, 1, "canvas", "a picture (or nothing, for the window)")?;
+    let target = match a.first() {
+        Some(v) => Some(picture_id(v, "canvas")?),
+        None => None,
+    };
+    TARGET.with(|t| t.set(target));
+    Ok(Value::Nothing)
+}
+
+/// The options `draw` knows.
+const DRAW_OPTIONS: &[&str] = &["scale", "width", "height", "angle", "alpha", "flip", "part", "tint", "smooth"];
+
+/// draw(picture, x, y [, options]): a picture, its top-left corner at x, y.
+/// Options: scale, width, height, angle (degrees, turning clockwise about its
+/// middle), alpha (0 to 1), flip (yes, "vertical" or "both"), part ([x, y,
+/// width, height], a frame of a sprite sheet), tint (a colour it is
+/// multiplied by) and smooth (no keeps pixels sharp when scaled).
+pub fn b_draw_picture(a: Vec<Value>) -> Res {
+    inputs(&a, 3, 4, "draw", "a picture, x and y, and optionally a map of options")?;
+    let id = picture_id(&a[0], "draw")?;
+    let (mut x, mut y) = (coord(&a[1], "draw")?, coord(&a[2], "draw")?);
+    let st = style();
+    let (pw, ph) = PICTURES.with(|p| (p.borrow()[id].w as f64, p.borrow()[id].h as f64));
+    let mut part = [0.0, 0.0, pw, ph];
+    let (mut scale, mut dw, mut dh, mut angle, mut alpha) = (1.0, None, None, 0.0f64, 1.0f64);
+    let (mut flip_x, mut flip_y, mut tint, mut nearest) = (false, false, None, !st.smooth);
+    if let Some(o) = a.get(3) {
+        let Value::Map(m) = o else {
+            return Err(format!("draw's fourth input is a map of options, like {{angle: 45, scale: 2}}, not {}", o.show()));
+        };
+        for (k, v) in m.iter() {
+            match &**k {
+                "scale" => scale = coord(v, "draw")?,
+                "width" => dw = Some(coord(v, "draw")?),
+                "height" => dh = Some(coord(v, "draw")?),
+                "angle" => angle = coord(v, "draw")?,
+                "alpha" => alpha = num(v, "draw")?.clamp(0.0, 1.0),
+                "flip" => match v {
+                    Value::Bool(b) => flip_x = *b,
+                    _ => match &*text(v, "draw")?.to_ascii_lowercase() {
+                        "horizontal" | "across" => flip_x = true,
+                        "vertical" | "down" => flip_y = true,
+                        "both" => (flip_x, flip_y) = (true, true),
+                        other => return Err(format!("draw's flip is yes, \"vertical\" or \"both\", not \"{}\"", other)),
+                    },
+                },
+                "part" => {
+                    let p = numbers(v, 4, "draw", "part")?;
+                    let (px0, py0) = (p[0].clamp(0.0, pw), p[1].clamp(0.0, ph));
+                    part = [px0.floor(), py0.floor(), (px0 + p[2]).clamp(px0, pw).floor(), (py0 + p[3]).clamp(py0, ph).floor()];
+                }
+                "tint" => tint = Some(colour(v, "draw")?),
+                "smooth" => nearest = !yes_no(v, "draw")?,
+                other => return Err(format!("draw doesn't know the option \"{}\"; it knows {}", other, DRAW_OPTIONS.join(", "))),
+            }
+        }
+    }
+    let (sw, sh) = (part[2] - part[0], part[3] - part[1]);
+    let dw = dw.unwrap_or(sw * scale);
+    let dh = dh.unwrap_or(sh * scale);
+    if sw <= 0.0 || sh <= 0.0 || dw <= 0.0 || dh <= 0.0 || alpha <= 0.0 {
+        return Ok(Value::Nothing);
+    }
+    if !st.smooth {
+        (x, y) = (x.floor(), y.floor());
+    }
+    // Drawing a picture on itself: draw a copy. Otherwise the picture is
+    // lent out of the list while it is drawn.
+    let target = TARGET.with(|t| t.get());
+    let src = if target == Some(id) {
+        PICTURES.with(|p| p.borrow()[id].clone())
+    } else {
+        PICTURES.with(|p| std::mem::replace(&mut p.borrow_mut()[id], Canvas::new(0, 0)))
+    };
+    let result = (|| {
+        let plain = angle == 0.0 && !flip_x && !flip_y && tint.is_none() && alpha >= 1.0 && dw == sw && dh == sh && x == x.floor() && y == y.floor();
+        if plain && st.shadow.is_none() && st.blend == Blend::Normal {
+            return with_target("draw", |c| c.blit(&src, part, x as i64, y as i64));
+        }
+        let (cx, cy) = (x + dw / 2.0, y + dh / 2.0);
+        let (sin, cos) = angle.to_radians().sin_cos();
+        let corner = |lx: f64, ly: f64| (cx + lx * cos - ly * sin, cy + lx * sin + ly * cos);
+        let (hw, hh) = (dw / 2.0, dh / 2.0);
+        let quad = vec![corner(-hw, -hh), corner(hw, -hh), corner(hw, hh), corner(-hw, hh)];
+        // from a point on the target back to the picture
+        let (fx, fy) = (if flip_x { -1.0 } else { 1.0 }, if flip_y { -1.0 } else { 1.0 });
+        let (kx, ky) = (sw / dw, sh / dh);
+        let inv = [
+            kx * fx * cos,
+            kx * fx * sin,
+            part[0] + kx * hw - kx * fx * (cx * cos + cy * sin),
+            -ky * fy * sin,
+            ky * fy * cos,
+            part[1] + ky * hh - ky * fy * (-cx * sin + cy * cos),
+        ];
+        let p = Paint::Image { src: &src, inv, clip: part, alpha: (alpha * 255.0).round() as u32, tint: tint.map(|t| t.to_px()), nearest };
+        with_target("draw", |c| {
+            if let Some(m) = raster::fill_in(&[quad], reach(c, &st), true) {
+                draw_mask(c, &m, &p, &st);
+            }
+        })
+    })();
+    if target != Some(id) {
+        PICTURES.with(|p| p.borrow_mut()[id] = src);
+    }
+    result?;
     Ok(Value::Nothing)
 }
 
@@ -714,7 +1325,7 @@ pub fn b_sprite(_: &mut Interp, a: Vec<Value>) -> Res {
     let Value::List(rows) = &a[0] else {
         return Err(format!("sprite needs its picture as a list of text rows, like [\".r.\", \"rrr\"], not a {}", a[0].kind()));
     };
-    let (x, y) = (pos(&a[1], "sprite")?, pos(&a[2], "sprite")?);
+    let (mut x, mut y) = (coord(&a[1], "sprite")?, coord(&a[2], "sprite")?);
     let Value::Map(map) = &a[3] else {
         return Err(format!("sprite needs a map from characters to colours, like {{r: \"red\"}}, not a {}", a[3].kind()));
     };
@@ -724,17 +1335,94 @@ pub fn b_sprite(_: &mut Interp, a: Vec<Value>) -> Res {
         let (Some(ch), None) = (cs.next(), cs.next()) else {
             return Err(format!("sprite's colours are named by one character each, not \"{}\"", k));
         };
-        colours.push((ch, colour(v, "sprite")?));
+        colours.push((ch, colour(v, "sprite")?.to_px()));
     }
-    let size = opt_size(&a, 4, "sprite")?;
-    let mut pixels = vec![];
+    let size = opt_size(&a, 4, "sprite")? as f64;
+    let mut lines = vec![];
     for r in rows.iter() {
         let row = text(r, "sprite").map_err(|_| format!("each row of a sprite is text, not a {}", r.kind()))?;
-        pixels.push(row.chars().map(|ch| colours.iter().find(|(k, _)| *k == ch).map(|(_, c)| *c)).collect::<Vec<_>>());
+        lines.push(row.chars().map(|ch| colours.iter().find(|(k, _)| *k == ch).map_or(0, |(_, c)| *c)).collect::<Vec<u32>>());
     }
-    with_screen("sprite", |sc| sc.canvas.sprite(&pixels, x, y, size))?;
+    let (w, h) = (lines.iter().map(|l| l.len()).max().unwrap_or(0), lines.len());
+    if w == 0 || h == 0 {
+        return Ok(Value::Nothing);
+    }
+    let mut pic = Canvas::new(w, h);
+    for (r, l) in lines.iter().enumerate() {
+        pic.px[r * w..r * w + l.len()].copy_from_slice(l);
+    }
+    let st = style();
+    if !st.smooth {
+        (x, y) = (x.floor(), y.floor());
+    }
+    let (dw, dh) = (w as f64 * size, h as f64 * size);
+    let quad = vec![(x, y), (x + dw, y), (x + dw, y + dh), (x, y + dh)];
+    let inv = [1.0 / size, 0.0, -x / size, 0.0, 1.0 / size, -y / size];
+    let p = Paint::Image { src: &pic, inv, clip: [0.0, 0.0, w as f64, h as f64], alpha: 255, tint: None, nearest: true };
+    with_target("sprite", |c| {
+        if let Some(m) = raster::fill_in(&[quad], reach(c, &st), st.smooth) {
+            draw_mask(c, &m, &p, &st);
+        }
+    })?;
     Ok(Value::Nothing)
 }
+
+/// screenshot(file): saves the picture being drawn on (the window's, or one
+/// chosen with canvas) as a PNG file.
+pub fn b_screenshot(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "screenshot")?;
+    let file = text(&a[0], "screenshot")?;
+    let png = with_target("screenshot", |c| c.png())?;
+    std::fs::write(&*file, png).map_err(|e| format!("couldn't save the screenshot to \"{}\": {}", file, e))?;
+    Ok(s(&*file))
+}
+
+// ---------- the built-in functions: effects ----------
+
+/// blur(radius [, x, y, width, height]): softens the picture, or part of it
+/// (frosted glass, depth of field).
+pub fn b_blur(_: &mut Interp, a: Vec<Value>) -> Res {
+    if a.len() != 1 && a.len() != 5 {
+        return Err(format!("blur takes a radius, and optionally x, y, a width and a height, but was given {} inputs", a.len()));
+    }
+    let r = coord(&a[0], "blur")?;
+    if !(0.0..=500.0).contains(&r) {
+        return Err(format!("blur needs a radius from 0 to 500, not {}", a[0].show()));
+    }
+    let area = if a.len() == 5 { Some([pos(&a[1], "blur")?, pos(&a[2], "blur")?, pos(&a[3], "blur")?, pos(&a[4], "blur")?]) } else { None };
+    with_target("blur", |c| {
+        let [x, y, w, h] = area.unwrap_or([0, 0, c.w as i64, c.h as i64]);
+        c.blur(x, y, w, h, r)
+    })?;
+    Ok(Value::Nothing)
+}
+
+/// glow(amount [, radius [, threshold]]): bright parts glow, as light does
+/// in a camera.
+pub fn b_glow(_: &mut Interp, a: Vec<Value>) -> Res {
+    inputs(&a, 1, 3, "glow", "an amount, and optionally a radius and a threshold")?;
+    let amount = num(&a[0], "glow")?.clamp(0.0, 10.0);
+    let radius = match a.get(1) {
+        Some(v) => coord(v, "glow")?.clamp(1.0, 500.0),
+        None => 16.0,
+    };
+    let threshold = match a.get(2) {
+        Some(v) => num(v, "glow")?.clamp(0.0, 1.0),
+        None => 0.6,
+    };
+    with_target("glow", |c| c.glow(amount, radius, threshold))?;
+    Ok(Value::Nothing)
+}
+
+/// vignette(amount): darkens the edges and corners, from 0 (not at all) to 1.
+pub fn b_vignette(_: &mut Interp, a: Vec<Value>) -> Res {
+    want(&a, 1, "vignette")?;
+    let amount = num(&a[0], "vignette")?;
+    with_target("vignette", |c| c.vignette(amount))?;
+    Ok(Value::Nothing)
+}
+
+// ---------- the built-in functions: input ----------
 
 fn key_input(a: &[Value], name: &str) -> Result<&'static str, String> {
     want(a, 1, name)?;
@@ -763,27 +1451,20 @@ pub fn b_mouse(_: &mut Interp, a: Vec<Value>) -> Res {
         (sc.input.mouse_x, sc.input.mouse_y, sc.input.held.contains(&"click"), sc.input.held.contains(&"right click"))
     })?;
     Ok(Value::Map(Rc::new(vec![
-        ("x".into(), Value::Num(x as f64)),
-        ("y".into(), Value::Num(y as f64)),
+        ("x".into(), Value::Num(x.floor())),
+        ("y".into(), Value::Num(y.floor())),
         ("left".into(), Value::Bool(l)),
         ("right".into(), Value::Bool(r)),
     ])))
-}
-
-/// screenshot(file): saves the picture as a PNG file.
-pub fn b_screenshot(_: &mut Interp, a: Vec<Value>) -> Res {
-    want(&a, 1, "screenshot")?;
-    let file = text(&a[0], "screenshot")?;
-    let png = with_screen("screenshot", |sc| sc.canvas.png())?;
-    std::fs::write(&*file, png).map_err(|e| format!("couldn't save the screenshot to \"{}\": {}", file, e))?;
-    Ok(s(&*file))
 }
 
 // ---------- Windows ----------
 
 #[cfg(windows)]
 mod win {
-    use super::{key_name, Canvas, SCREEN};
+    use super::{key_name, Canvas, Screen, View, SCREEN};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
     use std::ffi::c_void;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -841,6 +1522,12 @@ mod win {
         colors: [u32; 3],
     }
 
+    #[repr(C)]
+    struct Size {
+        cx: i32,
+        cy: i32,
+    }
+
     #[link(name = "user32")]
     unsafe extern "system" {
         fn RegisterClassExW(class: *const WndClassExW) -> u16;
@@ -861,11 +1548,30 @@ mod win {
         fn LoadIconW(instance: Handle, name: *const u16) -> Handle;
         fn SetProcessDPIAware() -> i32;
         fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        fn FillRect(dc: Handle, rect: *const Rect, brush: Handle) -> i32;
+        fn SetWindowLongPtrW(hwnd: Hwnd, index: i32, value: isize) -> isize;
+        fn SetWindowPos(hwnd: Hwnd, after: Hwnd, x: i32, y: i32, cx: i32, cy: i32, flags: u32) -> i32;
+        fn GetWindowRect(hwnd: Hwnd, rect: *mut Rect) -> i32;
+        fn InvalidateRect(hwnd: Hwnd, rect: *const Rect, erase: i32) -> i32;
     }
 
     #[link(name = "gdi32")]
     unsafe extern "system" {
         fn StretchDIBits(dc: Handle, x: i32, y: i32, w: i32, h: i32, sx: i32, sy: i32, sw: i32, sh: i32, bits: *const c_void, info: *const BitmapInfo, usage: u32, rop: u32) -> i32;
+        fn SetStretchBltMode(dc: Handle, mode: i32) -> i32;
+        fn SetBrushOrgEx(dc: Handle, x: i32, y: i32, old: *mut c_void) -> i32;
+        fn GetStockObject(kind: i32) -> Handle;
+        fn CreateCompatibleDC(dc: Handle) -> Handle;
+        fn DeleteDC(dc: Handle) -> i32;
+        fn CreateDIBSection(dc: Handle, info: *const BitmapInfo, usage: u32, bits: *mut *mut c_void, section: Handle, offset: u32) -> Handle;
+        fn SelectObject(dc: Handle, obj: Handle) -> Handle;
+        fn DeleteObject(obj: Handle) -> i32;
+        fn CreateFontW(h: i32, w: i32, esc: i32, orient: i32, weight: i32, italic: u32, underline: u32, strike: u32, charset: u32, out_prec: u32, clip_prec: u32, quality: u32, pitch: u32, face: *const u16) -> Handle;
+        fn SetTextColor(dc: Handle, colour: u32) -> u32;
+        fn SetBkMode(dc: Handle, mode: i32) -> i32;
+        fn TextOutW(dc: Handle, x: i32, y: i32, text: *const u16, n: i32) -> i32;
+        fn GetTextExtentPoint32W(dc: Handle, text: *const u16, n: i32, size: *mut Size) -> i32;
+        fn GdiFlush() -> i32;
     }
 
     #[link(name = "kernel32")]
@@ -883,7 +1589,12 @@ mod win {
     const WS_CAPTION: u32 = 0x00C0_0000;
     const WS_SYSMENU: u32 = 0x0008_0000;
     const WS_MINIMIZEBOX: u32 = 0x0002_0000;
+    const WS_POPUP: u32 = 0x8000_0000;
+    const WS_VISIBLE: u32 = 0x1000_0000;
     const STYLE: u32 = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+    const GWL_STYLE: i32 = -16;
+    const SWP_FRAMECHANGED: u32 = 0x0020;
+    const SWP_SHOWWINDOW: u32 = 0x0040;
 
     const WM_DESTROY: u32 = 0x0002;
     const WM_KILLFOCUS: u32 = 0x0008;
@@ -958,10 +1669,10 @@ mod win {
                     (msg == WM_KEYDOWN || msg == WM_KEYUP || wparam == 0x12 || wparam == 0x79).then_some(0)
                 }
                 WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => {
-                    let (x, y) = ((lparam & 0xFFFF) as i16 as i64, ((lparam >> 16) & 0xFFFF) as i16 as i64);
-                    let scale = sc.scale as i64;
-                    sc.input.mouse_x = x.div_euclid(scale);
-                    sc.input.mouse_y = y.div_euclid(scale);
+                    let (x, y) = ((lparam & 0xFFFF) as i16 as f64, ((lparam >> 16) & 0xFFFF) as i16 as f64);
+                    let v = sc.view;
+                    sc.input.mouse_x = (x - v.x as f64) / v.zoom;
+                    sc.input.mouse_y = (y - v.y as f64) / v.zoom;
                     match msg {
                         WM_LBUTTONDOWN => sc.input.down("click", false),
                         WM_LBUTTONUP => sc.input.up("click"),
@@ -976,7 +1687,7 @@ mod win {
                     None
                 }
                 WM_PAINT => {
-                    present(hwnd, &sc.canvas, sc.scale);
+                    present(hwnd, &sc.canvas, sc.view);
                     unsafe { ValidateRect(hwnd, std::ptr::null()) };
                     Some(0)
                 }
@@ -1001,8 +1712,12 @@ mod win {
         }
     }
 
-    /// Opens the window (not shown yet). Gives the window and the scale used.
-    pub fn open(w: usize, h: usize, title: &str, scale: Option<usize>) -> Result<(Hwnd, usize), String> {
+    fn screen_size() -> (usize, usize) {
+        unsafe { (GetSystemMetrics(0).max(320) as usize, GetSystemMetrics(1).max(240) as usize) }
+    }
+
+    /// Opens the window (not shown yet). Gives the window and its scale.
+    pub fn open(w: usize, h: usize, title: &str, scale: Option<usize>) -> Result<(Hwnd, f64), String> {
         static REGISTERED: AtomicBool = AtomicBool::new(false);
         let class = wide("AntaresWindow");
         unsafe {
@@ -1031,10 +1746,20 @@ mod win {
                 }
                 REGISTERED.store(true, Ordering::Relaxed);
             }
-            let (sw, sh) = (GetSystemMetrics(0).max(320) as usize, GetSystemMetrics(1).max(240) as usize);
-            // as big as fits comfortably on the screen, in whole steps so pixels stay square
-            let scale = scale.unwrap_or_else(|| (sw * 3 / 4 / w).min(sh * 3 / 4 / h).clamp(1, 32));
-            let mut r = Rect { left: 0, top: 0, right: (w * scale) as i32, bottom: (h * scale) as i32 };
+            let (sw, sh) = screen_size();
+            // As big as fits comfortably on the screen, in whole steps so
+            // pixels stay square; a picture too big for the screen is shrunk
+            // smoothly to fit.
+            let zoom = match scale {
+                Some(s) => s as f64,
+                None => {
+                    let whole = (sw * 3 / 4 / w).min(sh * 3 / 4 / h).clamp(1, 32) as f64;
+                    let fit = (sw as f64 * 0.9 / w as f64).min(sh as f64 * 0.85 / h as f64);
+                    if fit < 1.0 { fit } else { whole }
+                }
+            };
+            let (cw, ch) = ((w as f64 * zoom).round() as i32, (h as f64 * zoom).round() as i32);
+            let mut r = Rect { left: 0, top: 0, right: cw, bottom: ch };
             AdjustWindowRect(&mut r, STYLE, 0);
             let (ow, oh) = (r.right - r.left, r.bottom - r.top);
             let (x, y) = (((sw as i32 - ow) / 2).max(0), ((sh as i32 - oh) / 2).max(0));
@@ -1053,7 +1778,7 @@ mod win {
                     HID_CONSOLE.store(true, Ordering::Relaxed);
                 }
             }
-            Ok((hwnd, scale))
+            Ok((hwnd, zoom))
         }
     }
 
@@ -1074,8 +1799,40 @@ mod win {
         }
     }
 
-    /// Shows the picture in the window, scaled up.
-    pub fn present(hwnd: Hwnd, c: &Canvas, scale: usize) {
+    /// Fills the screen with the window, or puts it back as it was.
+    pub fn fullscreen(sc: &mut Screen, on: bool, crisp: bool) {
+        if on == sc.view.full.is_some() {
+            return;
+        }
+        let hwnd = sc.hwnd;
+        unsafe {
+            if on {
+                let mut r = Rect { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(hwnd, &mut r);
+                sc.saved = [r.left, r.top, r.right - r.left, r.bottom - r.top];
+                let (sw, sh) = screen_size();
+                let (w, h) = (sc.canvas.w as f64, sc.canvas.h as f64);
+                let mut zoom = (sw as f64 / w).min(sh as f64 / h);
+                // pixel art stays sharp in whole steps
+                if crisp && zoom >= 1.0 {
+                    zoom = zoom.floor();
+                }
+                let (dw, dh) = ((w * zoom).round() as i32, (h * zoom).round() as i32);
+                sc.view = View { zoom, x: (sw as i32 - dw) / 2, y: (sh as i32 - dh) / 2, full: Some((sw as i32, sh as i32)) };
+                SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE) as isize);
+                SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, sw as i32, sh as i32, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            } else {
+                sc.view = View { zoom: sc.window_zoom, x: 0, y: 0, full: None };
+                SetWindowLongPtrW(hwnd, GWL_STYLE, (STYLE | WS_VISIBLE) as isize);
+                let [x, y, w, h] = sc.saved;
+                SetWindowPos(hwnd, std::ptr::null_mut(), x, y, w, h, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            }
+            InvalidateRect(hwnd, std::ptr::null(), 0);
+        }
+    }
+
+    /// Shows the picture in the window, scaled.
+    pub fn present(hwnd: Hwnd, c: &Canvas, v: View) {
         let info = BitmapInfo {
             size: 40,
             width: c.w as i32,
@@ -1090,12 +1847,34 @@ mod win {
             clr_important: 0,
             colors: [0; 3],
         };
+        let (dw, dh) = ((c.w as f64 * v.zoom).round() as i32, (c.h as f64 * v.zoom).round() as i32);
         unsafe {
             let dc = GetDC(hwnd);
             if dc.is_null() {
                 return;
             }
-            StretchDIBits(dc, 0, 0, (c.w * scale) as i32, (c.h * scale) as i32, 0, 0, c.w as i32, c.h as i32, c.px.as_ptr().cast(), &info, 0, 0x00CC_0020);
+            if let Some((fw, fh)) = v.full {
+                // black bars around the picture
+                let black = GetStockObject(4); // BLACK_BRUSH
+                for r in [
+                    Rect { left: 0, top: 0, right: fw, bottom: v.y },
+                    Rect { left: 0, top: v.y + dh, right: fw, bottom: fh },
+                    Rect { left: 0, top: v.y, right: v.x, bottom: v.y + dh },
+                    Rect { left: v.x + dw, top: v.y, right: fw, bottom: v.y + dh },
+                ] {
+                    if r.right > r.left && r.bottom > r.top {
+                        FillRect(dc, &r, black);
+                    }
+                }
+            }
+            // whole steps copy pixels; other sizes are smoothed
+            if v.zoom == v.zoom.floor() {
+                SetStretchBltMode(dc, 3); // COLORONCOLOR
+            } else {
+                SetStretchBltMode(dc, 4); // HALFTONE
+                SetBrushOrgEx(dc, 0, 0, std::ptr::null_mut());
+            }
+            StretchDIBits(dc, v.x, v.y, dw, dh, 0, 0, c.w as i32, c.h as i32, c.px.as_ptr().cast(), &info, 0, 0x00CC_0020);
             ReleaseDC(hwnd, dc);
         }
     }
@@ -1106,11 +1885,98 @@ mod win {
             unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x10) }; // MB_ICONERROR
         }
     }
+
+    thread_local! {
+        /// Fonts made so far, kept for reuse.
+        static FONTS: RefCell<HashMap<(String, i32, bool, bool), Handle>> = RefCell::new(HashMap::new());
+    }
+
+    fn font(name: &str, size: f64, bold: bool, italic: bool) -> Handle {
+        let key = (name.to_string(), (size * 4.0).round() as i32, bold, italic);
+        if let Some(f) = FONTS.with(|f| f.borrow().get(&key).copied()) {
+            return f;
+        }
+        let face = wide(name);
+        // a negative height asks for the size of the letters themselves
+        let f = unsafe { CreateFontW(-(size.round() as i32).max(1), 0, 0, 0, if bold { 700 } else { 400 }, italic as u32, 0, 0, 1, 0, 0, 4, 0, face.as_ptr()) };
+        FONTS.with(|fs| fs.borrow_mut().insert(key, f));
+        f
+    }
+
+    /// Text in a Windows font, smoothed: its width, height, and how much of
+    /// each pixel the letters cover.
+    pub fn render_text(name: &str, size: f64, bold: bool, italic: bool, t: &str) -> (usize, usize, Vec<f32>) {
+        let lines: Vec<Vec<u16>> = t.split('\n').map(|l| l.encode_utf16().collect()).collect();
+        unsafe {
+            let dc = CreateCompatibleDC(std::ptr::null_mut());
+            if dc.is_null() {
+                return (0, 0, vec![]);
+            }
+            SelectObject(dc, font(name, size, bold, italic));
+            let mut sz = Size { cx: 0, cy: 0 };
+            let probe: Vec<u16> = "Ag".encode_utf16().collect();
+            GetTextExtentPoint32W(dc, probe.as_ptr(), 2, &mut sz);
+            let line_h = sz.cy.max(1);
+            let mut widths = vec![];
+            for l in &lines {
+                GetTextExtentPoint32W(dc, l.as_ptr(), l.len() as i32, &mut sz);
+                widths.push(if l.is_empty() { 0 } else { sz.cx });
+            }
+            // room for slanted letters that lean past their box
+            let extra = if italic { (size / 3.0).ceil() as i32 } else { (size / 10.0).ceil() as i32 };
+            let w = widths.iter().copied().max().unwrap_or(0) + extra;
+            let h = line_h * lines.len() as i32;
+            if w <= extra || h <= 0 {
+                DeleteDC(dc);
+                return (0, h.max(0) as usize, vec![]);
+            }
+            let info = BitmapInfo {
+                size: 40,
+                width: w,
+                height: -h,
+                planes: 1,
+                bit_count: 32,
+                compression: 0,
+                size_image: 0,
+                x_ppm: 0,
+                y_ppm: 0,
+                clr_used: 0,
+                clr_important: 0,
+                colors: [0; 3],
+            };
+            let mut bits: *mut c_void = std::ptr::null_mut();
+            let bmp = CreateDIBSection(dc, &info, 0, &mut bits, std::ptr::null_mut(), 0);
+            if bmp.is_null() || bits.is_null() {
+                DeleteDC(dc);
+                return (0, 0, vec![]);
+            }
+            let old = SelectObject(dc, bmp);
+            SetTextColor(dc, 0x00FF_FFFF);
+            SetBkMode(dc, 1); // TRANSPARENT
+            for (i, l) in lines.iter().enumerate() {
+                if !l.is_empty() {
+                    TextOutW(dc, 0, i as i32 * line_h, l.as_ptr(), l.len() as i32);
+                }
+            }
+            GdiFlush();
+            let n = (w * h) as usize;
+            let px = std::slice::from_raw_parts(bits as *const u32, n);
+            let cov = px.iter().map(|p| ((p >> 8) & 255) as f32 / 255.0).collect();
+            SelectObject(dc, old);
+            DeleteObject(bmp);
+            DeleteDC(dc);
+            (w as usize, h as usize, cov)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rgb(c: Rgba) -> u32 {
+        c.to_px() & 0xFF_FFFF
+    }
 
     #[test]
     fn font_glyphs_are_5_by_7() {
@@ -1126,74 +1992,40 @@ mod tests {
 
     #[test]
     fn colours() {
-        assert_eq!(colour(&Value::Str("red".into()), "t"), Ok(0xFF0000));
-        assert_eq!(colour(&Value::Str("Light Gray".into()), "t"), Ok(0xC0C0C0));
-        assert_eq!(colour(&Value::Str("#f80".into()), "t"), Ok(0xFF8800));
-        assert_eq!(colour(&Value::Str("#123abc".into()), "t"), Ok(0x123ABC));
-        let rgb = Value::List(Rc::new(vec![Value::Num(255.0), Value::Num(136.4), Value::Num(-3.0)]));
-        assert_eq!(colour(&rgb, "t"), Ok(0xFF8800));
-        assert!(colour(&Value::Str("redd".into()), "t").is_err());
-        assert!(colour(&Value::Str("#12".into()), "t").is_err());
+        let c = |t: &str| colour(&Value::Str(t.into()), "t");
+        assert_eq!(c("red").map(rgb), Ok(0xFF0000));
+        assert_eq!(c("Light Gray").map(rgb), Ok(0xC0C0C0));
+        assert_eq!(c("#f80").map(rgb), Ok(0xFF8800));
+        assert_eq!(c("#123abc").map(rgb), Ok(0x123ABC));
+        assert_eq!(c("#ff000080").map(|x| x.to_px()), Ok(0x8080_0000));
+        assert_eq!(c("transparent"), Ok(Rgba::CLEAR));
+        let list = |v: Vec<f64>| Value::List(Rc::new(v.into_iter().map(Value::Num).collect()));
+        assert_eq!(colour(&list(vec![255.0, 136.4, -3.0]), "t").map(rgb), Ok(0xFF8800));
+        assert_eq!(colour(&list(vec![255.0, 0.0, 0.0, 0.5]), "t").map(|x| x.to_px() >> 24), Ok(128));
+        assert!(colour(&list(vec![255.0, 0.0, 0.0, 128.0]), "t").unwrap_err().contains("alpha"));
+        assert!(c("redd").is_err());
+        assert!(c("#12").is_err());
         assert!(colour(&Value::Num(3.0), "t").is_err());
     }
 
     #[test]
-    fn shapes_stay_inside_the_picture() {
-        let mut c = Canvas::new(10, 8);
-        c.rect(-5, -5, 100, 100, 1);
-        assert!(c.px.iter().all(|p| *p == 1));
-        c.rect(8, 6, 5, 5, 2);
-        assert_eq!(c.get(9, 7), Some(2));
-        assert_eq!(c.get(7, 7), Some(1));
-        c.rect(3, 3, -2, 4, 9); // nothing for a negative width
-        assert!(!c.px.contains(&9));
-        c.rect(10, 7, 4, 4, 9); // starting at the right edge, on the bottom row
-        c.rect(25, 0, 4, 100, 9); // starting far past the right edge
-        c.rect(0, 8, 4, 4, 9); // starting below the bottom edge
-        assert!(!c.px.contains(&9));
-        let mut s = Canvas::new(10, 8);
-        s.sprite(&[vec![Some(7), Some(7)]], 12, 7, 2); // sprites draw with rect
-        assert!(!s.px.contains(&7));
-        c.line(-1_000_000_000, 4, 1_000_000_000, 4, 3); // far ends: clipped, so quick
-        assert!((0..10).all(|x| c.get(x, 4) == Some(3)));
-        c.line(0, 0, 9, 7, 4);
-        assert_eq!((c.get(0, 0), c.get(9, 7)), (Some(4), Some(4)));
-        c.circle(5, 4, 2.0, 5);
-        assert_eq!((c.get(5, 4), c.get(3, 4), c.get(7, 4), c.get(5, 2), c.get(5, 6)), (Some(5), Some(5), Some(5), Some(5), Some(5)));
-        assert_ne!(c.get(3, 2), Some(5)); // corners stay outside
-        c.circle(1000, 1000, 1e9, 6); // huge circles far away finish quickly enough to test
+    fn pixel_text_masks() {
+        let (w, h, cov) = pixel_text("I", 1);
+        assert_eq!((w, h), (6, 8));
+        assert_eq!((cov[1], cov[3 * 6 + 2], cov[0]), (1.0, 1.0, 0.0));
+        let (w, h, _) = pixel_text("ab\ncde", 2);
+        assert_eq!((w, h), (36, 32));
     }
 
     #[test]
-    fn circle_of_radius_0_is_one_pixel() {
-        let mut c = Canvas::new(5, 5);
-        c.circle(2, 2, 0.0, 7);
-        assert_eq!(c.px.iter().filter(|p| **p == 7).count(), 1);
-    }
-
-    #[test]
-    fn text_and_sprites() {
-        let mut c = Canvas::new(20, 10);
-        c.text("I", 0, 0, 1, 1);
-        assert_eq!((c.get(1, 0), c.get(2, 3), c.get(0, 0)), (Some(1), Some(1), Some(0)));
-        c.text("I", 0, 0, 2, 2); // twice the size
-        assert_eq!((c.get(2, 0), c.get(3, 1), c.get(4, 6)), (Some(2), Some(2), Some(2)));
-        let mut c = Canvas::new(4, 4);
-        c.fill(9);
-        c.sprite(&[vec![Some(1), None], vec![None, Some(2)]], 1, 1, 1);
-        assert_eq!((c.get(1, 1), c.get(2, 1), c.get(2, 2)), (Some(1), Some(9), Some(2)));
-    }
-
-    #[test]
-    fn png_is_well_formed() {
-        let mut c = Canvas::new(3, 2);
-        c.fill(0x112233);
-        let png = c.png();
-        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-        assert_eq!(&png[12..16], b"IHDR");
-        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 3);
-        assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
-        assert_eq!(crc32(b"IEND"), 0xAE42_6082);
-        assert_eq!(adler32(b"Wikipedia"), 0x11E6_0398);
+    fn classic_circles() {
+        // radius 2: 5 pixels across, corners left out
+        let m = raster::fill(&[pixel_circle(5.0, 4.0, 2.0)], 10, 8, true).unwrap();
+        let at = |x: i64, y: i64| m.cov[((y - m.y) * m.w as i64 + x - m.x) as usize];
+        assert_eq!((at(5, 4), at(3, 4), at(7, 4), at(5, 2), at(5, 6)), (1.0, 1.0, 1.0, 1.0, 1.0));
+        assert_eq!(at(3, 2), 0.0);
+        // radius 0: one pixel
+        let m = raster::fill(&[pixel_circle(2.0, 2.0, 0.0)], 5, 5, true).unwrap();
+        assert_eq!(m.cov.iter().filter(|v| **v == 1.0).count(), 1);
     }
 }

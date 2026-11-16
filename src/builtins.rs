@@ -2148,7 +2148,13 @@ fn b_clear(_: &mut Interp, a: Vec<Value>) -> Res {
 /// Redraws the screen in place: writes the text from the top-left corner
 /// in one go, so animation doesn't flicker.
 fn b_draw(_: &mut Interp, a: Vec<Value>) -> Res {
-    want(&a, 1, "draw")?;
+    // draw(picture, x, y [, options]) draws a picture in the window
+    if a.len() >= 3 {
+        return crate::gfx::b_draw_picture(a);
+    }
+    if a.len() != 1 {
+        return Err(format!("draw takes some text to show in the terminal, or a picture, x and y to draw in the window, but was given {} inputs", a.len()));
+    }
     ansi_ready();
     let mut out = String::from("\x1b[H");
     for line in a[0].show().lines() {
@@ -2370,6 +2376,26 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("pressed", crate::gfx::b_pressed),
         ("mouse", crate::gfx::b_mouse),
         ("screenshot", crate::gfx::b_screenshot),
+        ("fullscreen", crate::gfx::b_fullscreen),
+        ("ellipse", crate::gfx::b_ellipse),
+        ("ring", crate::gfx::b_ring),
+        ("polygon", crate::gfx::b_polygon),
+        ("path", crate::gfx::b_path),
+        ("colour_at", crate::gfx::b_colour_at),
+        ("gradient", crate::gfx::b_gradient),
+        ("radial", crate::gfx::b_radial),
+        ("hsl", crate::gfx::b_hsl),
+        ("mix", crate::gfx::b_mix),
+        ("blend", crate::gfx::b_blend),
+        ("smooth", crate::gfx::b_smooth),
+        ("shadow", crate::gfx::b_shadow),
+        ("font", crate::gfx::b_font),
+        ("measure", crate::gfx::b_measure),
+        ("picture", crate::gfx::b_picture),
+        ("canvas", crate::gfx::b_canvas),
+        ("blur", crate::gfx::b_blur),
+        ("glow", crate::gfx::b_glow),
+        ("vignette", crate::gfx::b_vignette),
         ("sound", crate::sound::b_sound),
         ("music", crate::sound::b_music),
         ("beep", crate::sound::b_beep),
