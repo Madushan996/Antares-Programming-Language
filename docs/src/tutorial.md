@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.8.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.8.0.
+This book covers **Antares 0.9.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.9.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.8.0
+Antares 0.9.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.8.0 — type a line and press Enter. `exit` to leave.
+Antares 0.9.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -3145,6 +3145,28 @@ To see where the compiler had to fall back to slower code, build with the settin
 
 > **Remember.** Make your program work first, with `antares program.ant`. Only then, if it's too slow, build it and tune it.
 
+## Using the graphics card
+
+Your computer's **graphics card**, or **GPU**, was made to work out the colours of millions of pixels at once. That makes it very good at the big sums machine learning needs, too. One line at the top of a program sends that work to the GPU:
+
+<!-- norun -->
+```antares
+use gpu
+```
+
+Everything else stays the same. Big matrix multiplications, the squashing functions, and the nudging done by `descend` then run on the graphics card. On an ordinary laptop, a network that takes half a minute to train on the CPU trains in about two seconds this way. `gpu()` tells you which graphics card Antares found:
+
+<!-- norun -->
+```antares
+show gpu()
+```
+
+```output
+Intel(R) HD Graphics 520
+```
+
+The GPU works with numbers that have about 7 digits instead of 16, so its answers can differ from the CPU's in the last few digits. That doesn't matter for machine learning, but it's why you turn the GPU on yourself. Without a graphics card Antares can use, `use gpu` says so and the program carries on with the CPU. The GPU works on Windows for now.
+
 ## Try it yourself
 
 1. Build one of your programs from earlier chapters with `antares build` and run the result. If you have Rust, try `--pack` too and compare the speed.
@@ -3155,6 +3177,7 @@ To see where the compiler had to fall back to slower code, build with the settin
 - `antares build program.ant` makes a stand-alone program: compiled and fast with Rust, packed (interpreter speed) without it.
 - `--cpu`, `--embed` and `--icon` control the build.
 - Keep variables to one kind, use constants, fixed tables and ranges, and check with `ANTARES_EXPLAIN=1`.
+- `use gpu` trains networks on the graphics card, many times faster; `gpu()` shows which one.
 
 # Projects {#projects}
 
@@ -3350,6 +3373,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.6.0 | 15 Nov 2026 | `antares build` works without Rust: programs to share are packed with Antares when Rust isn't installed. |
 | 0.7.0 | 16 Nov 2026 | Games in a window, with sound: drawing, the keyboard and mouse, sound effects, tunes and music (Windows). |
 | 0.8.0 | 16 Nov 2026 | The AI language: deep learning building blocks, faster training, and models that remember, use tools and answer in shapes. |
+| 0.9.0 | 16 Nov 2026 | Training on the graphics card: `use gpu`, many times faster, with nothing to install (Windows). |
 
 ## Version 0.1.0: the first release
 
@@ -3494,6 +3518,12 @@ Antares became a language made for artificial intelligence, in both halves: trai
 **AI models (Chapter 16):** answers with a shape (`as {name: text, age: number}`), conversations that remember (`conversation`, `history`), tools that let a model call your functions, pictures (`with image(...)`), replies that appear as they are written (`stream: yes`), OpenAI and free local models with Ollama as well as Claude, and embeddings (`embed`, `similarity`) for finding text by meaning.
 
 That makes 149 built-in functions. The `examples` folder has five new programs, among them `tiny_gpt.ant`, a small transformer that learns to write. Programs print exactly what they printed before.
+
+## Version 0.9.0: training on the graphics card
+
+One new line, `use gpu`, sends the heavy sums of machine learning to the computer's graphics card (Chapter 20): matrix multiplications, the squashing functions, the gradients, and the nudging done by `descend`. On a laptop's built-in graphics, training a network went from 29.5 seconds to under 2. `use cpu` switches back, and the new function `gpu()` says which graphics card Antares found. That makes 151 built-in functions.
+
+The GPU works with numbers of about 7 digits, so its answers can differ from the CPU's in the last few digits; that is why you turn it on yourself, and programs without `use gpu` print exactly what they printed before. It works on Windows, through Direct3D, which Windows includes, so there is nothing to install; elsewhere, programs carry on with the CPU.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -4343,6 +4373,7 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Deep learning | `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax`, `cross_entropy`, `mse`, `bce`, `take`, `concat`, `layer_norm`, `dropout`, `causal_mask`, `he`, `xavier`, `accuracy`, `top`, `sample` |
 | Data | `read_csv`, `columns`, `shuffle`, `batches` |
 | AI models | `conversation`, `history`, `image`, `embed`, `similarity` |
+| GPU | `gpu`, and the statements `use gpu` and `use cpu` |
 
 The Antares Language Reference describes every one of them in detail.
 
@@ -4379,6 +4410,7 @@ The Antares Language Reference describes every one of them in detail.
 | **embedding** | A row of numbers that stands for the meaning of a text |
 | **field** | A named part of a map, like `name` in `{name: "Ana"}` |
 | **function** | A named group of steps that can be used again and again |
+| **GPU** | The graphics card: a chip that does thousands of sums at once, used for training AI models |
 | **gradient** | For each learnable number, how fast the loss grows when that number grows |
 | **IDE** | An integrated development environment: one program for writing, running and fixing code, such as the Antares IDE |
 | **index** | The position number of an item in a list or text, counting from 0 |

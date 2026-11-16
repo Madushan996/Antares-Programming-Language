@@ -54,6 +54,9 @@ show ask helper "What is 17% of 2450?"
 - **AI in the language.** Conversations, tools, structured answers, images,
   streaming and embeddings for language models; tensors, autodiff,
   attention, layer norm, cross-entropy and AdamW for training your own.
+- **Trains on the GPU.** `use gpu` sends training to the graphics card on any
+  Windows PC, with nothing to install: 15 times faster than the CPU on a
+  laptop's built-in graphics.
   `examples/tiny_gpt.ant` is a working GPT-style transformer in about 100 lines.
 - **Any model.** Claude, OpenAI and services like it, or free and private
   models on your own computer with Ollama.
@@ -103,7 +106,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.8.0`.
+You should see `Antares 0.9.0`.
 
 ### Option 2: download it yourself
 
@@ -560,6 +563,43 @@ each batch in batches(shuffle(range(len(y))), 32) {
 }
 ```
 
+### Training on the GPU
+
+`use gpu` at the top of a program sends tensor maths to the graphics card:
+
+```
+use gpu
+learn w1 = he(784, 1024)
+...                                      # the rest of the program is unchanged
+```
+
+Big matrix products, element-wise maths and activations on large tensors,
+their gradients, and the optimisers then run on the GPU, and the numbers stay
+there between steps. Small sums stay on the CPU, where they are faster.
+`use cpu` switches back, and `gpu()` gives the graphics card's name (or
+nothing).
+
+- It works on any Windows PC with a graphics card or built-in graphics,
+  through Direct3D 11, which Windows includes. Nothing needs installing.
+- The GPU works in 32-bit numbers, so results agree with the CPU's to about
+  6 digits. That is why it is turned on with `use gpu` rather than
+  automatically: programs without it print exactly what they did before.
+- Without a usable GPU (and on macOS and Linux, for now), `use gpu` says so
+  once and everything stays on the CPU, so a program runs anywhere.
+- The first program to use the GPU waits about a second while its programs
+  for the graphics card are compiled; they are kept, so later programs start
+  at once.
+
+On a laptop's Intel HD Graphics 520, against its 4-core CPU:
+
+| Task | CPU | GPU |
+|---|---|---|
+| Training a 784-1024-1024-10 classifier, 10 steps | 29.5 s | 1.89 s |
+| A 3-layer 1024-wide forward pass, 10 times | 8.49 s | 0.89 s |
+| A 1024 x 1024 matrix product | 360 ms | 49 ms |
+
+A dedicated graphics card is many times faster again.
+
 ### A tiny GPT
 
 `examples/tiny_gpt.ant` is a GPT-style transformer, the kind of model behind
@@ -763,6 +803,7 @@ music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
 | Deep learning | `gelu silu softplus leaky_relu log_softmax cross_entropy mse bce take concat layer_norm dropout causal_mask he xavier accuracy top sample` |
 | Data | `read_csv columns shuffle batches` |
 | Models | `conversation history image embed similarity` (plus the `model` and `ask` statements) |
+| GPU | `gpu` (plus the `use gpu` and `use cpu` statements) |
 | Lists and maps | `push insert remove find unique map filter reduce sort sort_by reverse slice has keys values join` |
 | Text | `upper lower trim split lines replace find text number fixed pad code char` |
 | Data and files | `save load exists program_folder json to_json read write append delete files read_binary input input_waiting` |
@@ -792,7 +833,8 @@ code into machine code while it runs and Antares does not. Tensor maths runs
 as compiled code, which is why the matrix test beats both. Large matrix
 multiplications, and their gradients, are shared across all the CPU's cores:
 training a 256-512-10 network takes 5.5 times less time on 4 cores than on
-one, with exactly the same results.
+one, with exactly the same results. With `use gpu`, training runs on the
+graphics card instead (see [Training on the GPU](#training-on-the-gpu)).
 
 ## Compiling
 
@@ -890,6 +932,7 @@ Things to know:
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
 | `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
+| `src/gpu.rs` | The GPU: Direct3D 11 compute shaders for matrix products, element-wise maths, gradients and optimisers, and the shader cache |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
@@ -906,9 +949,8 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.8. Not there yet: giving a value to a slice
-(`v[1:3] = 0`), GPU support (planned next), and game windows and sound on
-macOS and Linux.
+This is version 0.9. Not there yet: giving a value to a slice
+(`v[1:3] = 0`), and the GPU, game windows and sound on macOS and Linux.
 
 ## Rebuilding the documentation
 
