@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.7.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.7.0.
+This book covers **Antares 0.8.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.8.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.7.0
+Antares 0.8.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.7.0 — type a line and press Enter. `exit` to leave.
+Antares 0.8.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -2468,6 +2468,59 @@ show net(x) -> round
 
 The network takes the inputs, multiplies by a matrix of learned weights (`@ w1`), adds learned numbers (`+ b1`), squashes the result with `tanh`, does it again, and finally squashes the answer between 0 and 1 with `sigmoid`. `using adam` picks the **Adam** method for nudging, which usually trains networks much faster than the plain method.
 
+## Choosing between classes
+
+Many problems are about choosing: is this email spam or not, which digit is in this picture, which word comes next? The answers are **classes**, numbered 0, 1, 2 and so on. A network for choosing gives a score for every class, and `cross_entropy` measures how wrong the scores are:
+
+```antares
+seed(3)
+points = [[1, 2], [2, 3], [3, 5], [2, 1], [3, 1], [4, 2]]
+classes = [1, 1, 1, 0, 0, 0]       # 1: above the diagonal, 0: below it
+
+learn w = zeros(2, 2)
+learn b = zeros(2)
+
+repeat 300 {
+    scores = points @ w + b        # two scores for each point
+    loss = cross_entropy(scores, classes)
+    descend loss by 0.1 using adam
+}
+
+show accuracy(points @ w + b, classes)
+```
+
+```output
+1
+```
+
+`cross_entropy(scores, classes)` is small when the right class has the highest score, and large when it doesn't. `accuracy` says what fraction of the points get the right class: 1 means all of them.
+
+## Better ways to learn
+
+`descend` has four ways of nudging the learnable numbers:
+
+| Way | When to use it |
+|---|---|
+| `descend loss by 0.1` | The plain way: always a step straight downhill |
+| `using momentum` | Steps build up speed when they keep going the same way |
+| `using adam` | Each number gets its own step size; usually much faster for networks |
+| `using adamw` | Adam that also keeps the numbers small, for big networks |
+
+Adding `clip 1` stops any single step from being too big, which keeps training steady: `descend loss by 0.01 using adamw clip 1`.
+
+## A peek inside modern AI
+
+The AI models that write text, such as Claude, are a kind of neural network called a **transformer**. A transformer reads text as a list of numbers, one per character or piece of a word. Its key idea is **attention**: every position in the text looks back at the positions before it and decides which ones matter for guessing what comes next.
+
+Antares has all the parts a transformer needs: `take` turns character numbers into rows of learned numbers, `causal_mask` stops a position from peeking at later ones, `layer_norm` keeps the numbers in a steady range, and `gelu` is the squashing function transformers use. The `examples` folder has `tiny_gpt.ant`, a complete small transformer in about 100 lines. It learns a page of verse in a few seconds and then writes new lines of its own:
+
+<!-- norun -->
+```shell
+antares examples/tiny_gpt.ant
+```
+
+Real models work the same way, but with billions of learned numbers instead of thousands, and trained on far more text.
+
 ## Keeping what was learned
 
 Training can take a while, so save the learned numbers with `save` and load them next time:
@@ -2485,6 +2538,7 @@ learn w1 = saved.w1        # carry on training, or just use it
 1. Change the learning rate in the straight-line example to `0.01` and then to `0.2`. What happens to the loss?
 2. Make data that follows `y = -2x + 5` and check that the program learns a slope of about -2.
 3. In the XOR example, change `repeat 1000` to `repeat 50`. Does the network still get all four answers right?
+4. In the classes example, add the point `[1, 4]` with class 1 and the point `[5, 1]` with class 0. Does the accuracy stay at 1?
 
 ## Summary
 
@@ -2492,10 +2546,12 @@ learn w1 = saved.w1        # carry on training, or just use it
 - `learn` marks adjustable values; `descend loss by rate` adjusts them.
 - Antares works out gradients automatically; `grad` shows them.
 - A neural network is learned matrices joined by squashing functions; `using adam` trains faster.
+- For choosing between classes, use `cross_entropy` to learn and `accuracy` to check.
+- Transformers, the networks behind AI chatbots, are built from attention; `examples/tiny_gpt.ant` is one.
 
 # Talking to AI Models {#ai}
 
-Antares can ask a large language model, such as Claude, a question and use the answer in your program, all in one line. This chapter shows how.
+Antares can ask a large language model, such as Claude, a question and use the answer in your program, all in one line. It can also hold a conversation, let the model use your own functions, show it pictures, and find text by its meaning. This chapter shows how.
 
 ## Declaring a model
 
@@ -2545,9 +2601,128 @@ names = ask claude "Give me five names for a cat, one per line." as list
 each n in names { show "-", n }
 ```
 
+## Answers with a shape
+
+When you need several facts at once, describe the shape of the answer after `as`, and you get a map with exactly those fields:
+
+<!-- norun -->
+```antares
+person = ask claude "Tell me about Ada Lovelace." as {name: text, born: number, known_for: list of text}
+show person.name, "was born in", person.born
+```
+
+The field kinds are `text`, `number`, `yes/no`, `list of ...` (like `list of number`), and maps inside maps. The model is told the exact shape, so the answer always fits. The echo model makes up an answer of the right shape, which is handy for testing:
+
+```antares
+model bot = "echo"
+show ask bot "Tell me about Ada" as {name: text, age: number}
+```
+
+```output
+{name: "Tell me about Ada", age: 0}
+```
+
+## Conversations
+
+Each `ask` normally starts fresh: the model doesn't remember the last question. A **conversation** remembers:
+
+<!-- norun -->
+```antares
+chat = conversation(claude)
+ask chat "My name is Ada and I like astronomy."
+show ask chat "What should I read next?"     # it knows your name and interests
+```
+
+`history(chat)` gives everything said so far, as a list of maps with a `role` (`user` or `assistant`) and the `text`:
+
+```antares
+model bot = "echo"
+chat = conversation(bot)
+ask chat "Hello"
+ask chat "How are you?"
+show len(history(chat)), history(chat)[0].text
+```
+
+```output
+4 Hello
+```
+
+## Tools: letting the model use your functions
+
+A model can only guess at things it can't see, like today's prices or the notes on your computer. Give it **tools**, your own functions, and it can call them to find out. Programs that let a model use tools are often called **agents**:
+
+<!-- norun -->
+```antares
+to percent(amount, rate) = amount * rate / 100
+
+notes = {meeting: "Friday at 10:00", groceries: "eggs, rice, tea"}
+to read_note(name) = notes[name]
+
+model helper = "anthropic:claude-opus-5-5" with {tools: [percent, read_note]}
+show ask helper "What is 17% of 2450, and when is my meeting?"
+```
+
+The model decides which functions to call and with what inputs. Antares runs them and hands back the results, and the model uses them to answer. To help the model, you can describe a tool with a map: `{run: read_note, about: "Reads one of my notes by name", inputs: {name: "text"}}`. The `examples` folder has `agent.ant`, a complete agent.
+
+## Pictures
+
+Models like Claude can look at pictures. Add them after `with`:
+
+<!-- norun -->
+```antares
+show ask claude "What animal is in this photo?" with image("pet.jpg")
+```
+
+`image` reads .png, .jpg, .gif and .webp files.
+
+## Replies as they arrive
+
+Long replies can take a while. With `stream: yes`, the words appear on the screen as the model writes them, and `ask` still gives back the whole reply at the end. `examples/chat.ant` is a chatbot built this way:
+
+<!-- norun -->
+```antares
+model storyteller = "anthropic:claude-opus-5-5" with {stream: yes}
+ask storyteller "Tell me a short story about a brave turtle."
+```
+
+## Other models, and free ones on your own computer
+
+Antares isn't tied to one company. Write a different provider before the colon:
+
+| Write | Model |
+|---|---|
+| `"anthropic:claude-opus-5-5"` | Claude, from Anthropic |
+| `"openai:gpt-5"` | GPT, from OpenAI |
+| `"ollama:llama3.2"` | A free model that runs on your own computer |
+
+**Ollama** runs AI models on your own computer: free, private, and working without the internet once a model is downloaded. Install it from ollama.com, download a model in the terminal with `ollama pull llama3.2`, and use it like any other:
+
+<!-- norun -->
+```antares
+model local = "ollama:llama3.2"
+show ask local "Give me a fun fact about octopuses."
+```
+
+## Meaning as numbers
+
+An **embedding** turns a piece of text into a row of numbers, so that texts with similar meanings get similar numbers. `embed` makes them and `similarity` compares them (1 means the same direction, 0 unrelated). This is how a program finds the notes that answer a question, even when they use different words:
+
+```antares
+model e = "echo"
+notes = ["cats sleep a lot", "the bus leaves at noon", "dogs love to play"]
+scores = similarity(embed(e, "when does the bus leave"), embed(e, notes))
+show notes[top(scores, 1)[0]]
+```
+
+```output
+the bus leaves at noon
+```
+
+The echo model's embeddings only notice shared letters; a real embedding model, such as `"openai:text-embedding-3-small"` or `"ollama:nomic-embed-text"`, understands meaning. `examples/search.ant` uses embeddings to answer questions from a set of notes.
+
 ## Setting up access
 
-Real models need an **API key**, a secret password for the model service. Get one from the provider's website (for Claude, the Anthropic Console), then set it in the terminal before running your program.
+Real models need an **API key**, a secret password for the model service. Get one from the provider's website (for Claude, the Anthropic Console; for GPT, the OpenAI platform), then set it in the terminal before running your program. Use `ANTHROPIC_API_KEY` for Claude and `OPENAI_API_KEY` for OpenAI. Models on your own computer with Ollama need no key.
 
 On Windows (PowerShell):
 
@@ -2604,12 +2779,18 @@ try {
 1. Using the echo model, ask a question built from a variable with `{ }`, and show the reply.
 2. With the echo model, get the number from `"There are 12 months"` using `as number`, and show it multiplied by 2.
 3. If you have an API key, write a quiz program that asks the model for a capital city question and checks the user's typed answer.
+4. With the echo model, start a conversation, ask three questions, and show how many messages the history holds.
+5. With the echo model, ask for an answer shaped `{title: text, pages: number}` and show its `pages` plus 10.
 
 ## Summary
 
 - `model name = "provider:model"` declares a model; `with {system: ...}` guides it.
 - `ask name "question"` gives the reply as text; `as number`, `as yes/no` and `as list` give real values.
-- Real models need the `ANTHROPIC_API_KEY` setting; the `"echo"` model works offline.
+- `as {name: text, ...}` gives an answer with exactly the fields you ask for.
+- `conversation(model)` remembers what was said; `history` shows it.
+- `with {tools: [...]}` lets the model call your functions; `with image(...)` shows it a picture; `stream: yes` shows the reply as it arrives.
+- Claude, OpenAI and local Ollama models all work the same way; `embed` and `similarity` find text by meaning.
+- Real models need an API key setting; the `"echo"` model works offline.
 - Wrap model calls in `try` when the program must keep going.
 
 # Integers and Bits {#integers}
@@ -3168,6 +3349,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.5.0 | 15 Nov 2026 | Everyday features: `+=`, the command line, laying out numbers, editing lists, the date and time, and files. |
 | 0.6.0 | 15 Nov 2026 | `antares build` works without Rust: programs to share are packed with Antares when Rust isn't installed. |
 | 0.7.0 | 16 Nov 2026 | Games in a window, with sound: drawing, the keyboard and mouse, sound effects, tunes and music (Windows). |
+| 0.8.0 | 16 Nov 2026 | The AI language: deep learning building blocks, faster training, and models that remember, use tools and answer in shapes. |
 
 ## Version 0.1.0: the first release
 
@@ -3302,6 +3484,16 @@ Antares can make real games now (Chapter 19). On Windows, a program can open a w
 That makes 122 built-in functions. `key()` and `wait()` work in a window too, and the `examples` folder has a new game, `catch.ant`: catch the falling stars and dodge the rocks.
 
 A game built with `antares build` opens just its window when you double-click it, and `--embed` packs its sound files inside. On macOS and Linux, windows aren't available yet and sounds are silent. Programs print exactly what they printed before; if one of yours already used a name like `line` or `sound` for a variable, it still works.
+
+## Version 0.8.0: the AI language
+
+Antares became a language made for artificial intelligence, in both halves: training your own models, and using big ones.
+
+**Training (Chapter 15):** `cross_entropy` for choosing between classes, with `accuracy` to check; the activations `gelu`, `silu`, `softplus` and `leaky_relu`; the building blocks of transformers (`take`, `concat`, `layer_norm`, `dropout`, `causal_mask`); starting weights with `he` and `xavier`; `top` and `sample` for reading results and writing text; and `read_csv`, `columns`, `shuffle` and `batches` for data. `descend` learned `using adamw`, `using momentum` and `clip`. Big matrix sums now use every core of the computer, with exactly the same results.
+
+**AI models (Chapter 16):** answers with a shape (`as {name: text, age: number}`), conversations that remember (`conversation`, `history`), tools that let a model call your functions, pictures (`with image(...)`), replies that appear as they are written (`stream: yes`), OpenAI and free local models with Ollama as well as Claude, and embeddings (`embed`, `similarity`) for finding text by meaning.
+
+That makes 149 built-in functions. The `examples` folder has five new programs, among them `tiny_gpt.ant`, a small transformer that learns to write. Programs print exactly what they printed before.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -3882,6 +4074,25 @@ learned: y = -1.98205x + 4.961309
 
 3. Yes: with Adam, even 50 rounds are enough to get all four answers right. The network starts getting them wrong at about 5 rounds.
 
+4. Yes. Both new points are on the right side of the diagonal, so the network still separates them:
+
+```antares
+seed(3)
+points = [[1, 2], [2, 3], [3, 5], [2, 1], [3, 1], [4, 2], [1, 4], [5, 1]]
+classes = [1, 1, 1, 0, 0, 0, 1, 0]
+learn w = zeros(2, 2)
+learn b = zeros(2)
+repeat 300 {
+    loss = cross_entropy(points @ w + b, classes)
+    descend loss by 0.1 using adam
+}
+show accuracy(points @ w + b, classes)
+```
+
+```output
+1
+```
+
 ## Chapter 16: Talking to AI Models
 
 1. The echo model repeats the question:
@@ -3921,6 +4132,33 @@ when lower(trim(guess)) == lower(trim(capital)) {
 } else {
     show "Not quite: it's {capital}."
 }
+```
+
+4. Each question and each reply is one message, so three questions make six:
+
+```antares
+model bot = "echo"
+chat = conversation(bot)
+ask chat "one"
+ask chat "two"
+ask chat "three"
+show len(history(chat))
+```
+
+```output
+6
+```
+
+5. The echo model makes up 0 for numbers:
+
+```antares
+model bot = "echo"
+book = ask bot "Tell me about a book" as {title: text, pages: number}
+show book.pages + 10
+```
+
+```output
+10
 ```
 
 ## Chapter 17: Integers and Bits
@@ -4102,6 +4340,9 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Input and screen | `input input_waiting key wait draw clear clock now args env` |
 | Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
 | Sound | `sound music beep tune effect volume silence playing` |
+| Deep learning | `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax`, `cross_entropy`, `mse`, `bce`, `take`, `concat`, `layer_norm`, `dropout`, `causal_mask`, `he`, `xavier`, `accuracy`, `top`, `sample` |
+| Data | `read_csv`, `columns`, `shuffle`, `batches` |
+| AI models | `conversation`, `history`, `image`, `embed`, `similarity` |
 
 The Antares Language Reference describes every one of them in detail.
 
@@ -4126,11 +4367,16 @@ The Antares Language Reference describes every one of them in detail.
 
 | Word | Meaning |
 |---|---|
+| **agent** | A program that lets an AI model use tools to get a job done |
+| **attention** | The part of a transformer where each position looks back at earlier ones to decide what matters |
 | **broadcasting** | Stretching a smaller tensor to fit a bigger one in arithmetic, such as adding one number to every number in a list |
 | **bug** | A mistake that makes a program do the wrong thing |
 | **closure** | A function that remembers the variables around it when it was made |
+| **class** | One of the choices a network picks between, numbered from 0 |
 | **comment** | A note in a program, starting with `#`, that Antares ignores |
+| **conversation** | A model that remembers everything said to it with `ask` |
 | **compile** | To translate a whole program into a fast stand-alone program (`antares build`) |
+| **embedding** | A row of numbers that stands for the meaning of a text |
 | **field** | A named part of a map, like `name` in `{name: "Ana"}` |
 | **function** | A named group of steps that can be used again and again |
 | **gradient** | For each learnable number, how fast the loss grows when that number grows |
@@ -4156,4 +4402,6 @@ The Antares Language Reference describes every one of them in detail.
 | **slice** | Part of a list or text, written `[start:end]` |
 | **tensor** | A list or grid of numbers that can be calculated with as a whole |
 | **terminal** | The window where you type commands, such as `antares hello.ant` |
+| **tool** | A function of yours that an AI model is allowed to call |
+| **transformer** | The kind of neural network behind AI models that write text, built around attention |
 | **variable** | A name with a value |

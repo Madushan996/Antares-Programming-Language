@@ -360,7 +360,12 @@ pub fn call(f: &Value, args: Vec<Value>, line: u32) -> R<Value> {
 }
 
 pub fn rust_fn(name: &str, nparams: usize, f: impl Fn(Vec<Value>) -> R<Value> + 'static) -> Value {
-    Value::Rust(Rc::new(RustFn { name: name.to_string(), nparams, f: Box::new(f) }))
+    Value::Rust(Rc::new(RustFn { name: name.to_string(), params: vec![], nparams, f: Box::new(f) }))
+}
+
+/// A compiled function as a value, knowing its inputs' names.
+pub fn rust_fn_p(name: &str, params: &[&str], f: impl Fn(Vec<Value>) -> R<Value> + 'static) -> Value {
+    Value::Rust(Rc::new(RustFn { name: name.to_string(), params: params.iter().map(|p| p.to_string()).collect(), nparams: params.len(), f: Box::new(f) }))
 }
 
 pub fn binop(op: BinOp, a: &Value, b: &Value, line: u32) -> R<Value> {
@@ -491,7 +496,7 @@ pub fn learn(v: &Value, line: u32) -> R<Value> {
     }
 }
 
-pub fn descend(loss: &Value, rate: &Value, adam: bool, line: u32) -> R<()> {
+pub fn descend(loss: &Value, rate: &Value, optim: tensor::Optim, clip: Option<Value>, line: u32) -> R<()> {
     let rate = match rate.scalar() {
         Some(x) => x,
         None => return fail("the rate after `by` must be a number", line),
@@ -500,7 +505,14 @@ pub fn descend(loss: &Value, rate: &Value, adam: bool, line: u32) -> R<()> {
         Some(t) => t,
         None => return fail(format!("`descend` needs a number to make smaller, not a {}", loss.kind()), line),
     };
-    at(tensor::descend(&t, rate, adam), line)
+    let clip = match clip {
+        Some(c) => match c.scalar() {
+            Some(x) if x > 0.0 => Some(x),
+            _ => return fail("the limit after `clip` must be a number above 0", line),
+        },
+        None => None,
+    };
+    at(tensor::descend(&t, rate, optim, clip), line)
 }
 
 pub fn model(spec: &Value, opts: Option<&Value>, line: u32) -> R<Value> {
@@ -508,7 +520,7 @@ pub fn model(spec: &Value, opts: Option<&Value>, line: u32) -> R<Value> {
 }
 
 pub fn ask(m: &Value, prompt: &Value, kind: AskKind, line: u32) -> R<Value> {
-    at(interp::ask_value(m, &prompt.show(), kind), line)
+    at(interp::ask_value(it(), m, prompt, &kind), line)
 }
 
 // ---------- unboxing: values the compiler has proved are numbers ----------

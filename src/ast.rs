@@ -22,12 +22,14 @@ pub enum BinOp {
     Shr,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum AskKind {
     Text,
     Number,
     YesNo,
     List,
+    /// `as {name: text, age: number}` or `as list of number`: a structured answer.
+    Shape(Rc<crate::llm::Shape>),
 }
 
 pub enum Expr {
@@ -75,7 +77,8 @@ pub enum Stmt {
     Each { var: u32, iter: Expr, body: Vec<Stmt>, line: u32 },
     While { cond: Expr, body: Vec<Stmt>, line: u32 },
     When { arms: Vec<(Expr, Vec<Stmt>, u32)>, otherwise: Option<Vec<Stmt>> },
-    Descend { loss: Expr, rate: Expr, adam: bool, line: u32 },
+    /// `descend loss by rate [using method] [clip limit]`
+    Descend { loss: Expr, rate: Expr, optim: crate::tensor::Optim, clip: Option<Expr>, line: u32 },
     Try { body: Vec<Stmt>, var: Option<u32>, handler: Vec<Stmt> },
     Stop(u32),
     Skip(u32),
@@ -84,6 +87,8 @@ pub enum Stmt {
 
 pub struct FnDef {
     pub name: Rc<str>,
+    /// The inputs' names (a model calling it as a tool sees these).
+    pub params: Vec<Rc<str>>,
     pub nparams: usize,
     pub nslots: usize,
     pub body: Vec<Stmt>,

@@ -1,0 +1,35 @@
+# An agent: a model that uses your own Antares functions as tools.
+# Ask it something, and it decides which functions to call, calls them,
+# reads the results, and answers.
+#
+# With ANTHROPIC_API_KEY set this uses Claude; without it, the pretend
+# echo model (which just repeats the question) so the example still runs.
+
+to percent(amount, rate) = amount * rate / 100
+
+to days_until(day) {
+    week = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    today = now().weekday
+    give (find(week, day) - find(week, today) + 7) % 7
+}
+
+notes = {groceries: "eggs, rice, tea", meeting: "Friday at 10:00 with Nimal"}
+
+to read_note(name) {
+    when has(notes, name) { give notes[name] }
+    give "There is no note called {name}. The notes are: {join(keys(notes), ", ")}"
+}
+
+tools = [
+    percent,
+    {run: days_until, about: "How many days from today until a weekday, like \"Friday\"", inputs: {day: "text"}},
+    {run: read_note, about: "Reads one of the user's notes by name", inputs: {name: "text"}},
+]
+
+spec = "echo"
+when env("ANTHROPIC_API_KEY") != nothing { spec = "anthropic:claude-opus-5-5" }
+else { show "(Set ANTHROPIC_API_KEY to try this with Claude. Using the pretend echo model.)\n" }
+
+model helper = spec with {tools: tools, system: "You help with everyday questions. Use the tools for facts and sums."}
+
+show ask helper "What is 17% of 2450? And how many days until my meeting?"

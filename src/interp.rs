@@ -501,11 +501,11 @@ pub(crate) fn set_index(target: &mut Value, idx: Value, v: Value) -> Result<(), 
     set_in(target, &[Key::Idx(vec![idx])], v)
 }
 
-/// Asks a model and turns the reply into the kind of value wanted
-/// (used by compiled programs; the interpreter has the same logic inline).
-pub fn ask_value(model: &Value, prompt: &str, kind: AskKind) -> Result<Value, String> {
+/// Asks a model and turns the reply into the kind of value wanted. Tools
+/// the model calls run here, through the interpreter.
+pub fn ask_value(it: &mut Interp, model: &Value, prompt: &Value, kind: &AskKind) -> Result<Value, String> {
     let m = match model {
-        Value::Model(m) => m,
+        Value::Model(m) => m.clone(),
         other => {
             return Err(format!(
                 "`ask` needs a model first (made with `model name = \"...\"`), not a {}",
@@ -514,13 +514,34 @@ pub fn ask_value(model: &Value, prompt: &str, kind: AskKind) -> Result<Value, St
         }
     };
     let suffix = match kind {
-        AskKind::Text => "",
+        AskKind::Text | AskKind::Shape(_) => "",
         AskKind::Number => "\n\nReply with only a number and nothing else.",
         AskKind::YesNo => "\n\nReply with only the word yes or the word no.",
         AskKind::List => "\n\nReply with only the items, one per line, with no numbering, bullets or extra text.",
     };
-    let reply = llm::ask(m, prompt, suffix)?;
+    let want = match kind {
+        AskKind::Shape(s) => Some(&**s),
+        _ => None,
+    };
+    let parts = llm::parts_of(prompt);
+    let tools = m.tools.clone();
+    let mut run = |i: usize, input: &crate::json::J| -> Result<String, String> {
+        let t = &tools[i];
+        let args: Vec<Value> = t.inputs.iter().map(|(n, _)| input.get(n).map(crate::builtins::from_json).unwrap_or(Value::Nothing)).collect();
+        let out = it.call_native(&t.run, args)?;
+        Ok(match out {
+            Value::Str(s) => s.to_string(),
+            Value::Nothing => "done".to_string(),
+            other => crate::builtins::to_json(&other).unwrap_or_else(|_| other.show()),
+        })
+    };
+    let answer = llm::ask(&m, &parts, suffix, want, &mut run)?;
+    let reply = match &answer {
+        crate::json::J::Str(s) => s.clone(),
+        other => other.dump(),
+    };
     Ok(match kind {
+        AskKind::Shape(_) => crate::builtins::from_json(&answer),
         AskKind::Text => Value::Str(reply.trim().into()),
         AskKind::Number => match first_number(&reply) {
             Some(n) => Value::Num(n),
@@ -840,7 +861,7 @@ impl Interp {
                     return fail(m, *line);
                 }
             }
-            Stmt::Descend { loss, rate, adam, line } => {
+            Stmt::Descend { loss, rate, optim, clip, line } => {
                 let l = self.eval(loss, env)?;
                 let r = self.eval(rate, env)?;
                 let rate = match r.scalar() {
@@ -853,7 +874,14 @@ impl Interp {
                         return fail(format!("`descend` needs a number to make smaller, not a {}", l.kind()), *line)
                     }
                 };
-                tensor::descend(&t, rate, *adam).map_err(|m| Ctrl::Err(m, *line))?;
+                let clip = match clip {
+                    Some(c) => match self.eval(c, env)?.scalar() {
+                        Some(x) if x > 0.0 => Some(x),
+                        _ => return fail("the limit after `clip` must be a number above 0", *line),
+                    },
+                    None => None,
+                };
+                tensor::descend(&t, rate, *optim, clip).map_err(|m| Ctrl::Err(m, *line))?;
             }
             _ => {}
         }
@@ -1191,51 +1219,9 @@ impl Interp {
                 Value::Model(Rc::new(m))
             }
             Expr::Ask { model, prompt, kind, line } => {
-                let m = match self.eval(model, env)? {
-                    Value::Model(m) => m,
-                    other => {
-                        return fail(
-                            format!("`ask` needs a model first (made with `model name = \"...\"`), not a {}", other.kind()),
-                            *line,
-                        )
-                    }
-                };
-                let p = self.eval(prompt, env)?.show();
-                let suffix = match kind {
-                    AskKind::Text => "",
-                    AskKind::Number => "\n\nReply with only a number and nothing else.",
-                    AskKind::YesNo => "\n\nReply with only the word yes or the word no.",
-                    AskKind::List => "\n\nReply with only the items, one per line, with no numbering, bullets or extra text.",
-                };
-                let reply = llm::ask(&m, &p, suffix).map_err(|m| Ctrl::Err(m, *line))?;
-                match kind {
-                    AskKind::Text => Value::Str(reply.trim().into()),
-                    AskKind::Number => match first_number(&reply) {
-                        Some(n) => Value::Num(n),
-                        None => {
-                            return fail(format!("I asked for a number but the model said: {}", reply.trim()), *line)
-                        }
-                    },
-                    AskKind::YesNo => {
-                        let r = reply.trim().to_lowercase();
-                        if r.starts_with("yes") {
-                            Value::Bool(true)
-                        } else if r.starts_with("no") {
-                            Value::Bool(false)
-                        } else {
-                            return fail(format!("I asked for yes or no but the model said: {}", reply.trim()), *line);
-                        }
-                    }
-                    AskKind::List => {
-                        let items: Vec<Value> = reply
-                            .lines()
-                            .map(|l| l.trim().trim_start_matches(|c: char| c == '-' || c == '*' || c == '•').trim())
-                            .filter(|l| !l.is_empty())
-                            .map(|l| Value::Str(l.into()))
-                            .collect();
-                        Value::List(Rc::new(items))
-                    }
-                }
+                let m = self.eval(model, env)?;
+                let p = self.eval(prompt, env)?;
+                ask_value(self, &m, &p, kind).map_err(|e| Ctrl::Err(e, *line))?
             }
             _ => Value::Nothing,
         })

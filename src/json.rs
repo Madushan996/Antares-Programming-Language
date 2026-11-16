@@ -1,5 +1,6 @@
 //! A tiny JSON reader and writer (no dependencies).
 
+#[derive(Clone, Debug)]
 pub enum J {
     Null,
     Bool(bool),
@@ -21,6 +22,20 @@ impl J {
         match self {
             J::Str(s) => Some(s),
             _ => None,
+        }
+    }
+
+    /// The value written as JSON text.
+    pub fn dump(&self) -> String {
+        match self {
+            J::Null => "null".into(),
+            J::Bool(b) => b.to_string(),
+            J::Num(n) if n.is_finite() && *n == n.trunc() && n.abs() < 1e15 => format!("{}", *n as i64),
+            J::Num(n) if n.is_finite() => format!("{}", n),
+            J::Num(_) => "null".into(),
+            J::Str(s) => escape(s),
+            J::Arr(items) => format!("[{}]", items.iter().map(J::dump).collect::<Vec<_>>().join(",")),
+            J::Obj(fields) => format!("{{{}}}", fields.iter().map(|(k, v)| format!("{}:{}", escape(k), v.dump())).collect::<Vec<_>>().join(",")),
         }
     }
 }

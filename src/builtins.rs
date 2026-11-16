@@ -31,11 +31,11 @@ fn next_u64() -> u64 {
     })
 }
 
-fn uniform() -> f64 {
+pub(crate) fn uniform() -> f64 {
     (next_u64() >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn normal() -> f64 {
+pub(crate) fn normal() -> f64 {
     let u1 = uniform().max(1e-300);
     let u2 = uniform();
     (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos()
@@ -55,7 +55,7 @@ pub(crate) fn num(v: &Value, name: &str) -> Result<f64, String> {
     v.scalar().ok_or_else(|| format!("{} needs a number, not a {}", name, v.kind()))
 }
 
-fn ten(v: &Value, name: &str) -> Result<T, String> {
+pub(crate) fn ten(v: &Value, name: &str) -> Result<T, String> {
     v.as_tensor().ok_or_else(|| format!("{} needs numbers, not a {}", name, v.kind()))
 }
 
@@ -2156,7 +2156,7 @@ fn b_draw(_: &mut Interp, a: Vec<Value>) -> Res {
 
 // ---------- JSON ----------
 
-fn from_json(j: &J) -> Value {
+pub(crate) fn from_json(j: &J) -> Value {
     match j {
         J::Null => Value::Nothing,
         J::Bool(b) => Value::Bool(*b),
@@ -2187,7 +2187,7 @@ fn json_tensor(shape: &[usize], data: &[f64]) -> String {
     format!("[{}]", parts.join(","))
 }
 
-fn to_json(v: &Value) -> Result<String, String> {
+pub(crate) fn to_json(v: &Value) -> Result<String, String> {
     Ok(match v {
         Value::Unset | Value::Nothing => "null".into(),
         Value::Bool(b) => b.to_string(),
@@ -2370,5 +2370,32 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("volume", crate::sound::b_volume),
         ("silence", crate::sound::b_silence),
         ("playing", crate::sound::b_playing),
+        ("gelu", crate::nn::b_gelu),
+        ("silu", crate::nn::b_silu),
+        ("softplus", crate::nn::b_softplus),
+        ("leaky_relu", crate::nn::b_leaky_relu),
+        ("log_softmax", crate::nn::b_log_softmax),
+        ("cross_entropy", crate::nn::b_cross_entropy),
+        ("mse", crate::nn::b_mse),
+        ("bce", crate::nn::b_bce),
+        ("take", crate::nn::b_take),
+        ("concat", crate::nn::b_concat),
+        ("layer_norm", crate::nn::b_layer_norm),
+        ("dropout", crate::nn::b_dropout),
+        ("causal_mask", crate::nn::b_causal_mask),
+        ("xavier", crate::nn::b_xavier),
+        ("he", crate::nn::b_he),
+        ("accuracy", crate::nn::b_accuracy),
+        ("top", crate::nn::b_top),
+        ("sample", crate::nn::b_sample),
+        ("read_csv", crate::nn::b_read_csv),
+        ("columns", crate::nn::b_columns),
+        ("shuffle", crate::nn::b_shuffle),
+        ("batches", crate::nn::b_batches),
+        ("conversation", crate::llm::b_conversation),
+        ("history", crate::llm::b_history),
+        ("image", crate::llm::b_image),
+        ("embed", crate::llm::b_embed),
+        ("similarity", crate::llm::b_similarity),
     ]
 }

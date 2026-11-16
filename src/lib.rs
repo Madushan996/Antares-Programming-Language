@@ -12,6 +12,7 @@ pub mod interp;
 pub mod json;
 pub mod lexer;
 pub mod llm;
+pub mod nn;
 pub mod pack;
 pub mod parser;
 pub mod rt;

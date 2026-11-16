@@ -1,0 +1,36 @@
+# Answering questions from your own notes: find the notes that mean the
+# most like the question (with embeddings), then ask a model to answer
+# from them. This is what people call RAG (retrieval-augmented generation).
+#
+# With OPENAI_API_KEY set this makes embeddings with OpenAI, and with
+# ANTHROPIC_API_KEY it answers with Claude. Without them it uses the pretend
+# echo model, whose simple embeddings still find notes that share words.
+
+notes = [
+    "The library opens at 9 and closes at 6 on weekdays.",
+    "Bus 138 goes from Kandy to Colombo every half hour.",
+    "The tea factory tour costs 500 rupees and takes an hour.",
+    "The museum is closed on Mondays and free on Sundays.",
+    "The night market opens at 7 in the evening near the lake.",
+]
+
+embedding_model = "echo"
+when env("OPENAI_API_KEY") != nothing { embedding_model = "openai:text-embedding-3-small" }
+answer_model = "echo"
+when env("ANTHROPIC_API_KEY") != nothing { answer_model = "anthropic:claude-opus-5-5" }
+
+model embedder = embedding_model
+model claude = answer_model with {system: "Answer only from the notes you are given. If they don't say, say so."}
+
+vectors = embed(embedder, notes)          # one row of numbers per note
+
+to answer(question) {
+    scores = similarity(embed(embedder, question), vectors)
+    best = map(top(scores, 2), i => notes[i])
+    show "Question: {question}"
+    show "Closest notes: {join(best, " / ")}"
+    show "Answer: {ask claude "Notes:\n{join(best, "\n")}\n\nQuestion: {question}"}\n"
+}
+
+answer("When is the museum free?")
+answer("How often does the bus to Colombo go?")

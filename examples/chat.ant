@@ -1,0 +1,19 @@
+# A chatbot that remembers the conversation, with replies that appear
+# word by word as they arrive.
+#
+# With ANTHROPIC_API_KEY set this chats with Claude; without it, with the
+# pretend echo model, which repeats what you say.
+
+spec = "echo"
+when env("ANTHROPIC_API_KEY") != nothing { spec = "anthropic:claude-opus-5-5" }
+
+model claude = spec with {system: "You are a friendly helper. Keep answers short.", stream: yes}
+chat = conversation(claude)
+
+show "Chat with the model. An empty line ends the chat.\n"
+while yes {
+    line = input("you: ")
+    when line == nothing or trim(line) == "" { stop }
+    ask chat line              # with stream: yes, the reply is shown as it arrives
+}
+show "\nThe conversation had {len(history(chat))} messages."
