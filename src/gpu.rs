@@ -12,16 +12,24 @@
 //! That is why the GPU is something a program turns on rather than a
 //! change underneath existing programs.
 //!
-//! macOS and Linux have no GPU support yet: `available()` is `None` there.
+//! On Linux, the same functions run on NVIDIA GPUs through CUDA (gpu_cuda.rs):
+//! Google Colab, Kaggle and Linux PCs with an NVIDIA card. macOS has no GPU
+//! support yet: `available()` is `None` there.
 
 #[cfg(windows)]
 pub use win::{available, bin_back, binary, col_sums, download, fill, matmul, matmul_bufs, optimise, sum_all, un_back, unary, upload, Buf};
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "gpu_cuda.rs"]
+mod cuda;
+#[cfg(target_os = "linux")]
+pub use cuda::{available, bin_back, binary, col_sums, download, fill, matmul, matmul_bufs, optimise, sum_all, un_back, unary, upload, Buf};
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub use none::*;
 
 /// Without GPU support, nothing ever reaches the GPU.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 mod none {
     const NO: &str = "the GPU isn't available on this computer";
 
@@ -926,142 +934,144 @@ mod win {
         let (ab, bb) = (upload(a)?, upload(b)?);
         download(&matmul_bufs(&ab, &bb, m, n, p, false, false)?, m * p)
     }
+}
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
+/// These run on whichever GPU there is (Direct3D on Windows, CUDA on Linux),
+/// and do nothing without one.
+#[cfg(all(test, any(windows, target_os = "linux")))]
+mod tests {
+    use super::*;
 
-        /// cargo test --release --lib benchmark -- --ignored --nocapture
-        #[test]
-        #[ignore]
-        fn benchmark_matmul() {
-            let Some(name) = available() else { return };
-            println!("GPU: {}", name);
-            for &n in &[128usize, 256, 512, 1024, 1536] {
-                let a = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 17) as f64 / 17.0).collect());
-                let b = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 13) as f64 / 13.0).collect());
-                let _ = matmul(&a.vals(), &b.vals(), n, n, n); // warm up
-                let reps = if n <= 512 { 5 } else { 2 };
-                let t = std::time::Instant::now();
-                for _ in 0..reps {
-                    let _ = crate::tensor::matmul(&a, &b).unwrap();
-                }
-                let cpu = t.elapsed().as_secs_f64() / reps as f64;
-                let t = std::time::Instant::now();
-                for _ in 0..reps {
-                    let _ = matmul(&a.vals(), &b.vals(), n, n, n).unwrap();
-                }
-                let gpu = t.elapsed().as_secs_f64() / reps as f64;
-                println!("{0} x {0}: CPU {1:.1} ms, GPU {2:.1} ms (with copying), {3:.1}x", n, cpu * 1e3, gpu * 1e3, cpu / gpu);
+    /// cargo test --release --lib benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn benchmark_matmul() {
+        let Some(name) = available() else { return };
+        println!("GPU: {}", name);
+        for &n in &[128usize, 256, 512, 1024, 1536] {
+            let a = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 17) as f64 / 17.0).collect());
+            let b = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 13) as f64 / 13.0).collect());
+            let _ = matmul(&a.vals(), &b.vals(), n, n, n); // warm up
+            let reps = if n <= 512 { 5 } else { 2 };
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                let _ = crate::tensor::matmul(&a, &b).unwrap();
+            }
+            let cpu = t.elapsed().as_secs_f64() / reps as f64;
+            let t = std::time::Instant::now();
+            for _ in 0..reps {
+                let _ = matmul(&a.vals(), &b.vals(), n, n, n).unwrap();
+            }
+            let gpu = t.elapsed().as_secs_f64() / reps as f64;
+            println!("{0} x {0}: CPU {1:.1} ms, GPU {2:.1} ms (with copying), {3:.1}x", n, cpu * 1e3, gpu * 1e3, cpu / gpu);
+        }
+    }
+
+    #[test]
+    fn element_wise_operations_match_the_cpu() {
+        if available().is_none() {
+            return;
+        }
+        let xs: Vec<f64> = (0..1000).map(|i| (i as f64 - 500.0) / 97.0).collect();
+        let ys: Vec<f64> = (0..1000).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
+        let (a, b) = (upload(&xs).unwrap(), upload(&ys).unwrap());
+        let row = upload(&ys[..10]).unwrap();
+        let one = upload(&[3.0]).unwrap();
+        let close = |g: f64, w: f64| (g - w).abs() <= 1e-4 * (1.0 + w.abs()) || (g.is_nan() && w.is_nan());
+        for (op, f) in [(super::ADD, (|x: f64, y: f64| x + y) as fn(f64, f64) -> f64), (super::SUB, |x, y| x - y), (super::MUL, |x, y| x * y), (super::DIV, |x, y| x / y), (super::MOD, |x: f64, y: f64| x.rem_euclid(y))] {
+            let got = download(&binary(op, super::SAME, &a, &b, 1000, 1000).unwrap(), 1000).unwrap();
+            for i in 0..1000 {
+                assert!(close(got[i], f(xs[i], ys[i])), "op {} at {}: {} vs {}", op, i, got[i], f(xs[i], ys[i]));
+            }
+            let got = download(&binary(op, super::B_ROW, &a, &row, 1000, 10).unwrap(), 1000).unwrap();
+            assert!(close(got[37], f(xs[37], ys[7])));
+            let got = download(&binary(op, super::B_ONE, &a, &one, 1000, 1).unwrap(), 1000).unwrap();
+            assert!(close(got[5], f(xs[5], 3.0)));
+        }
+        // powers of negative numbers, as the CPU does them
+        let got = download(&binary(super::POW, super::B_ONE, &a, &upload(&[2.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
+        assert!(close(got[0], xs[0] * xs[0]));
+        let got = download(&binary(super::POW, super::B_ONE, &a, &upload(&[3.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
+        assert!(close(got[0], xs[0].powi(3)));
+        use crate::tensor::UFn::*;
+        for (op, u) in [Exp, Log, Tanh, Sigmoid, Relu, Sqrt, Abs, Sin, Cos, Gelu, Silu, Softplus, LeakyRelu].into_iter().enumerate() {
+            let got = download(&unary(op as u32, &a, 1000).unwrap(), 1000).unwrap();
+            for i in (0..1000).step_by(7) {
+                let want = crate::tensor::apply(u, xs[i]);
+                assert!(close(got[i], want) || (want.is_nan() && got[i].is_nan()) || (want.is_infinite() && got[i].is_infinite()), "unary {} at x = {}: {} vs {}", op, xs[i], got[i], want);
             }
         }
+    }
 
-        #[test]
-        fn element_wise_operations_match_the_cpu() {
-            if available().is_none() {
-                return;
-            }
-            let xs: Vec<f64> = (0..1000).map(|i| (i as f64 - 500.0) / 97.0).collect();
-            let ys: Vec<f64> = (0..1000).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
-            let (a, b) = (upload(&xs).unwrap(), upload(&ys).unwrap());
-            let row = upload(&ys[..10]).unwrap();
-            let one = upload(&[3.0]).unwrap();
-            let close = |g: f64, w: f64| (g - w).abs() <= 1e-4 * (1.0 + w.abs()) || (g.is_nan() && w.is_nan());
-            for (op, f) in [(super::super::ADD, (|x: f64, y: f64| x + y) as fn(f64, f64) -> f64), (super::super::SUB, |x, y| x - y), (super::super::MUL, |x, y| x * y), (super::super::DIV, |x, y| x / y), (super::super::MOD, |x: f64, y: f64| x.rem_euclid(y))] {
-                let got = download(&binary(op, super::super::SAME, &a, &b, 1000, 1000).unwrap(), 1000).unwrap();
-                for i in 0..1000 {
-                    assert!(close(got[i], f(xs[i], ys[i])), "op {} at {}: {} vs {}", op, i, got[i], f(xs[i], ys[i]));
-                }
-                let got = download(&binary(op, super::super::B_ROW, &a, &row, 1000, 10).unwrap(), 1000).unwrap();
-                assert!(close(got[37], f(xs[37], ys[7])));
-                let got = download(&binary(op, super::super::B_ONE, &a, &one, 1000, 1).unwrap(), 1000).unwrap();
-                assert!(close(got[5], f(xs[5], 3.0)));
-            }
-            // powers of negative numbers, as the CPU does them
-            let got = download(&binary(super::super::POW, super::super::B_ONE, &a, &upload(&[2.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
-            assert!(close(got[0], xs[0] * xs[0]));
-            let got = download(&binary(super::super::POW, super::super::B_ONE, &a, &upload(&[3.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
-            assert!(close(got[0], xs[0].powi(3)));
-            use crate::tensor::UFn::*;
-            for (op, u) in [Exp, Log, Tanh, Sigmoid, Relu, Sqrt, Abs, Sin, Cos, Gelu, Silu, Softplus, LeakyRelu].into_iter().enumerate() {
-                let got = download(&unary(op as u32, &a, 1000).unwrap(), 1000).unwrap();
-                for i in (0..1000).step_by(7) {
-                    let want = crate::tensor::apply(u, xs[i]);
-                    assert!(close(got[i], want) || (want.is_nan() && got[i].is_nan()) || (want.is_infinite() && got[i].is_infinite()), "unary {} at x = {}: {} vs {}", op, xs[i], got[i], want);
-                }
-            }
+    #[test]
+    fn gradients_sums_and_optimisers_match_the_cpu() {
+        if available().is_none() {
+            return;
         }
+        let xs: Vec<f64> = (0..2048).map(|i| (i as f64 - 1000.0) / 300.0).collect();
+        let ys: Vec<f64> = (0..2048).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
+        let gs: Vec<f64> = (0..2048).map(|i| ((i % 5) as f64 - 2.0) / 3.0).collect();
+        let (a, b, g) = (upload(&xs).unwrap(), upload(&ys).unwrap(), upload(&gs).unwrap());
+        let close = |x: f64, y: f64| (x - y).abs() <= 1e-3 * (1.0 + y.abs());
+        // x * y: gradients g * y and g * x
+        let (ga, gb) = bin_back(super::MUL, super::SAME, &g, &a, &b, None, 2048, 1, true, true).unwrap();
+        let (ga, gb) = (download(&ga.unwrap(), 2048).unwrap(), download(&gb.unwrap(), 2048).unwrap());
+        assert!(close(ga[9], gs[9] * ys[9]) && close(gb[9], gs[9] * xs[9]));
+        // x ^ 3: gradient g * 3 * x^2
+        let (gp, _) = bin_back(super::POW, super::B_ONE, &g, &a, &upload(&[3.0]).unwrap(), None, 2048, 1, true, false).unwrap();
+        let gp = download(&gp.unwrap(), 2048).unwrap();
+        assert!(close(gp[3], gs[3] * 3.0 * xs[3] * xs[3]));
+        // through tanh
+        let y = unary(2, &a, 2048).unwrap();
+        let d = download(&un_back(2, &g, &a, &y, 2048).unwrap(), 2048).unwrap();
+        assert!(close(d[100], gs[100] * (1.0 - xs[100].tanh().powi(2))));
+        // column sums and totals
+        let cols = download(&col_sums(&a, 2048, 16, false).unwrap(), 16).unwrap();
+        assert!(close(cols[5], (0..128).map(|r| xs[r * 16 + 5]).sum()));
+        assert!(close(sum_all(&a, 2048, true).unwrap(), xs.iter().map(|x| x * x).sum()));
+        assert!(close(sum_all(&a, 1000, false).unwrap(), xs[..1000].iter().sum()));
+        // one Adam step from zero memory: p - rate * sign(g) (roughly)
+        let (m, v) = (fill(0.0, 2048).unwrap(), fill(0.0, 2048).unwrap());
+        let np = download(&optimise(super::ADAM, &a, &g, &m, &v, 2048, [0.1, 0.1, 0.001, 0.0, 1.0]).unwrap(), 2048).unwrap();
+        assert!(close(np[1], xs[1] - 0.1 * gs[1].signum()) || gs[1] == 0.0);
+        let np = download(&optimise(super::SGD, &a, &g, &m, &v, 2048, [0.5, 1.0, 1.0, 0.0, 2.0]).unwrap(), 2048).unwrap();
+        assert!(close(np[7], xs[7] - 0.5 * 2.0 * gs[7]));
+    }
 
-        #[test]
-        fn gradients_sums_and_optimisers_match_the_cpu() {
-            if available().is_none() {
-                return;
-            }
-            let xs: Vec<f64> = (0..2048).map(|i| (i as f64 - 1000.0) / 300.0).collect();
-            let ys: Vec<f64> = (0..2048).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
-            let gs: Vec<f64> = (0..2048).map(|i| ((i % 5) as f64 - 2.0) / 3.0).collect();
-            let (a, b, g) = (upload(&xs).unwrap(), upload(&ys).unwrap(), upload(&gs).unwrap());
-            let close = |x: f64, y: f64| (x - y).abs() <= 1e-3 * (1.0 + y.abs());
-            // x * y: gradients g * y and g * x
-            let (ga, gb) = bin_back(super::super::MUL, super::super::SAME, &g, &a, &b, None, 2048, 1, true, true).unwrap();
-            let (ga, gb) = (download(&ga.unwrap(), 2048).unwrap(), download(&gb.unwrap(), 2048).unwrap());
-            assert!(close(ga[9], gs[9] * ys[9]) && close(gb[9], gs[9] * xs[9]));
-            // x ^ 3: gradient g * 3 * x^2
-            let (gp, _) = bin_back(super::super::POW, super::super::B_ONE, &g, &a, &upload(&[3.0]).unwrap(), None, 2048, 1, true, false).unwrap();
-            let gp = download(&gp.unwrap(), 2048).unwrap();
-            assert!(close(gp[3], gs[3] * 3.0 * xs[3] * xs[3]));
-            // through tanh
-            let y = unary(2, &a, 2048).unwrap();
-            let d = download(&un_back(2, &g, &a, &y, 2048).unwrap(), 2048).unwrap();
-            assert!(close(d[100], gs[100] * (1.0 - xs[100].tanh().powi(2))));
-            // column sums and totals
-            let cols = download(&col_sums(&a, 2048, 16, false).unwrap(), 16).unwrap();
-            assert!(close(cols[5], (0..128).map(|r| xs[r * 16 + 5]).sum()));
-            assert!(close(sum_all(&a, 2048, true).unwrap(), xs.iter().map(|x| x * x).sum()));
-            assert!(close(sum_all(&a, 1000, false).unwrap(), xs[..1000].iter().sum()));
-            // one Adam step from zero memory: p - rate * sign(g) (roughly)
-            let (m, v) = (fill(0.0, 2048).unwrap(), fill(0.0, 2048).unwrap());
-            let np = download(&optimise(super::super::ADAM, &a, &g, &m, &v, 2048, [0.1, 0.1, 0.001, 0.0, 1.0]).unwrap(), 2048).unwrap();
-            assert!(close(np[1], xs[1] - 0.1 * gs[1].signum()) || gs[1] == 0.0);
-            let np = download(&optimise(super::super::SGD, &a, &g, &m, &v, 2048, [0.5, 1.0, 1.0, 0.0, 2.0]).unwrap(), 2048).unwrap();
-            assert!(close(np[7], xs[7] - 0.5 * 2.0 * gs[7]));
+    #[test]
+    fn matmul_with_flipped_inputs() {
+        if available().is_none() {
+            return;
         }
-
-        #[test]
-        fn matmul_with_flipped_inputs() {
-            if available().is_none() {
-                return;
-            }
-            let (m, n, p) = (19, 23, 17);
-            let a: Vec<f64> = (0..m * n).map(|i| (i % 7) as f64 - 3.0).collect();
-            let b: Vec<f64> = (0..n * p).map(|i| (i % 5) as f64 - 2.0).collect();
-            let flip = |x: &[f64], r: usize, c: usize| (0..r * c).map(|k| x[(k % r) * c + k / r]).collect::<Vec<f64>>();
-            let want = matmul(&a, &b, m, n, p).unwrap();
-            let at = upload(&flip(&a, m, n)).unwrap();
-            let bt = upload(&flip(&b, n, p)).unwrap();
-            let got = download(&matmul_bufs(&at, &bt, m, n, p, true, true).unwrap(), m * p).unwrap();
-            for i in 0..m * p {
-                assert!((got[i] - want[i]).abs() < 1e-3, "{} vs {}", got[i], want[i]);
-            }
+        let (m, n, p) = (19, 23, 17);
+        let a: Vec<f64> = (0..m * n).map(|i| (i % 7) as f64 - 3.0).collect();
+        let b: Vec<f64> = (0..n * p).map(|i| (i % 5) as f64 - 2.0).collect();
+        let flip = |x: &[f64], r: usize, c: usize| (0..r * c).map(|k| x[(k % r) * c + k / r]).collect::<Vec<f64>>();
+        let want = matmul(&a, &b, m, n, p).unwrap();
+        let at = upload(&flip(&a, m, n)).unwrap();
+        let bt = upload(&flip(&b, n, p)).unwrap();
+        let got = download(&matmul_bufs(&at, &bt, m, n, p, true, true).unwrap(), m * p).unwrap();
+        for i in 0..m * p {
+            assert!((got[i] - want[i]).abs() < 1e-3, "{} vs {}", got[i], want[i]);
         }
+    }
 
-        #[test]
-        fn matmul_on_the_gpu_matches_the_cpu() {
-            if available().is_none() {
-                eprintln!("no GPU here (set ANTARES_GPU=warp to test with the software one)");
-                return;
-            }
-            // odd sizes, so the edges of the 16 x 16 tiles are exercised
-            for &(m, n, p) in &[(1, 1, 1), (3, 5, 2), (17, 33, 31), (64, 64, 64), (100, 7, 129)] {
-                let a: Vec<f64> = (0..m * n).map(|i| ((i * 7 % 13) as f64 - 6.0) / 3.0).collect();
-                let b: Vec<f64> = (0..n * p).map(|i| ((i * 5 % 11) as f64 - 5.0) / 2.0).collect();
-                let got = matmul(&a, &b, m, n, p).unwrap();
-                for i in 0..m {
-                    for j in 0..p {
-                        let want: f64 = (0..n).map(|k| a[i * n + k] * b[k * p + j]).sum();
-                        let g = got[i * p + j];
-                        assert!((g - want).abs() <= 1e-4 * (1.0 + want.abs()), "{}x{}x{} at ({}, {}): {} vs {}", m, n, p, i, j, g, want);
-                    }
+    #[test]
+    fn matmul_on_the_gpu_matches_the_cpu() {
+        if available().is_none() {
+            eprintln!("no GPU here (set ANTARES_GPU=warp to test with the software one)");
+            return;
+        }
+        // odd sizes, so the edges of the 16 x 16 tiles are exercised
+        for &(m, n, p) in &[(1, 1, 1), (3, 5, 2), (17, 33, 31), (64, 64, 64), (100, 7, 129)] {
+            let a: Vec<f64> = (0..m * n).map(|i| ((i * 7 % 13) as f64 - 6.0) / 3.0).collect();
+            let b: Vec<f64> = (0..n * p).map(|i| ((i * 5 % 11) as f64 - 5.0) / 2.0).collect();
+            let got = matmul(&a, &b, m, n, p).unwrap();
+            for i in 0..m {
+                for j in 0..p {
+                    let want: f64 = (0..n).map(|k| a[i * n + k] * b[k * p + j]).sum();
+                    let g = got[i * p + j];
+                    assert!((g - want).abs() <= 1e-4 * (1.0 + want.abs()), "{}x{}x{} at ({}, {}): {} vs {}", m, n, p, i, j, g, want);
                 }
             }
         }
