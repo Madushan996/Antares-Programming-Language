@@ -51,7 +51,9 @@ impl Canvas {
 
     /// A filled rectangle, its top-left corner at (x, y).
     pub fn rect(&mut self, x: i64, y: i64, w: i64, h: i64, c: u32) {
-        let (x0, y0) = (x.max(0), y.max(0));
+        // x0 is kept inside the row too: a rectangle starting past the right
+        // edge must not index past the end of the last row.
+        let (x0, y0) = (x.clamp(0, self.w as i64), y.max(0));
         let (x1, y1) = (x.saturating_add(w).min(self.w as i64), y.saturating_add(h).min(self.h as i64));
         for yy in y0..y1 {
             let row = yy as usize * self.w;
@@ -1145,6 +1147,13 @@ mod tests {
         assert_eq!(c.get(7, 7), Some(1));
         c.rect(3, 3, -2, 4, 9); // nothing for a negative width
         assert!(!c.px.contains(&9));
+        c.rect(10, 7, 4, 4, 9); // starting at the right edge, on the bottom row
+        c.rect(25, 0, 4, 100, 9); // starting far past the right edge
+        c.rect(0, 8, 4, 4, 9); // starting below the bottom edge
+        assert!(!c.px.contains(&9));
+        let mut s = Canvas::new(10, 8);
+        s.sprite(&[vec![Some(7), Some(7)]], 12, 7, 2); // sprites draw with rect
+        assert!(!s.px.contains(&7));
         c.line(-1_000_000_000, 4, 1_000_000_000, 4, 3); // far ends: clipped, so quick
         assert!((0..10).all(|x| c.get(x, 4) == Some(3)));
         c.line(0, 0, 9, 7, 4);
