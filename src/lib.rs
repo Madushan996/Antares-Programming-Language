@@ -21,3 +21,4 @@ pub mod sound;
 pub mod tensor;
 pub mod value;
 pub mod vm;
+pub mod web;

@@ -3,7 +3,8 @@
 It speaks just enough of the Anthropic Messages API and the OpenAI chat
 completions and embeddings APIs (plain and streamed) to check what Antares
 sends: tool calls and their results, structured answers, images,
-conversations, effort, and that thinking blocks come back unchanged.
+conversations, effort, and that thinking blocks come back unchanged. It also
+serves a few web pages, for fetch, read_page and page_links.
 
 Run tests/check_models.py, which starts this and runs tests/models.ant.
 """
@@ -12,6 +13,11 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SIGNATURE = "sig-abc123"
+
+PAGE = """<!doctype html><html><head><title>Moons &amp; more</title><script>var a = "<p>no</p>";</script></head>
+<body><nav><a href="/">Home</a></nav><main><h1>The Moon</h1><p>Earth&#39;s only   moon.</p>
+<ul><li><a href="/wiki/Phobos">Phobos</a></li><li><a href="deimos.html">Deimos</a></li></ul></main>
+<footer>(c) 2026</footer></body></html>"""
 
 
 def text_of(content):
@@ -54,6 +60,10 @@ def decide(messages, tools, schema, system, extra):
         return ("text", json.dumps(sample(schema)))
     if has_image(content):
         return ("text", "I see an image")
+    if tools and prompt.startswith("use the tool with "):
+        t = tools[0]
+        props = list((t.get("input_schema") or t.get("parameters") or {}).get("properties", {}).keys())
+        return ("tool", t["name"], {props[0]: prompt[len("use the tool with "):]})
     if tools and "weather" in prompt.lower():
         t = tools[0]
         props = list((t.get("input_schema") or t.get("parameters") or {}).get("properties", {}).keys())
@@ -93,7 +103,32 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(f"data: {json.dumps(e) if isinstance(e, dict) else e}\n\n".encode())
             self.wfile.flush()
 
+    def send_page(self, html, code=200):
+        data = html.encode()
+        self.send_response(code)
+        self.send_header("content-type", "text/html; charset=utf-8")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def echo(self, body=None):
+        self.send_json({"method": self.command, "path": self.path, "body": body,
+                        "agent": self.headers.get("user-agent", ""), "token": self.headers.get("x-token")})
+
+    def do_GET(self):
+        if self.path == "/page":
+            self.send_page(PAGE)
+        elif self.path.startswith("/echo"):
+            self.echo()
+        else:
+            self.send_page("<html><body><h1>Not here</h1></body></html>", 404)
+
+    def do_PUT(self):
+        self.echo(self.rfile.read(int(self.headers.get("content-length", 0))).decode())
+
     def do_POST(self):
+        if self.path == "/echo":
+            return self.echo(self.rfile.read(int(self.headers.get("content-length", 0))).decode())
         req = self.body()
         if self.path == "/v1/messages":
             self.anthropic(req)

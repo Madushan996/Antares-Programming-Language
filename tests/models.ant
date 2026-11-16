@@ -6,6 +6,9 @@ base = env("ANTARES_MOCK_URL")
 check(base != nothing, "run this with tests/check_models.py")
 
 to weather(city, days) = "sunny in {city} for {days} days"
+to model_with_len() {
+    model bad = "echo" with {tools: [len]}
+}
 
 each provider in ["anthropic", "openai"] {
     each streaming in [no, yes] {
@@ -76,5 +79,62 @@ fails(() => embed(c, "x"), "Anthropic doesn't make embeddings")
 fails(() => history(m), "needs a conversation")
 fails(() => image("tests/nothing_here.png"), "couldn't read")
 fails(() => image("tests/models.ant"), ".png, .jpg")
+
+# built-in functions as tools, and asking before a tool runs (no one types
+# an answer here, so the user never allows it)
+each provider in ["anthropic", "openai"] {
+    address = base
+    when provider == "openai" { address = base + "/v1" }
+    model asks = "{provider}:test-model" with {url: address, tools: [shell]}
+    check(ask asks "use the tool with echo hi" == "The tool said: The user did not allow this.", "shell asks first ({provider})")
+    model runs = "{provider}:test-model" with {url: address, tools: [{run: shell, confirm: no}]}
+    said = ask runs "use the tool with echo hi"
+    check(has(said, "\"output\":\"hi\"") and has(said, "\"code\":0"), "shell as a tool ({provider}): {said}")
+    model lister = "{provider}:test-model" with {url: address, tools: [files]}
+    check(has(ask lister "use the tool with tests", "models.ant"), "files as a tool ({provider})")
+    model page = "{provider}:test-model" with {url: address, tools: [read_page]}
+    check(has(ask page "use the tool with {base}/page", "Earth's only moon."), "read_page as a tool ({provider})")
+    to careful(city, days) = "sunny"
+    model guarded = "{provider}:test-model" with {url: address, tools: [{run: careful, confirm: yes}]}
+    check(ask guarded "weather?" == "The tool said: The user did not allow this.", "confirm on my own function ({provider})")
+}
+
+# shell
+r = shell("echo hello")
+check(r.output == "hello" and r.code == 0 and r.errors == "", "shell gives the output")
+check(shell("exit 3").code == 3, "shell gives the exit code")
+check(has(shell("cd", {folder: "tests"}).output, "tests"), "shell runs in a folder")
+sorter = "sort"
+check(replace(shell(sorter, {input: "pear
+apple
+"}).output, "", "") == "apple
+pear", "shell sends input")
+long_wait = "sleep 5"
+when env("OS") == "Windows_NT" { long_wait = "ping -n 6 127.0.0.1" }
+stopped = shell(long_wait, {timeout: 0.5})
+check(stopped.code == -1 and has(stopped.errors, "stopped after 0.5 seconds"), "shell stops slow commands")
+
+# the web
+html = fetch("{base}/page")
+check(page_text(html) == "Moons & more
+
+The Moon
+
+Earth's only moon.
+- Phobos
+- Deimos", "page_text: {page_text(html)}")
+check(read_page("{base}/page") == page_text(html), "read_page")
+links = page_links(html, "{base}/wiki/Mars")
+check(len(links) == 3 and links[1].text == "Phobos" and links[1].url == "{base}/wiki/Phobos" and links[2].url == "{base}/wiki/deimos.html", "page_links")
+check(page_links(html)[2].url == "deimos.html", "page_links without an address")
+got = json(fetch("{base}/echo", {query: {q: "moon & stars", n: 2}, headers: {"X-Token": "abc"}}))
+check(got.path == "/echo?q=moon%20%26%20stars&n=2" and got.token == "abc" and has(got.agent, "Antares/"), "fetch with a query and headers")
+sent = json(fetch("{base}/echo", {body: {name: "Ada", n: 3}}))
+check(sent.method == "POST" and json(sent.body) == {name: "Ada", n: 3}, "fetch posts a map as JSON")
+check(json(fetch("{base}/echo", {method: "put", body: "raw"})).body == "raw", "fetch with a method")
+fails(() => fetch("{base}/missing"), "answered with error 404: Not here")
+fails(() => fetch("http://127.0.0.1:1/"), "couldn't fetch")
+fails(() => shell("echo", {colour: "red"}), "I don't know the shell option 'colour'")
+fails(() => model_with_len(), "can't be a tool by itself")
 
 show "models: conversations, tools, shapes, images, streaming and embeddings ok"

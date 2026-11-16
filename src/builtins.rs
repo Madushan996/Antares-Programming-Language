@@ -1727,8 +1727,17 @@ fn b_write(_: &mut Interp, a: Vec<Value>) -> Res {
 }
 
 fn b_input(_: &mut Interp, a: Vec<Value>) -> Res {
-    if let Some(p) = a.first() {
-        print!("{}", p.show());
+    Ok(match read_line(a.first().map(|p| p.show()).as_deref())? {
+        Some(line) => s(line),
+        None => Value::Nothing,
+    })
+}
+
+/// Shows the prompt (if any) and reads a line typed by the user; None at the
+/// end of the input.
+pub(crate) fn read_line(prompt: Option<&str>) -> Result<Option<String>, String> {
+    if let Some(p) = prompt {
+        print!("{}", p);
         let _ = std::io::stdout().flush();
     }
     // A whole line needs the terminal's normal mode, even if key() switched it.
@@ -1739,9 +1748,9 @@ fn b_input(_: &mut Interp, a: Vec<Value>) -> Res {
     console::resume_raw(was_raw);
     let n = got.map_err(|e| format!("couldn't read input: {}", e))?;
     if n == 0 {
-        return Ok(Value::Nothing);
+        return Ok(None);
     }
-    Ok(s(line.trim_end_matches(&['\n', '\r'][..])))
+    Ok(Some(line.trim_end_matches(&['\n', '\r'][..]).to_string()))
 }
 
 fn b_clock(_: &mut Interp, _: Vec<Value>) -> Res {
@@ -2398,5 +2407,10 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("similarity", crate::llm::b_similarity),
         ("gpu", crate::gpu::b_gpu),
         ("use_gpu", crate::gpu::b_use_gpu),
+        ("shell", crate::web::b_shell),
+        ("fetch", crate::web::b_fetch),
+        ("read_page", crate::web::b_read_page),
+        ("page_text", crate::web::b_page_text),
+        ("page_links", crate::web::b_page_links),
     ]
 }

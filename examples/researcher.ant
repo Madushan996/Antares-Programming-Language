@@ -1,0 +1,38 @@
+# A research agent: ask it a question and it searches Wikipedia, reads the
+# articles it needs, and answers, saying which articles it used.
+#
+#   antares researcher.ant Who built Sigiriya, and why?
+#
+# It uses the model in ANTARES_MODEL (for example ollama:qwen2.5, with Ollama
+# running), or Claude when ANTHROPIC_API_KEY is set; otherwise the pretend
+# echo model, so the example still runs.
+
+to search(words) {
+    found = json(fetch("https://en.wikipedia.org/w/api.php", {query: {action: "query", list: "search", srsearch: words, format: "json", srlimit: 5}}))
+    give map(found.query.search, r => "{r.title}: https://en.wikipedia.org/?curid={r.pageid}")
+}
+
+# the start of a long article is plenty, and keeps the model's reading short
+to read_article(url) = slice(read_page(url), 0, 12000)
+
+tools = [
+    {run: search, about: "Searches Wikipedia. Gives the titles and addresses of the best matching articles", inputs: {words: "text"}},
+    {run: read_article, about: "Reads a Wikipedia article from its address", inputs: {url: "text"}},
+]
+
+spec = env("ANTARES_MODEL")
+when spec == nothing and env("ANTHROPIC_API_KEY") != nothing { spec = "anthropic:claude-opus-5-5" }
+when spec == nothing {
+    spec = "echo"
+    show "(No model chosen, so this uses the pretend echo model. Set ANTARES_MODEL, like ollama:qwen2.5, or ANTHROPIC_API_KEY.)"
+}
+
+model researcher = spec with {
+    tools: tools,
+    system: "You answer questions by searching Wikipedia and reading the articles you need. Answer in a short paragraph, then list the articles you used.",
+}
+
+question = join(args(), " ")
+when question == "" { question = "Who built Sigiriya, and why?" }
+show "Question: {question}\n"
+show ask researcher question
