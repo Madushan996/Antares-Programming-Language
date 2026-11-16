@@ -116,10 +116,13 @@ pub fn b_use_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> 
     Ok(crate::value::Value::Nothing)
 }
 
-/// The matrix-multiply shader: each group of 16 x 16 threads works out a
-/// 16 x 16 tile of the result, reading tiles of A and B into fast shared
-/// memory once instead of every thread reading them separately. It is
-/// compiled four times: with FA and/or FB set it reads A or B as if
+/// The matrix-multiply shader. Each group of 16 x 16 threads works out a
+/// 64 x 64 tile of the result, and each thread a 4 x 4 block of it held in
+/// registers, so every number read from shared memory is used four times
+/// ("register blocking"). Slices of A and B (64 x 16 and 16 x 64) are read
+/// into fast shared memory once for the whole group. A thread's rows and
+/// columns are 16 apart, so neighbouring threads read neighbouring numbers.
+/// It is compiled four times: with FA and/or FB set it reads A or B as if
 /// flipped, so gradients need no copies. (A choice made while running would
 /// be slower: HLSL's `?:` reads memory for both of its sides.)
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -128,9 +131,10 @@ cbuffer Dims : register(b0) { uint M; uint N; uint P; uint FLAGS; uint4 unused; 
 StructuredBuffer<float> A : register(t0);
 StructuredBuffer<float> B : register(t1);
 RWStructuredBuffer<float> C : register(u0);
-#define T 16
-groupshared float As[T][T];
-groupshared float Bs[T][T];
+#define TILE 64
+#define TK 16
+groupshared float As[TK][TILE + 1];
+groupshared float Bs[TK][TILE + 1];
 #if FA
 float a_at(uint i, uint k) { return A[k * M + i]; }
 #else
@@ -141,21 +145,45 @@ float b_at(uint k, uint j) { return B[j * N + k]; }
 #else
 float b_at(uint k, uint j) { return B[k * P + j]; }
 #endif
-[numthreads(T, T, 1)]
+[numthreads(16, 16, 1)]
 void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
-    uint row = g.y * T + t.y;
-    uint col = g.x * T + t.x;
-    float acc = 0;
-    for (uint k0 = 0; k0 < N; k0 += T) {
-        uint ka = k0 + t.x;
-        uint kb = k0 + t.y;
-        As[t.y][t.x] = (row < M && ka < N) ? a_at(row, ka) : 0;
-        Bs[t.y][t.x] = (kb < N && col < P) ? b_at(kb, col) : 0;
+    uint id = t.y * 16 + t.x;
+    uint row0 = g.y * TILE;
+    uint col0 = g.x * TILE;
+    float acc[4][4];
+    [unroll] for (uint i = 0; i < 4; i++) {
+        [unroll] for (uint j = 0; j < 4; j++) acc[i][j] = 0;
+    }
+    for (uint k0 = 0; k0 < N; k0 += TK) {
+        // each of the 256 threads reads 4 numbers of each slice
+        for (uint l = 0; l < 4; l++) {
+            uint e = id + l * 256;
+            uint r = e / TK;
+            uint ka = e % TK;
+            As[ka][r] = (row0 + r < M && k0 + ka < N) ? a_at(row0 + r, k0 + ka) : 0;
+            uint kb = e / TILE;
+            uint c = e % TILE;
+            Bs[kb][c] = (k0 + kb < N && col0 + c < P) ? b_at(k0 + kb, col0 + c) : 0;
+        }
         GroupMemoryBarrierWithGroupSync();
-        [unroll] for (uint k = 0; k < T; k++) acc += As[t.y][k] * Bs[k][t.x];
+        for (uint k = 0; k < TK; k++) {
+            float a[4];
+            float b[4];
+            [unroll] for (uint i2 = 0; i2 < 4; i2++) a[i2] = As[k][t.y + 16 * i2];
+            [unroll] for (uint j2 = 0; j2 < 4; j2++) b[j2] = Bs[k][t.x + 16 * j2];
+            [unroll] for (uint i3 = 0; i3 < 4; i3++) {
+                [unroll] for (uint j3 = 0; j3 < 4; j3++) acc[i3][j3] += a[i3] * b[j3];
+            }
+        }
         GroupMemoryBarrierWithGroupSync();
     }
-    if (row < M && col < P) C[row * P + col] = acc;
+    [unroll] for (uint i4 = 0; i4 < 4; i4++) {
+        uint row = row0 + t.y + 16 * i4;
+        [unroll] for (uint j4 = 0; j4 < 4; j4++) {
+            uint col = col0 + t.x + 16 * j4;
+            if (row < M && col < P) C[row * P + col] = acc[i4][j4];
+        }
+    }
 }
 "#;
 
@@ -462,8 +490,9 @@ mod win {
         device: Com,
         context: Com,
         compile: CompileFn,
-        /// The matrix multiply, by [flip A][flip B].
-        matmul: [[Com; 2]; 2],
+        /// The matrix multiply, by [flip A][flip B], each compiled the first
+        /// time it is needed (compiling one takes a moment).
+        matmul: [[std::cell::OnceCell<Com>; 2]; 2],
         binary: Com,
         unary: Com,
         bin_back: Com,
@@ -561,7 +590,7 @@ mod win {
             device,
             context,
             compile,
-            matmul: [[null(), null()], [null(), null()]],
+            matmul: Default::default(),
             binary: null(),
             unary: null(),
             bin_back: null(),
@@ -570,13 +599,6 @@ mod win {
             optimise: null(),
             spare: None,
         };
-        for fa in 0..2 {
-            for fb in 0..2 {
-                g.matmul[fa][fb] = g.shader(&format!("#define FA {}
-#define FB {}
-{}", fa, fb, MATMUL_HLSL)).ok()?;
-            }
-        }
         g.binary = g.shader(BINARY_HLSL).ok()?;
         g.unary = g.shader(UNARY_HLSL).ok()?;
         g.bin_back = g.shader(BIN_BACK_HLSL).ok()?;
@@ -589,7 +611,45 @@ mod win {
 
     impl Gpu {
         /// Compiles HLSL source (entry point `main`) into a compute shader.
+        /// Compiles HLSL source (entry point `main`) into a compute shader.
+        /// Compiled shaders are kept in a cache folder, named by a hash of
+        /// their source, so only the first program to use one waits for it.
         fn shader(&self, src: &str) -> Result<Com, String> {
+            let cached = shader_cache_file(src);
+            let bytes = match cached.as_ref().and_then(|f| std::fs::read(f).ok()) {
+                Some(b) if !b.is_empty() => b,
+                _ => {
+                    let b = self.compile_hlsl(src)?;
+                    if let Some(f) = &cached {
+                        if let Some(dir) = f.parent() {
+                            let _ = std::fs::create_dir_all(dir);
+                        }
+                        // written beside, then renamed, so a half-written file is never read
+                        let tmp = f.with_extension(format!("tmp{}", std::process::id()));
+                        if std::fs::write(&tmp, &b).is_ok() && std::fs::rename(&tmp, f).is_err() {
+                            let _ = std::fs::remove_file(&tmp);
+                        }
+                    }
+                    b
+                }
+            };
+            let create: unsafe extern "system" fn(Ptr, *const c_void, usize, Ptr, *mut Ptr) -> HResult = unsafe { method(self.device.0, 18) };
+            let mut cs: Ptr = std::ptr::null_mut();
+            if unsafe { create(self.device.0, bytes.as_ptr().cast(), bytes.len(), std::ptr::null_mut(), &mut cs) } < 0 {
+                // a damaged cache file: compile afresh
+                if let Some(f) = &cached {
+                    let _ = std::fs::remove_file(f);
+                }
+                let fresh = self.compile_hlsl(src)?;
+                if unsafe { create(self.device.0, fresh.as_ptr().cast(), fresh.len(), std::ptr::null_mut(), &mut cs) } < 0 {
+                    return Err("the GPU didn't accept the program".into());
+                }
+            }
+            Ok(Com(cs))
+        }
+
+        /// The compiled form of HLSL source.
+        fn compile_hlsl(&self, src: &str) -> Result<Vec<u8>, String> {
             let (mut code, mut errors): (Ptr, Ptr) = (std::ptr::null_mut(), std::ptr::null_mut());
             let hr = unsafe {
                 (self.compile)(src.as_ptr().cast(), src.len(), c"antares".as_ptr().cast(), std::ptr::null_mut(), std::ptr::null_mut(), c"main".as_ptr().cast(), c"cs_5_0".as_ptr().cast(), 1 << 15, 0, &mut code, &mut errors)
@@ -599,14 +659,9 @@ mod win {
                 let msg = if errors.0.is_null() { String::new() } else { unsafe { blob_text(errors.0) } };
                 return Err(format!("the GPU program didn't compile: {}", msg.trim()));
             }
-            let ptr: unsafe extern "system" fn(Ptr) -> *const c_void = unsafe { method(code.0, 3) };
+            let ptr: unsafe extern "system" fn(Ptr) -> *const u8 = unsafe { method(code.0, 3) };
             let size: unsafe extern "system" fn(Ptr) -> usize = unsafe { method(code.0, 4) };
-            let create: unsafe extern "system" fn(Ptr, *const c_void, usize, Ptr, *mut Ptr) -> HResult = unsafe { method(self.device.0, 18) };
-            let mut cs: Ptr = std::ptr::null_mut();
-            if unsafe { create(self.device.0, ptr(code.0), size(code.0), std::ptr::null_mut(), &mut cs) } < 0 {
-                return Err("the GPU didn't accept the program".into());
-            }
-            Ok(Com(cs))
+            Ok(unsafe { std::slice::from_raw_parts(ptr(code.0), size(code.0)) }.to_vec())
         }
 
         fn buffer(&self, desc: BufferDesc, init: Option<&[u8]>) -> Result<Com, String> {
@@ -700,6 +755,17 @@ mod win {
         }
     }
 
+    /// Where a compiled shader is kept: antares/shaders in the local app data folder, named
+    /// by a hash of the source and the Antares version.
+    fn shader_cache_file(src: &str) -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)?;
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in src.bytes().chain(env!("CARGO_PKG_VERSION").bytes()) {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        Some(base.join("antares").join("shaders").join(format!("{:016x}.cso", h)))
+    }
+
     unsafe fn blob_text(blob: Ptr) -> String {
         let ptr: unsafe extern "system" fn(Ptr) -> *const u8 = unsafe { method(blob, 3) };
         let size: unsafe extern "system" fn(Ptr) -> usize = unsafe { method(blob, 4) };
@@ -745,7 +811,13 @@ mod win {
         with_gpu(|g| {
             let out = g.rw(m * p, None)?;
             let consts = g.constants([m as u32, n as u32, p as u32, ta as u32 | (tb as u32) << 1, 0, 0, 0, 0])?;
-            g.run(&g.matmul[ta as usize][tb as usize], &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (p.div_ceil(16) as u32, m.div_ceil(16) as u32, 1));
+            let slot = &g.matmul[ta as usize][tb as usize];
+            if slot.get().is_none() {
+                let _ = slot.set(g.shader(&format!("#define FA {}
+#define FB {}
+{}", ta as u32, tb as u32, MATMUL_HLSL))?);
+            }
+            g.run(slot.get().unwrap(), &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (p.div_ceil(64) as u32, m.div_ceil(64) as u32, 1));
             Ok(out)
         })
         .unwrap_or_else(|| Err(NO_GPU.into()))
