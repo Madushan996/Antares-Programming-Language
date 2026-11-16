@@ -42,4 +42,26 @@ repeat 20 {
 check(l < first, "training on the GPU lowers the loss ({first} to {l})")
 use cpu
 
+# a whole forward pass, keeping numbers on the GPU between steps
+learn b1 = randn(300) * 0.1
+to forward() {
+    h = gelu(x @ w1 + b1)                    # product, a bias row, an activation
+    h = h * 0.5 - h / 4 + (h - 0.1) ^ 2      # numbers, powers of negative numbers
+    r = reshape(-h, [300, 300])              # minus, and a reshape on the GPU
+    sigmoid(r) @ w2
+}
+use cpu
+cpu_out = forward()
+use gpu
+gpu_out = forward()
+check(biggest(gpu_out - cpu_out) < 0.001 * biggest(cpu_out), "a forward pass on the GPU agrees")
+check(abs(mean(gpu_out) - mean(cpu_out)) < 0.0001, "reading numbers back from the GPU (mean)")
+check(biggest(softmax(gpu_out)[3] - softmax(cpu_out)[3]) < 0.0001, "softmax and indexing on GPU results")
+check(shape(gpu_out) == [300, 280], "shapes are kept")
+seed(3)
+first = mean((forward() - y) ^ 2)
+repeat 10 { descend mean((forward() - y) ^ 2) by 0.01 using adam }
+check(mean((forward() - y) ^ 2) < first, "training through all of it")
+use cpu
+
 show "gpu: products, gradients and training ok"

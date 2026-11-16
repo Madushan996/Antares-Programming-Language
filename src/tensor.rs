@@ -201,6 +201,20 @@ fn make(shape: Vec<usize>, data: Vec<f64>, op: Op, requires: bool) -> T {
     })
 }
 
+/// A tensor whose numbers are only on the GPU (the result of GPU maths).
+fn make_dev(shape: Vec<usize>, buf: crate::gpu::Buf, op: Op, requires: bool) -> T {
+    Rc::new(Node {
+        shape,
+        host: RefCell::new(Vec::new()),
+        host_ok: std::cell::Cell::new(false),
+        dev: RefCell::new(Some(buf)),
+        grad: RefCell::new(Vec::new()),
+        requires,
+        op: if requires { op } else { Op::Leaf },
+        opt: RefCell::new(None),
+    })
+}
+
 /// A plain tensor with no gradient tracking.
 pub fn new(shape: Vec<usize>, data: Vec<f64>) -> T {
     make(shape, data, Op::Leaf, false)
@@ -315,6 +329,16 @@ fn bin_fn(k: BinK, x: f64, y: f64) -> f64 {
 
 pub fn binary(k: BinK, a: &T, b: &T) -> Result<T, String> {
     let shape = bshape(&a.shape, &b.shape)?;
+    let total: usize = shape.iter().product();
+    if gpu_on() && total >= GPU_MIN_LEN && (a.is_on_gpu() || b.is_on_gpu()) {
+        if let Some((mode, inner)) = gpu_mode(&a.shape, &b.shape, &shape) {
+            if let (Ok(ab), Ok(bb)) = (a.on_gpu(), b.on_gpu()) {
+                if let Ok(out) = crate::gpu::binary(k as u32, mode, &ab, &bb, total, inner) {
+                    return Ok(make_dev(shape, out, Op::Bin(k, a.clone(), b.clone()), a.requires || b.requires));
+                }
+            }
+        }
+    }
     let ma = bmap(&a.shape, &shape);
     let mb = bmap(&b.shape, &shape);
     let n: usize = shape.iter().product();
@@ -369,30 +393,39 @@ static GPU_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::ne
 /// takes longer than the CPU takes to do the work.
 const GPU_MIN_WORK: usize = 1 << 24;
 
+/// Element-by-element steps run on the GPU when an input is already there
+/// and there are at least this many numbers (below it, starting the GPU
+/// costs more than the work).
+const GPU_MIN_LEN: usize = 4096;
+
+fn gpu_on() -> bool {
+    GPU_ON.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How two shapes line up for the GPU's element-wise shader (and the length
+/// of a repeated row), or None when they line up some other way.
+fn gpu_mode(a: &[usize], b: &[usize], out: &[usize]) -> Option<(u32, usize)> {
+    use crate::gpu::{A_ONE, A_ROW, B_ONE, B_ROW, SAME};
+    let len = |s: &[usize]| s.iter().product::<usize>();
+    let suffix = |s: &[usize]| s.len() <= out.len() && &out[out.len() - s.len()..] == s;
+    if a == out && b == out {
+        Some((SAME, 1))
+    } else if a == out && len(b) == 1 {
+        Some((B_ONE, 1))
+    } else if b == out && len(a) == 1 {
+        Some((A_ONE, 1))
+    } else if a == out && suffix(b) {
+        Some((B_ROW, len(b)))
+    } else if b == out && suffix(a) {
+        Some((A_ROW, len(a)))
+    } else {
+        None
+    }
+}
+
 /// Turns the GPU on or off for big matrix multiplications (`use gpu`).
 pub fn set_gpu(on: bool) {
     GPU_ON.store(on, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// The m x n matrix `a` times the n x p matrix `b` on the GPU, when the GPU
-/// is on and the work is big enough to be worth it. None: do it on the CPU
-/// (also when the GPU reports a problem).
-fn gpu_mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Option<Vec<f64>> {
-    if !GPU_ON.load(std::sync::atomic::Ordering::Relaxed) || m.saturating_mul(n).saturating_mul(p) < GPU_MIN_WORK {
-        return None;
-    }
-    crate::gpu::matmul(a, b, m, n, p).ok()
-}
-
-/// A rows x cols matrix turned on its side.
-fn transposed(x: &[f64], rows: usize, cols: usize) -> Vec<f64> {
-    let mut t = vec![0.0; x.len()];
-    for i in 0..rows {
-        for j in 0..cols {
-            t[j * rows + i] = x[i * cols + j];
-        }
-    }
-    t
 }
 
 /// Splits `out` (rows of `width` numbers) among the CPU's cores and runs
@@ -416,9 +449,6 @@ fn par_rows(out: &mut [f64], width: usize, work: usize, f: impl Fn(usize, &mut [
 }
 
 fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
-    if let Some(o) = gpu_mm(a, b, m, n, p) {
-        return o;
-    }
     let mut o = vec![0.0; m * p];
     par_rows(&mut o, p, m * n * p, |first, part| {
         for (r, orow) in part.chunks_mut(p.max(1)).enumerate() {
@@ -440,7 +470,6 @@ fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
 
 pub fn matmul(a: &T, b: &T) -> Result<T, String> {
     let (m, n, p) = mat_dims(a, b)?;
-    let out = mm(&a.vals(), &b.vals(), m, n, p);
     let mut shape = vec![];
     if a.shape.len() == 2 {
         shape.push(m);
@@ -449,10 +478,23 @@ pub fn matmul(a: &T, b: &T) -> Result<T, String> {
         shape.push(p);
     }
     let req = a.requires || b.requires;
+    if gpu_on() && m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK {
+        if let (Ok(ab), Ok(bb)) = (a.on_gpu(), b.on_gpu()) {
+            if let Ok(out) = crate::gpu::matmul_bufs(&ab, &bb, m, n, p, false, false) {
+                return Ok(make_dev(shape, out, Op::MatMul(a.clone(), b.clone()), req));
+            }
+        }
+    }
+    let out = mm(&a.vals(), &b.vals(), m, n, p);
     Ok(make(shape, out, Op::MatMul(a.clone(), b.clone()), req))
 }
 
 pub fn neg(a: &T) -> T {
+    if gpu_on() && a.len() >= GPU_MIN_LEN && a.is_on_gpu() {
+        if let Ok(out) = a.on_gpu().and_then(|ab| crate::gpu::unary(13, &ab, a.len())) {
+            return make_dev(a.shape.clone(), out, Op::Neg(a.clone()), a.requires);
+        }
+    }
     let d: Vec<f64> = a.vals().iter().map(|x| -x).collect();
     make(a.shape.clone(), d, Op::Neg(a.clone()), a.requires)
 }
@@ -492,6 +534,11 @@ pub fn apply(f: UFn, x: f64) -> f64 {
 const GELU_K: f64 = 0.797_884_560_802_865_4;
 
 pub fn unary(f: UFn, a: &T) -> T {
+    if gpu_on() && a.len() >= GPU_MIN_LEN && a.is_on_gpu() {
+        if let Ok(out) = a.on_gpu().and_then(|ab| crate::gpu::unary(f as u32, &ab, a.len())) {
+            return make_dev(a.shape.clone(), out, Op::Unary(f, a.clone()), a.requires);
+        }
+    }
     let d: Vec<f64> = a.vals().iter().map(|&x| apply(f, x)).collect();
     make(a.shape.clone(), d, Op::Unary(f, a.clone()), a.requires)
 }
@@ -554,6 +601,11 @@ pub fn reshape(a: &T, shape: Vec<usize>) -> Result<T, String> {
             a.len(),
             fmt_shape(&shape)
         ));
+    }
+    if !a.host_ok.get() {
+        if let Some(buf) = a.dev.borrow().clone() {
+            return Ok(make_dev(shape, buf, Op::Reshape(a.clone()), a.requires));
+        }
     }
     let d = a.vals().clone();
     Ok(make(shape, d, Op::Reshape(a.clone()), a.requires))
@@ -806,29 +858,32 @@ fn back(node: &Node, g: &[f64]) {
         }
         Op::MatMul(a, b) => {
             let (m, n, p) = mat_dims(a, b).unwrap();
-            let ad = a.vals();
-            let bd = b.vals();
             let mut da = if a.requires { vec![0.0; m * n] } else { vec![] };
             let mut db = if b.requires { vec![0.0; n * p] } else { vec![] };
-            // plain slices, so the cores can share them
-            let (ad, bd) = (&ad[..], &bd[..]);
-            // with `use gpu`: da = g @ t(b) and db = t(a) @ g on the GPU
+            // with `use gpu`: da = g @ t(b) and db = t(a) @ g on the GPU,
+            // reading a and b as if flipped, where they already are
             let mut on_gpu_a = false;
             let mut on_gpu_b = false;
-            if a.requires {
-                if let Some(d) = gpu_mm(g, &transposed(bd, n, p), m, p, n) {
-                    da = d;
-                    on_gpu_a = true;
-                }
-            }
-            if b.requires {
-                if let Some(d) = gpu_mm(&transposed(ad, m, n), g, n, m, p) {
-                    db = d;
-                    on_gpu_b = true;
+            if gpu_on() && m.saturating_mul(n).saturating_mul(p) >= GPU_MIN_WORK {
+                if let Ok(gb) = crate::gpu::upload(g) {
+                    if a.requires {
+                        if let Some(d) = b.on_gpu().and_then(|bb| crate::gpu::matmul_bufs(&gb, &bb, m, p, n, false, true)).and_then(|o| crate::gpu::download(&o, m * n)).ok() {
+                            da = d;
+                            on_gpu_a = true;
+                        }
+                    }
+                    if b.requires {
+                        if let Some(d) = a.on_gpu().and_then(|ab| crate::gpu::matmul_bufs(&ab, &gb, n, m, p, true, false)).and_then(|o| crate::gpu::download(&o, n * p)).ok() {
+                            db = d;
+                            on_gpu_b = true;
+                        }
+                    }
                 }
             }
             if a.requires && !on_gpu_a {
                 // da[i, k] = sum over j of g[i, j] * b[k, j]
+                let bd_ref = b.vals();
+                let bd = &bd_ref[..]; // a plain slice, so the cores can share it
                 par_rows(&mut da, n, m * n * p, |first, part| {
                     for (r, drow) in part.chunks_mut(n.max(1)).enumerate() {
                         let i = first + r;
@@ -846,6 +901,8 @@ fn back(node: &Node, g: &[f64]) {
             }
             if b.requires && !on_gpu_b {
                 // db[k, j] = sum over i of a[i, k] * g[i, j], adding i in order
+                let ad_ref = a.vals();
+                let ad = &ad_ref[..];
                 par_rows(&mut db, p, m * n * p, |first, part| {
                     let rows = part.len() / p.max(1);
                     for i in 0..m {

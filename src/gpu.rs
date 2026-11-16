@@ -93,8 +93,10 @@ pub fn b_use_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> 
 
 /// The matrix-multiply shader: each group of 16 x 16 threads works out a
 /// 16 x 16 tile of the result, reading tiles of A and B into fast shared
-/// memory once instead of every thread reading them separately. FLAGS
-/// reads A (bit 1) or B (bit 2) as if flipped, so gradients need no copies.
+/// memory once instead of every thread reading them separately. It is
+/// compiled four times: with FA and/or FB set it reads A or B as if
+/// flipped, so gradients need no copies. (A choice made while running would
+/// be slower: HLSL's `?:` reads memory for both of its sides.)
 #[cfg_attr(not(windows), allow(dead_code))]
 const MATMUL_HLSL: &str = r#"
 cbuffer Dims : register(b0) { uint M; uint N; uint P; uint FLAGS; uint4 unused; };
@@ -104,8 +106,16 @@ RWStructuredBuffer<float> C : register(u0);
 #define T 16
 groupshared float As[T][T];
 groupshared float Bs[T][T];
-float a_at(uint i, uint k) { return (FLAGS & 1) ? A[k * M + i] : A[i * N + k]; }
-float b_at(uint k, uint j) { return (FLAGS & 2) ? B[j * N + k] : B[k * P + j]; }
+#if FA
+float a_at(uint i, uint k) { return A[k * M + i]; }
+#else
+float a_at(uint i, uint k) { return A[i * N + k]; }
+#endif
+#if FB
+float b_at(uint k, uint j) { return B[j * N + k]; }
+#else
+float b_at(uint k, uint j) { return B[k * P + j]; }
+#endif
 [numthreads(T, T, 1)]
 void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
     uint row = g.y * T + t.y;
@@ -146,8 +156,10 @@ float power(float a, float b) {
 void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
     uint i = (g.y * GX + g.x) * 256 + t.x;
     if (i >= N) return;
-    float a = (MODE == 2) ? A[0] : (MODE == 4) ? A[i % INNER] : A[i];
-    float b = (MODE == 1) ? B[0] : (MODE == 3) ? B[i % INNER] : B[i];
+    float a;
+    float b;
+    if (MODE == 2) a = A[0]; else if (MODE == 4) a = A[i % INNER]; else a = A[i];
+    if (MODE == 1) b = B[0]; else if (MODE == 3) b = B[i % INNER]; else b = B[i];
     float r;
     if (OP == 0) r = a + b;
     else if (OP == 1) r = a - b;
@@ -288,7 +300,8 @@ mod win {
         device: Com,
         context: Com,
         compile: CompileFn,
-        matmul: Com,
+        /// The matrix multiply, by [flip A][flip B].
+        matmul: [[Com; 2]; 2],
         binary: Com,
         unary: Com,
     }
@@ -374,8 +387,14 @@ mod win {
         }
         let (device, context) = (Com(device), Com(context));
         let null = || Com(std::ptr::null_mut());
-        let mut g = Gpu { name, device, context, compile, matmul: null(), binary: null(), unary: null() };
-        g.matmul = g.shader(MATMUL_HLSL).ok()?;
+        let mut g = Gpu { name, device, context, compile, matmul: [[null(), null()], [null(), null()]], binary: null(), unary: null() };
+        for fa in 0..2 {
+            for fb in 0..2 {
+                g.matmul[fa][fb] = g.shader(&format!("#define FA {}
+#define FB {}
+{}", fa, fb, MATMUL_HLSL)).ok()?;
+            }
+        }
         g.binary = g.shader(BINARY_HLSL).ok()?;
         g.unary = g.shader(UNARY_HLSL).ok()?;
         Some(g)
@@ -539,7 +558,7 @@ mod win {
         with_gpu(|g| {
             let out = g.rw(m * p, None)?;
             let consts = g.constants([m as u32, n as u32, p as u32, ta as u32 | (tb as u32) << 1, 0, 0, 0, 0])?;
-            g.run(&g.matmul, &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (p.div_ceil(16) as u32, m.div_ceil(16) as u32, 1));
+            g.run(&g.matmul[ta as usize][tb as usize], &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (p.div_ceil(16) as u32, m.div_ceil(16) as u32, 1));
             Ok(out)
         })
         .unwrap_or_else(|| Err(NO_GPU.into()))
