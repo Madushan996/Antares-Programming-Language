@@ -245,3 +245,69 @@ delete(file)
 fails(() => picture("no such file.png"), "couldn't read the picture")
 canvas()
 show "graphics: pictures, shapes, colours, text and effects ok"
+
+# ---------- 3D: models and placing work everywhere; drawing needs Windows ----------
+
+m = mesh([[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]])
+check(m.triangles == 1, "a mesh of one triangle: {m}")
+check(m.size == [1, 1, 0], "a mesh's size: {m.size}")
+fails(() => mesh([[0, 0, 0]], [[0, 1, 2]]), "corners by number")
+fails(() => cube(0, 0, 0, 1, {wobble: 1}), "doesn't know the option")
+fails(() => cube(0, 0, 0, -1), "size of 0 or more")
+fails(() => draw({mesh: 99999}, 0, 0, 0), "needs a model")
+objfile = program_folder() + "/graphics_model.obj"
+write(objfile, "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n")
+quad = mesh(objfile)
+check(quad.triangles == 2, "an .obj face with four corners is two triangles")
+check(mesh(objfile).mesh == quad.mesh, "a model file is read once")
+delete(objfile)
+fails(() => mesh("no such model.obj"), "couldn't read the model")
+
+p3 = picture(64, 48)
+canvas(p3)
+camera(0, 2, 6, 0, 0.5, 0)
+mid = to_screen(0, 0.5, 0)
+check(abs(mid[0] - 32) < 0.01 and abs(mid[1] - 24) < 0.01, "what the camera looks at is in the middle: {mid}")
+check(to_screen(0, 0, 50) == nothing, "a point behind the camera isn't on the picture")
+
+sky("skyblue", "white", "gray")
+sun(0.3, 1, 0.5)
+plane(0, 0, 0, 20, 20, "green")
+cube(0, 0.5, 0, 1, "red")
+drawn = yes
+try {
+    render()
+} else problem {
+    drawn = no
+    check(find(problem, "Windows") >= 0, "unexpected problem: {problem}")
+    show "graphics: 3D drawing is Windows-only here, as expected"
+}
+when drawn {
+    c = colour_at(32, 1)
+    check(c[2] > c[0], "the sky is blue at the top: {c}")
+    c = colour_at(32, 24)
+    check(c[0] > 120 and c[1] < 90, "the red cube is in the middle: {c}")
+    c = colour_at(6, 44)
+    check(c[1] > c[0] and c[1] > c[2], "the ground is green: {c}")
+    # without a sky, 3D goes over what is already there
+    fill("blue")
+    sky()
+    sphere(0, 0.5, 0, 0.5, {colour: "white", shine: 0.9, metal: 1})
+    render()
+    check(colour_at(1, 1) == [0, 0, 255], "3D without a sky leaves the background")
+    check(colour_at(32, 24) != [0, 0, 255], "and draws the sphere over it")
+    # lamps, fog, see-through shapes and pictures on shapes
+    fill("black")
+    sky("black")
+    sun()
+    fog("black", 3, 30)
+    lamp(0, 2, 1, "white", 2)
+    plane(0, 0, 0, 20, 20, {picture: dot, tiles: 4})
+    cube(0, 0.5, 0, 1, [255, 255, 255, 0.5])
+    render()
+    check(colour_at(32, 30)[0] > 0, "a lamp lights the ground")
+    fog()
+    sun(0.5, 1, 0.3)
+    show "graphics: 3D ok"
+}
+canvas()

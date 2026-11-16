@@ -385,6 +385,9 @@ thread_local! {
     static LOADED: RefCell<HashMap<String, usize>> = RefCell::new(HashMap::new());
     /// The picture being drawn on (`canvas`), or none for the window.
     static TARGET: Cell<Option<usize>> = const { Cell::new(None) };
+    /// How many times each picture has been drawn on, so a copy kept on the
+    /// graphics card (for 3D) is sent again when it has changed.
+    static VERSIONS: RefCell<Vec<u64>> = const { RefCell::new(vec![]) };
 }
 
 fn style() -> Style {
@@ -393,8 +396,9 @@ fn style() -> Style {
 
 /// Runs `f` on the picture being drawn on: the window's, or one chosen
 /// with `canvas`.
-fn with_target<R>(name: &str, f: impl FnOnce(&mut Canvas) -> R) -> Result<R, String> {
+pub(crate) fn with_target<R>(name: &str, f: impl FnOnce(&mut Canvas) -> R) -> Result<R, String> {
     if let Some(id) = TARGET.with(|t| t.get()) {
+        VERSIONS.with(|v| v.borrow_mut()[id] += 1);
         return PICTURES.with(|p| Ok(f(&mut p.borrow_mut()[id])));
     }
     SCREEN.with(|s| match s.borrow_mut().as_mut() {
@@ -684,6 +688,10 @@ pub fn b_window_open(_: &mut Interp, a: Vec<Value>) -> Res {
 pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 0, "frame")?;
     let closed = with_screen("frame", |sc| sc.closed)?;
+    if !closed {
+        // a 3D scene described this frame, and not yet drawn
+        crate::gfx3d::flush()?;
+    }
     if closed {
         // Closing a game's window ends the game, even in a `while yes` loop.
         use std::io::Write;
@@ -1143,7 +1151,7 @@ fn picture_value(id: usize, w: usize, h: usize) -> Value {
     Value::Map(Rc::new(vec![("picture".into(), Value::Num(id as f64)), ("width".into(), Value::Num(w as f64)), ("height".into(), Value::Num(h as f64))]))
 }
 
-fn picture_id(v: &Value, name: &str) -> Result<usize, String> {
+pub(crate) fn picture_id(v: &Value, name: &str) -> Result<usize, String> {
     if let Value::Map(m) = v {
         if let Some(Value::Num(n)) = field(m, "picture") {
             let id = *n as usize;
@@ -1162,7 +1170,43 @@ fn add_picture(c: Canvas) -> Result<usize, String> {
             return Err("there are already 100000 pictures: make pictures once, before the game loop, and draw them many times".to_string());
         }
         p.push(c);
+        VERSIONS.with(|v| v.borrow_mut().push(1));
         Ok(p.len() - 1)
+    })
+}
+
+/// A picture's version (how many times it has been drawn on) and size.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn picture_version(id: usize) -> (u64, usize, usize) {
+    let v = VERSIONS.with(|v| v.borrow()[id]);
+    PICTURES.with(|p| (v, p.borrow()[id].w, p.borrow()[id].h))
+}
+
+/// A copy of a picture's pixels.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn picture_pixels(id: usize) -> Vec<u32> {
+    PICTURES.with(|p| p.borrow()[id].px.clone())
+}
+
+/// The size of the picture being drawn on.
+pub(crate) fn target_size(name: &str) -> Result<(usize, usize), String> {
+    with_target(name, |c| (c.w, c.h))
+}
+
+/// Puts a rendered 3D picture over the one being drawn on (or in place of
+/// it, when the sky filled every pixel).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn paint_rendered(w: usize, h: usize, px: Vec<u32>, opaque: bool) -> Result<(), String> {
+    with_target("render", |c| {
+        if c.w != w || c.h != h {
+            return;
+        }
+        if opaque {
+            c.px = px;
+        } else {
+            let src = Canvas { w, h, px };
+            c.blit(&src, [0.0, 0.0, w as f64, h as f64], 0, 0);
+        }
     })
 }
 
@@ -1372,6 +1416,7 @@ pub fn b_sprite(_: &mut Interp, a: Vec<Value>) -> Res {
 pub fn b_screenshot(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 1, "screenshot")?;
     let file = text(&a[0], "screenshot")?;
+    crate::gfx3d::flush()?;
     let png = with_target("screenshot", |c| c.png())?;
     std::fs::write(&*file, png).map_err(|e| format!("couldn't save the screenshot to \"{}\": {}", file, e))?;
     Ok(s(&*file))

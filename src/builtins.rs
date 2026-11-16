@@ -2148,6 +2148,10 @@ fn b_clear(_: &mut Interp, a: Vec<Value>) -> Res {
 /// Redraws the screen in place: writes the text from the top-left corner
 /// in one go, so animation doesn't flicker.
 fn b_draw(_: &mut Interp, a: Vec<Value>) -> Res {
+    // draw(model, x, y, z [, look]) draws a 3D model
+    if a.first().is_some_and(crate::gfx3d::is_model) {
+        return crate::gfx3d::b_draw_model(a);
+    }
     // draw(picture, x, y [, options]) draws a picture in the window
     if a.len() >= 3 {
         return crate::gfx::b_draw_picture(a);
@@ -2396,6 +2400,21 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("blur", crate::gfx::b_blur),
         ("glow", crate::gfx::b_glow),
         ("vignette", crate::gfx::b_vignette),
+        ("camera", crate::gfx3d::b_camera),
+        ("sun", crate::gfx3d::b_sun),
+        ("lamp", crate::gfx3d::b_lamp),
+        ("sky", crate::gfx3d::b_sky),
+        ("fog", crate::gfx3d::b_fog),
+        ("shadows", crate::gfx3d::b_shadows),
+        ("cube", crate::gfx3d::b_cube),
+        ("box", crate::gfx3d::b_box),
+        ("sphere", crate::gfx3d::b_sphere),
+        ("cylinder", crate::gfx3d::b_cylinder),
+        ("cone", crate::gfx3d::b_cone),
+        ("plane", crate::gfx3d::b_plane),
+        ("mesh", crate::gfx3d::b_mesh),
+        ("render", crate::gfx3d::b_render),
+        ("to_screen", crate::gfx3d::b_to_screen),
         ("sound", crate::sound::b_sound),
         ("music", crate::sound::b_music),
         ("beep", crate::sound::b_beep),
