@@ -1671,14 +1671,15 @@ impl<'a> Cx<'a> {
             }
             Expr::Ask { model, prompt, kind, line } => {
                 let k = match kind {
-                    AskKind::Text => "Text",
-                    AskKind::Number => "Number",
-                    AskKind::YesNo => "YesNo",
-                    AskKind::List => "List",
+                    AskKind::Text => "AskKind::Text".to_string(),
+                    AskKind::Number => "AskKind::Number".to_string(),
+                    AskKind::YesNo => "AskKind::YesNo".to_string(),
+                    AskKind::List => "AskKind::List".to_string(),
+                    AskKind::Shape(s) => format!("AskKind::Shape(std::rc::Rc::new(antares::llm::Shape::from_spec({:?}).unwrap()))", s.spec()),
                 };
                 let m = self.dyn_code(model, sc);
                 let p = self.dyn_code(prompt, sc);
-                (format!("{{ let m_ = {}; let p_ = {}; ask(&m_, &p_, AskKind::{}, {})? }}", m, p, k, line), Ty::Dyn)
+                (format!("{{ let m_ = {}; let p_ = {}; ask(&m_, &p_, {}, {})? }}", m, p, k, line), Ty::Dyn)
             }
             Expr::ModelNew { spec, opts, line } => {
                 let s = self.dyn_code(spec, sc);
@@ -4392,6 +4393,17 @@ impl<'a> Cx<'a> {
         out
     }
 
+    /// The names of a function's inputs, as Rust code: &["a", "b"].
+    fn param_names(&self, s: usize, n: usize) -> String {
+        let def = self.scopes[s].def;
+        let names: Vec<String> = if def.is_null() {
+            (1..=n).map(|i| format!("input{}", i)).collect()
+        } else {
+            unsafe { &*def }.params.iter().map(|p| p.to_string()).collect()
+        };
+        format!("&{:?}", names)
+    }
+
     /// A function used as a value: a Rust closure wrapped as an Antares function.
     fn closure(&mut self, s: usize) -> String {
         let n = self.scopes[s].nparams;
@@ -4409,10 +4421,10 @@ impl<'a> Cx<'a> {
             clones.push_str(&format!("let c{t}_{i} = c{t}_{i}.clone();\n", t = t, i = i));
         }
         format!(
-            "{{ {clones}rust_fn({name:?}, {n}, move |args: Vec<Value>| -> R<Value> {{ unsafe {{\n{params}{body}}} }}) }}",
+            "{{ {clones}rust_fn_p({name:?}, {names}, move |args: Vec<Value>| -> R<Value> {{ unsafe {{\n{params}{body}}} }}) }}",
             clones = clones,
             name = self.scopes[s].name,
-            n = n,
+            names = self.param_names(s, n),
             params = params,
             body = body
         )
@@ -4459,10 +4471,10 @@ impl<'a> Cx<'a> {
                 args.push("depth() + 1".into());
                 let call = self.static_call(*s, format!("f{}({})", s, args.join(", ")));
                 init.push_str(&format!(
-                    "(*GV.as_mut_ptr()).v{gi} = rust_fn({name:?}, {n}, |args: Vec<Value>| -> R<Value> {{ let mut a_ = args.into_iter(); let r_ = unsafe {{ {call} }}; Ok({conv}) }});\n",
+                    "(*GV.as_mut_ptr()).v{gi} = rust_fn_p({name:?}, {names}, |args: Vec<Value>| -> R<Value> {{ let mut a_ = args.into_iter(); let r_ = unsafe {{ {call} }}; Ok({conv}) }});\n",
                     gi = gi,
                     name = self.scopes[*s].name,
-                    n = n,
+                    names = self.param_names(*s, n),
                     call = call,
                     conv = conv("r_".into(), self.scopes[*s].ret, Ty::Dyn)
                 ));

@@ -52,6 +52,8 @@ pub type AErr = Box<(String, u32)>;
 
 pub struct RustFn {
     pub name: String,
+    /// The inputs' names, when known.
+    pub params: Vec<String>,
     pub nparams: usize,
     pub f: Box<dyn Fn(Vec<Value>) -> Result<Value, AErr>>,
 }

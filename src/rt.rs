@@ -360,7 +360,12 @@ pub fn call(f: &Value, args: Vec<Value>, line: u32) -> R<Value> {
 }
 
 pub fn rust_fn(name: &str, nparams: usize, f: impl Fn(Vec<Value>) -> R<Value> + 'static) -> Value {
-    Value::Rust(Rc::new(RustFn { name: name.to_string(), nparams, f: Box::new(f) }))
+    Value::Rust(Rc::new(RustFn { name: name.to_string(), params: vec![], nparams, f: Box::new(f) }))
+}
+
+/// A compiled function as a value, knowing its inputs' names.
+pub fn rust_fn_p(name: &str, params: &[&str], f: impl Fn(Vec<Value>) -> R<Value> + 'static) -> Value {
+    Value::Rust(Rc::new(RustFn { name: name.to_string(), params: params.iter().map(|p| p.to_string()).collect(), nparams: params.len(), f: Box::new(f) }))
 }
 
 pub fn binop(op: BinOp, a: &Value, b: &Value, line: u32) -> R<Value> {
@@ -515,7 +520,7 @@ pub fn model(spec: &Value, opts: Option<&Value>, line: u32) -> R<Value> {
 }
 
 pub fn ask(m: &Value, prompt: &Value, kind: AskKind, line: u32) -> R<Value> {
-    at(interp::ask_value(m, &prompt.show(), kind), line)
+    at(interp::ask_value(it(), m, prompt, &kind), line)
 }
 
 // ---------- unboxing: values the compiler has proved are numbers ----------

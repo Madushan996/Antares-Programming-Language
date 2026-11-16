@@ -2156,7 +2156,7 @@ fn b_draw(_: &mut Interp, a: Vec<Value>) -> Res {
 
 // ---------- JSON ----------
 
-fn from_json(j: &J) -> Value {
+pub(crate) fn from_json(j: &J) -> Value {
     match j {
         J::Null => Value::Nothing,
         J::Bool(b) => Value::Bool(*b),
@@ -2187,7 +2187,7 @@ fn json_tensor(shape: &[usize], data: &[f64]) -> String {
     format!("[{}]", parts.join(","))
 }
 
-fn to_json(v: &Value) -> Result<String, String> {
+pub(crate) fn to_json(v: &Value) -> Result<String, String> {
     Ok(match v {
         Value::Unset | Value::Nothing => "null".into(),
         Value::Bool(b) => b.to_string(),
@@ -2392,5 +2392,10 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("columns", crate::nn::b_columns),
         ("shuffle", crate::nn::b_shuffle),
         ("batches", crate::nn::b_batches),
+        ("conversation", crate::llm::b_conversation),
+        ("history", crate::llm::b_history),
+        ("image", crate::llm::b_image),
+        ("embed", crate::llm::b_embed),
+        ("similarity", crate::llm::b_similarity),
     ]
 }

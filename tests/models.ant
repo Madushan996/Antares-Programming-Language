@@ -1,0 +1,80 @@
+# Models: conversations, tools, structured answers, images, streaming,
+# embeddings and every provider, against tests/mock_models.py.
+# Run with: python tests/check_models.py
+
+base = env("ANTARES_MOCK_URL")
+check(base != nothing, "run this with tests/check_models.py")
+
+to weather(city, days) = "sunny in {city} for {days} days"
+
+each provider in ["anthropic", "openai"] {
+    each streaming in [no, yes] {
+        address = base
+        when provider == "openai" { address = base + "/v1" }
+        model m = "{provider}:test-model" with {url: address, stream: streaming, system: "Be brief."}
+        where = "{provider}, streaming {streaming}"
+
+        check(ask m "hello" == "heard: hello", "plain question ({where})")
+        check(ask m "system?" == "system=Be brief.", "system prompt ({where})")
+
+        # structured answers
+        person = ask m "Who?" as {name: text, age: number, tags: list of text, ok: yes/no}
+        check(person.name == "Ada" and person.age == 36 and person.ok and person.tags == ["Ada", "Ada"], "a map ({where})")
+        check(ask m "Numbers?" as list of number == [36, 36], "a list of numbers ({where})")
+
+        # images
+        check(ask m "What is this?" with image("tests/pixel.png") == "I see an image", "an image ({where})")
+        parts = ["Compare these", image("tests/pixel.png"), image("tests/pixel.png")]
+        check(ask m parts == "I see an image", "a prompt made as a list ({where})")
+
+        # tools: the model calls an Antares function
+        model t = "{provider}:test-model" with {url: address, stream: streaming, tools: [weather]}
+        check(ask t "What's the weather?" == "The tool said: sunny in Paris for 2 days", "a tool ({where})")
+        model described = "{provider}:test-model" with {url: address, tools: [{run: weather, name: "forecast", about: "The weather for a city", inputs: {city: "text", days: "number"}}]}
+        check(ask described "weather please" == "The tool said: sunny in Paris for 2 days", "a described tool ({where})")
+
+        # conversations remember
+        chat = conversation(m)
+        ask chat "My name is Ada"
+        check(ask chat "What is my name?" == "Earlier you said: My name is Ada", "a conversation ({where})")
+        check(len(history(chat)) == 4 and history(chat)[0].role == "user", "history ({where})")
+        branch = conversation(chat)
+        ask branch "more"
+        check(len(history(branch)) == 6 and len(history(chat)) == 4, "a copied conversation ({where})")
+        tc = conversation(t)
+        check(ask tc "weather?" == "The tool said: sunny in Paris for 2 days", "tools in a conversation ({where})")
+        check(len(history(tc)) == 4 and find(history(tc)[2].text, "tool result") >= 0, "tool turns kept in the history ({where})")
+    }
+}
+
+model c = "anthropic:test-model" with {url: base, effort: "low"}
+check(ask c "effort?" == "effort=low", "effort reaches Anthropic")
+
+# embeddings (OpenAI-compatible), and similarity
+model e = "openai:embedder" with {url: base + "/v1"}
+v = embed(e, ["aa", "abc", "x"])
+check(shape(v) == [3, 3] and v[0] == [2, 2, 1] and v[2] == [1, 0, 1], "embeddings come back in order")
+check(shape(embed(e, "banana")) == [3], "one text, one row")
+check(abs(similarity([1, 0], [2, 0]) - 1) < 0.000001 and similarity([1, 0], [0, 1]) == 0, "similarity")
+check(similarity([1, 0], [[1, 0], [0, 1], [-1, 0]]) == [1, 0, -1], "similarity against a table")
+
+# the pretend echo model works offline for all of it
+model echo = "echo"
+check(ask echo "hi" == "hi", "echo repeats")
+check((ask echo "x" as {n: number, s: text}).n == 0, "echo makes up shaped answers")
+check(top(similarity(embed(echo, "the cat sat"), embed(echo, ["dogs bark", "a cat sat down", "stock prices"])), 1) == [1], "echo embeddings find similar text")
+check(len(history(conversation(echo))) == 0, "a new conversation is empty")
+
+to fails(action, part) {
+    try { action() } else problem {
+        check(find(problem, part) >= 0, "expected a problem about \"{part}\", got: {problem}")
+        give yes
+    }
+    fail("expected a problem about \"{part}\"")
+}
+fails(() => embed(c, "x"), "Anthropic doesn't make embeddings")
+fails(() => history(m), "needs a conversation")
+fails(() => image("tests/nothing_here.png"), "couldn't read")
+fails(() => image("tests/models.ant"), ".png, .jpg")
+
+show "models: conversations, tools, shapes, images, streaming and embeddings ok"

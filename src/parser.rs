@@ -73,6 +73,8 @@ pub struct Parser {
     packed: Option<Packed>,
     /// Top-level variables given a range with `within`: (slot, lowest, highest, line).
     ranged: Vec<(u32, Expr, Expr, u32)>,
+    /// Whether the shape just read was written `list of ...`.
+    saw_list_of: bool,
 }
 
 /// A copy of a range bound: a number, a variable, or arithmetic on them, with
@@ -189,6 +191,7 @@ impl Parser {
             aliases: vec![],
             packed: None,
             ranged: vec![],
+            saw_list_of: false,
         }
     }
 
@@ -508,6 +511,7 @@ impl Parser {
 
     fn function(&mut self, name: &str, params: Vec<String>, ranges: Vec<Option<(Expr, Expr, u32)>>) -> PR<Rc<FnDef>> {
         let nparams = params.len();
+        let names: Vec<Rc<str>> = params.iter().map(|p| p.as_str().into()).collect();
         // inputs with a range are checked first: x = within(x, lo, hi, "x")
         let nest = self.scopes.len() as u32;
         let mut checks = vec![];
@@ -537,7 +541,7 @@ impl Parser {
             b.extend(body);
             b
         };
-        Ok(Rc::new(FnDef { name: name.into(), nparams, nslots, body, code: Default::default() }))
+        Ok(Rc::new(FnDef { name: name.into(), params: names, nparams, nslots, body, code: Default::default() }))
     }
 
     /// within(value, lo, hi, "name") for code inside a function `nest` scopes
@@ -1228,6 +1232,70 @@ impl Parser {
         Ok(items)
     }
 
+    /// The shape of an answer after `as`: text, number, yes/no, list,
+    /// list of <shape>, or {name: <shape>, ...}.
+    fn shape(&mut self) -> PR<crate::llm::Shape> {
+        use crate::llm::Shape;
+        self.saw_list_of = false;
+        match self.advance() {
+            Tok::Yes => {
+                self.expect(Tok::Slash, "'/no' (write: as yes/no)")?;
+                self.expect(Tok::No, "'no' (write: as yes/no)")?;
+                Ok(Shape::YesNo)
+            }
+            Tok::Ident(s) if s == "number" => Ok(Shape::Number),
+            Tok::Ident(s) if s == "text" => Ok(Shape::Text),
+            Tok::Ident(s) if s == "list" => {
+                if matches!(self.peek(), Tok::Ident(o) if o == "of") {
+                    self.advance();
+                    let inner = self.shape()?;
+                    self.saw_list_of = true;
+                    Ok(Shape::List(Box::new(inner)))
+                } else {
+                    Ok(Shape::List(Box::new(Shape::Text)))
+                }
+            }
+            Tok::LBrace => {
+                let mut fields: Vec<(String, Shape)> = vec![];
+                loop {
+                    self.skip_nl();
+                    if self.eat(&Tok::RBrace) {
+                        break;
+                    }
+                    let key = match self.advance() {
+                        Tok::Ident(k) => k,
+                        Tok::Str(parts) if parts.len() == 1 => match &parts[0] {
+                            StrPart::Lit(k) => k.clone(),
+                            _ => return self.err("a field name in a shape is a plain name, like {name: text}".to_string()),
+                        },
+                        other => return self.err(format!("in a shape I expected a field name, like {{name: text}}, but found {}", describe(&other))),
+                    };
+                    if fields.iter().any(|(k, _)| *k == key) {
+                        return self.err(format!("the field '{}' is named twice in this shape", key));
+                    }
+                    self.expect(Tok::Colon, "':' after the field name, as in {name: text}")?;
+                    let s = self.shape()?;
+                    fields.push((key, s));
+                    self.skip_nl();
+                    if !self.eat(&Tok::Comma) {
+                        self.skip_nl();
+                        self.expect(Tok::RBrace, "',' or '}' in the shape")?;
+                        break;
+                    }
+                }
+                if fields.is_empty() {
+                    return self.err("a shape needs at least one field, like {name: text}".to_string());
+                }
+                self.saw_list_of = false;
+                Ok(Shape::Map(fields))
+            }
+            other => self.err(format!(
+                "after `as` I expected text, number, yes/no, list, list of ..., or a shape like {{name: text, age: number}}, but found {}",
+                describe(&other)
+            )),
+        }
+    }
+
     fn lambda_ahead(&self) -> bool {
         let mut k = 1;
         if *self.peek_at(k) != Tok::RParen {
@@ -1248,11 +1316,12 @@ impl Parser {
 
     fn lambda(&mut self, params: Vec<String>) -> PR<Expr> {
         let nparams = params.len();
+        let names: Vec<Rc<str>> = params.iter().map(|p| p.as_str().into()).collect();
         self.scopes.push(params);
         let body = self.expr();
         let nslots = self.scopes.pop().unwrap().len();
         let body = vec![Stmt::Expr(body?)];
-        Ok(Expr::Lambda(Rc::new(FnDef { name: "function".into(), nparams, nslots, body, code: Default::default() })))
+        Ok(Expr::Lambda(Rc::new(FnDef { name: "function".into(), params: names, nparams, nslots, body, code: Default::default() })))
     }
 
     fn interpolation(&mut self, code: &str, line: u32) -> PR<Expr> {
@@ -1372,24 +1441,21 @@ impl Parser {
             Tok::Ask => {
                 self.advance();
                 let model = Box::new(self.postfix()?);
-                let prompt = Box::new(self.additive()?);
+                let mut prompt = Box::new(self.additive()?);
+                // `with image("cat.png")` (or a list of them): pictures to go with the prompt
+                if self.eat(&Tok::With) {
+                    let extra = self.additive()?;
+                    prompt = Box::new(Expr::List(vec![*prompt, extra]));
+                }
                 let mut kind = AskKind::Text;
                 if self.eat(&Tok::As) {
-                    kind = match self.advance() {
-                        Tok::Yes => {
-                            self.expect(Tok::Slash, "'/no' (write: as yes/no)")?;
-                            self.expect(Tok::No, "'no' (write: as yes/no)")?;
-                            AskKind::YesNo
-                        }
-                        Tok::Ident(s) if s == "number" => AskKind::Number,
-                        Tok::Ident(s) if s == "text" => AskKind::Text,
-                        Tok::Ident(s) if s == "list" => AskKind::List,
-                        other => {
-                            return self.err(format!(
-                                "after `as` I expected text, number, list or yes/no, but found {}",
-                                describe(&other)
-                            ))
-                        }
+                    kind = match self.shape()? {
+                        crate::llm::Shape::Text => AskKind::Text,
+                        crate::llm::Shape::Number => AskKind::Number,
+                        crate::llm::Shape::YesNo => AskKind::YesNo,
+                        // a plain `list`: one item per line of the reply
+                        crate::llm::Shape::List(inner) if *inner == crate::llm::Shape::Text && !self.saw_list_of => AskKind::List,
+                        other => AskKind::Shape(Rc::new(other)),
                     };
                 }
                 Ok(Expr::Ask { model, prompt, kind, line })
