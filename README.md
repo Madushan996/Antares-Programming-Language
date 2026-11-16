@@ -48,7 +48,7 @@ count = ask claude "How many moons does Mars have?" as number
 - [Making an executable to share](#making-an-executable-to-share)
 - [Troubleshooting](#troubleshooting)
 - [The language in five minutes](#the-language-in-five-minutes)
-- [Machine learning](#machine-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Built-in functions](#built-in-functions)
+- [Machine learning](#machine-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Sound](#sound) · [Built-in functions](#built-in-functions)
 
 ## Install
 
@@ -568,10 +568,51 @@ while window_open() {
 - Closing the window ends the game. A game made with `antares build` and
   started by double-clicking hides its console window, and shows a problem
   that stops it in a message box. With `--icon`, the window shows the icon too.
-- `examples/catch.ant` is a complete game: catch the falling stars and dodge
-  the rocks.
+- `examples/catch.ant` is a complete game, with sound: catch the falling
+  stars and dodge the rocks.
 
 Windows only for now; on macOS and Linux, `window()` says so.
+
+## Sound
+
+Games can play sound files, tones, tunes written as text, ready-made effects
+and background music, all at once. Antares mixes the sounds itself, so
+nothing else is needed. Sound works in a window or in the terminal:
+
+```
+effect("coin")                           # a ready-made effect
+beep(440, 0.2)                           # a tone: frequency, seconds
+tune("C E G C5:2", 0.15)                 # a tune written as text
+sound("splash.wav")                      # a sound file
+music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
+```
+
+| Function | What it does |
+|---|---|
+| `sound(file [, volume])` | Plays a WAV file once. Sounds can overlap |
+| `music(file)` | Plays a WAV file over and over, in the background |
+| `music(notes, step [, wave])` | Plays a tune over and over, in the background |
+| `music()` | Stops the music |
+| `beep(frequency, seconds [, wave])` | A tone. 440 is the note A |
+| `tune(notes [, step [, wave]])` | Plays a tune written as text, once; gives back its length in seconds |
+| `effect(name)` | A ready-made sound effect: `"coin"`, `"jump"`, `"hit"`, `"laser"`, `"explosion"`, `"powerup"` or `"select"` |
+| `volume(level)` | How loud everything is, from 0 (silent) to 1 (full) |
+| `silence()` | Stops every sound, and the music |
+| `playing()` | How many sounds are still playing (not counting music) |
+
+- A tune is notes separated by spaces: `C`, `F#`, `Bb3`, `A5` (octave 4 if
+  none is given) and `-` for a rest. Each lasts one step (0.15 seconds unless
+  given), or several with `:n`, like `C:2`.
+- Waves give tones their character: `"square"` (the default, the classic
+  game sound), `"sine"` (soft), `"triangle"`, `"saw"` and `"noise"`.
+- Sound files are WAV files (8, 16, 24 or 32-bit, any rate, mono or stereo).
+  To pack one into a built game, build with `--embed splash.wav` and play
+  `sound("embedded:splash.wav")`.
+- Sounds start at most 60 ms after they are asked for. A program waits for
+  its last sounds to finish before it ends, so `beep(...)` as its last line is
+  heard.
+- Windows only for now. Elsewhere, and on computers without a sound device,
+  the sound functions do nothing, so a game still runs, silently.
 
 ## Built-in functions
 
@@ -591,6 +632,7 @@ Windows only for now; on macOS and Linux, `window()` says so.
 | The command line | `args` (what was typed after the program's name), `env` (a setting of the computer) |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
 | Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
+| Sound | `sound music beep tune effect volume silence playing` |
 | Other | `kind clock now check fail` |
 
 ## Speed
@@ -709,6 +751,7 @@ Things to know:
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, SGD and Adam |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
+| `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
 | `src/llm.rs`, `src/json.rs` | Model calls and JSON |
 
 ## A real program: a chess engine
@@ -724,7 +767,7 @@ the original C++ generic build.
 
 This is version 0.6. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
-than Anthropic, GPU support, and game windows on macOS and Linux.
+than Anthropic, GPU support, and game windows and sound on macOS and Linux.
 
 ## Rebuilding the documentation
 

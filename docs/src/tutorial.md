@@ -2851,30 +2851,63 @@ sprite(ship, 70, 100, {w: "white", r: "red"}, 3)
 
 The last input makes the sprite 3 times as big, so this 5 by 3 ship covers 15 by 9 pixels.
 
+## Sound
+
+Games are much more fun with sound. Antares can play sound effects, tones, tunes and music, and you don't need any sound files to start:
+
+<!-- norun -->
+```antares
+effect("coin")
+```
+
+That plays a ready-made effect. There are seven: `"coin"`, `"jump"`, `"hit"`, `"laser"`, `"explosion"`, `"powerup"` and `"select"`. Put one wherever something happens in your game: `effect("jump")` when the player jumps, `effect("hit")` when they bump into something.
+
+You can make your own sounds too:
+
+| Function | What it plays |
+|---|---|
+| `beep(frequency, seconds)` | A tone. The bigger the frequency, the higher the sound: 440 is the note A |
+| `tune(notes, step)` | A tune written as text |
+| `sound(file)` | A sound file (a WAV file) |
+| `music(notes, step)` | A tune that plays over and over in the background; `music()` stops it |
+| `volume(level)` | How loud everything is, from 0 (silent) to 1 (full) |
+| `silence()` | Stops all the sounds |
+
+A tune is written as notes with spaces between them. The notes are the letters `C D E F G A B`, and a number after a letter makes it higher or lower: `C5` is higher than `C`, and `C3` lower. A `-` is a rest, a moment of silence. Each note lasts one **step**, and `:2` makes a note last two steps:
+
+<!-- norun -->
+```antares
+tune("C D E F G:2 G:2", 0.2)
+```
+
+Sounds can play at the same time, so music, a jump and a coin can all be heard together. Each sound starts straight away; your game doesn't stop and wait for it to finish.
+
 ## A whole game
 
-`examples/catch.ant`, which comes with Antares, is a complete game in under 90 lines: catch the falling stars in your basket and dodge the rocks. Run it with `antares examples/catch.ant`. Its main loop follows the same pattern as every game:
+`examples/catch.ant`, which comes with Antares, is a complete game with sound, in under 90 lines: catch the falling stars in your basket and dodge the rocks. Run it with `antares examples/catch.ant`. Its main loop follows the same pattern as every game:
 
 1. Read the keys and move the player.
-2. Update everything else: make new stars and rocks, let them fall, and check what landed in the basket.
+2. Update everything else: make new stars and rocks, let them fall, and check what landed in the basket. A star plays `effect("coin")`, a rock plays `effect("hit")`, and losing the last life plays a sad little tune.
 3. Draw the whole picture, back to front: the sky, then the falling things, the basket, and the score on top.
 4. Call `frame()`.
 
 When the game is finished, `antares build catch.ant` turns it into a program you can give to friends. Double-clicking it opens just the game window.
 
-These game windows work on Windows. On macOS and Linux, `window()` tells you they aren't available there yet.
+These game windows and sounds work on Windows. On macOS and Linux, `window()` tells you windows aren't available there yet, and sounds are silent.
 
 ## Try it yourself
 
 1. Change your first window so the circle is red and the sky is black, and add your name at the bottom.
 2. In the "Move me" program, stop the box from leaving the window. (Hint: after moving, if `x` is less than 0, set it back to 0; the box is 20 wide, so `x` must not go above 140.)
 3. Make a box that jumps up by 30 pixels each time you press Space, using `pressed("space")`.
+4. Add sound to your jumping box: play `effect("jump")` each time it jumps. Then write the start of a song you know as a tune, and play it once when the program starts.
 
 ## Summary
 
 - `window(width, height, title)` opens a window; `while window_open()` runs the game until it's closed; `frame()` shows each picture, 60 times a second.
 - Draw with `fill`, `rect`, `circle`, `line`, `pixel`, `label` and `sprite`. Colours are names, or `[red, green, blue]`.
 - `held(key)` is for moving, `pressed(key)` for one-off actions, and `mouse()` for the mouse.
+- `effect(name)` plays a ready-made sound; `beep`, `tune`, `sound` and `music` play your own.
 
 # Making Programs Fast {#fast}
 
@@ -3961,6 +3994,23 @@ while window_open() {
 
 Here the box also falls back down slowly, one pixel a frame.
 
+4. Put `effect("jump")` inside the jump's braces, on its own line:
+
+<!-- norun -->
+```antares
+when pressed("space") {
+    y -= 30
+    effect("jump")
+}
+```
+
+and before the loop, play a tune, for example the start of "Twinkle, Twinkle, Little Star":
+
+<!-- norun -->
+```antares
+tune("C C G G A A G:2", 0.25)
+```
+
 ## Chapter 20: Making Programs Fast
 
 1. and 2. Results depend on your computer. As a guide, on the laptop used for this book `fib(30)` took 0.28 seconds interpreted and 0.009 seconds compiled, about 30 times faster.
@@ -4033,6 +4083,7 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Files and data | `read write append delete files exists save load json to_json read_binary program_folder` |
 | Input and screen | `input input_waiting key wait draw clear clock now args env` |
 | Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
+| Sound | `sound music beep tune effect volume silence playing` |
 
 The Antares Language Reference describes every one of them in detail.
 

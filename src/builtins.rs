@@ -1375,7 +1375,7 @@ pub fn set_embedded(files: &[(&'static str, &'static [u8])]) {
 }
 
 /// The bytes of "embedded:<name>", if the path has that form and the file was embedded.
-fn embedded_file(path: &str) -> Option<Option<&'static [u8]>> {
+pub(crate) fn embedded_file(path: &str) -> Option<Option<&'static [u8]>> {
     let name = path.strip_prefix("embedded:")?;
     Some(EMBEDDED.with(|e| e.borrow().iter().find(|(n, _)| *n == name).map(|(_, b)| *b)))
 }
@@ -2362,5 +2362,13 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("pressed", crate::gfx::b_pressed),
         ("mouse", crate::gfx::b_mouse),
         ("screenshot", crate::gfx::b_screenshot),
+        ("sound", crate::sound::b_sound),
+        ("music", crate::sound::b_music),
+        ("beep", crate::sound::b_beep),
+        ("tune", crate::sound::b_tune),
+        ("effect", crate::sound::b_effect),
+        ("volume", crate::sound::b_volume),
+        ("silence", crate::sound::b_silence),
+        ("playing", crate::sound::b_playing),
     ]
 }

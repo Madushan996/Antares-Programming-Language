@@ -1,0 +1,46 @@
+# Sound: tones, tunes, effects, music and their problems.
+# Plays a few very short sounds on Windows. Elsewhere, and on computers
+# without a sound device, sounds do nothing, so this checks the rest.
+
+to fails(action, part) {
+    try {
+        action()
+    } else problem {
+        check(find(problem, part) >= 0, "expected a problem about \"{part}\", got: {problem}")
+        give yes
+    }
+    fail("expected a problem about \"{part}\"")
+}
+
+volume(0.2)
+beep(440, 0.03)
+beep(660, 0.03, "sine")
+check(playing() <= 2, "two beeps at most are playing")
+
+secs = tune("C E G:2 -", 0.01, "triangle")
+check(abs(secs - 0.05) < 0.0001, "a tune of 5 steps of 0.01 s lasts 0.05 s, not {secs}")
+check(tune("", 0.1) == 0, "an empty tune lasts no time")
+
+each name in ["coin", "jump", "hit", "laser", "explosion", "powerup", "select"] { effect(name) }
+music("C - E -", 0.05, "square")
+check(playing() <= 11, "music isn't counted as a sound playing")
+music()
+music("C", 0.05)
+music(nothing)
+silence()
+check(playing() == 0, "silence() stops everything")
+
+fails(() => sound("no such file.wav"), "couldn't open the sound")
+fails(() => sound("embedded:nothing.wav"), "no file was embedded")
+fails(() => sound("x.wav", 3), "volume from 0")
+fails(() => beep(5, 1), "frequency from 20 to 20000")
+fails(() => beep(440, 11), "length from 0 to 10")
+fails(() => beep(440, 0.1, "wobble"), "\"square\", \"sine\"")
+fails(() => tune("C H", 0.1), "doesn't know the note \"H\"")
+fails(() => tune("C:x", 0.1), "how many steps")
+fails(() => tune("C", 0), "step from 0 to 10")
+fails(() => effect("boing"), "the effects are")
+fails(() => volume(-1), "volume from 0")
+fails(() => music("a", 1, "sine", 4), "takes a WAV file")
+volume(1)
+show "sound: tones, tunes, effects and music ok"

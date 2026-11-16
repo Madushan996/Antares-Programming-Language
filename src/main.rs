@@ -247,5 +247,7 @@ fn main() {
         .spawn(real_main)
         .expect("couldn't start");
     let code = child.join().unwrap_or(1);
+    // sounds still playing are heard to the end
+    antares::sound::finish();
     std::process::exit(code);
 }

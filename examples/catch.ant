@@ -1,5 +1,5 @@
 # Star Catch
-# Catch the falling stars in your basket, and dodge the rocks.
+# Catch the falling stars in your basket, and dodge the rocks. With sound.
 # Left and right arrows (or A and D) move. After the game, Space plays again.
 # Run it (Windows):  antares examples/catch.ant
 
@@ -17,7 +17,10 @@ game = new_game()
 
 while window_open() {
     when game.over {
-        when pressed("space") { game = new_game() }
+        when pressed("space") {
+            game = new_game()
+            effect("select")
+        }
     } else {
         # move the basket, keeping it on the screen
         when held("left") or held("a") { game.x -= 2 }
@@ -44,10 +47,15 @@ while window_open() {
             caught = t.x < game.x + 16 and t.x + 5 > game.x and t.y + 5 > H - 10 and t.y < H - 4
             when caught and t.kind == "star" {
                 game.score += 1
+                effect("coin")
             } else when caught {
                 game.lives -= 1
                 game.hurt = 20
-                when game.lives == 0 { game.over = yes }
+                effect("hit")
+                when game.lives == 0 {
+                    game.over = yes
+                    tune("G4 E4 C4 G3:3", 0.12)
+                }
             } else when t.y < H {
                 falling = push(falling, t)
             }

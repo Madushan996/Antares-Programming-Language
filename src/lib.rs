@@ -15,6 +15,7 @@ pub mod llm;
 pub mod pack;
 pub mod parser;
 pub mod rt;
+pub mod sound;
 pub mod tensor;
 pub mod value;
 pub mod vm;

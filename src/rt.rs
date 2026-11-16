@@ -103,6 +103,8 @@ pub fn start(files: &'static [(&'static str, &'static str)], main_src: &'static 
         })
         .expect("couldn't start");
     let code = child.join().unwrap_or(1);
+    // sounds still playing are heard to the end
+    crate::sound::finish();
     std::process::exit(code);
 }
 
