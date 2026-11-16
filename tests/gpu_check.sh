@@ -6,7 +6,7 @@
 # In a Colab or Kaggle notebook cell (on Kaggle, turn on Internet in the
 # notebook's settings and pick a GPU accelerator first):
 #
-#   !git clone -b claude/cuda https://github.com/Madushan996/Antares-Programming-Language antares
+#   !git clone https://github.com/Madushan996/Antares-Programming-Language antares
 #   !bash antares/tests/gpu_check.sh
 
 cd "$(dirname "$0")/.." || exit 1

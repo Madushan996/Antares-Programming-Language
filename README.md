@@ -54,10 +54,11 @@ show ask helper "What is 17% of 2450?"
 - **AI in the language.** Conversations, tools, structured answers, images,
   streaming and embeddings for language models; tensors, autodiff,
   attention, layer norm, cross-entropy and AdamW for training your own.
-- **Trains on the GPU.** `use gpu` sends training to the graphics card on any
-  Windows PC, with nothing to install: 15 times faster than the CPU on a
-  laptop's built-in graphics.
   `examples/tiny_gpt.ant` is a working GPT-style transformer in about 100 lines.
+- **Trains on the GPU.** `use gpu` sends training to the graphics card, with
+  nothing to install: on any Windows PC, and on NVIDIA GPUs on Linux,
+  including Google Colab and Kaggle. 53 times faster than the CPU on Colab's
+  Tesla T4.
 - **Any model.** Claude, OpenAI and services like it, or free and private
   models on your own computer with Ollama.
 - **One file, no dependencies.** The whole language is a single small program
@@ -106,7 +107,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.9.0`.
+You should see `Antares 0.10.0`.
 
 ### Option 2: download it yourself
 
@@ -580,25 +581,58 @@ there between steps. Small sums stay on the CPU, where they are faster.
 nothing).
 
 - It works on any Windows PC with a graphics card or built-in graphics,
-  through Direct3D 11, which Windows includes. Nothing needs installing.
+  through Direct3D 11, which Windows includes, and on Linux with an NVIDIA
+  GPU, through CUDA: Google Colab, Kaggle, and PCs with an NVIDIA card and
+  its driver and CUDA toolkit. Nothing else needs installing.
 - The GPU works in 32-bit numbers, so results agree with the CPU's to about
   6 digits. That is why it is turned on with `use gpu` rather than
   automatically: programs without it print exactly what they did before.
-- Without a usable GPU (and on macOS and Linux, for now), `use gpu` says so
-  once and everything stays on the CPU, so a program runs anywhere.
+- Without a usable GPU (and on macOS, for now), `use gpu` says so once and
+  everything stays on the CPU, so a program runs anywhere.
 - The first program to use the GPU waits about a second while its programs
   for the graphics card are compiled; they are kept, so later programs start
   at once.
 
-On a laptop's Intel HD Graphics 520, against its 4-core CPU:
+Against the CPU of the same machine:
 
-| Task | CPU | GPU |
-|---|---|---|
-| Training a 784-1024-1024-10 classifier, 10 steps | 29.5 s | 1.89 s |
-| A 3-layer 1024-wide forward pass, 10 times | 8.49 s | 0.89 s |
-| A 1024 x 1024 matrix product | 360 ms | 49 ms |
+| Task | Colab CPU | Colab Tesla T4 | Laptop CPU (4 cores) | Laptop Intel HD 520 |
+|---|---|---|---|---|
+| Training a 784-1024-1024-10 classifier, 10 steps | 29.0 s | 0.55 s | 29.5 s | 1.89 s |
+| A 1024 x 1024 matrix product | 378 ms | 7.9 ms | 360 ms | 49 ms |
 
-A dedicated graphics card is many times faster again.
+### On Google Colab and Kaggle
+
+Colab and Kaggle give you a free NVIDIA GPU in the browser. Choose a GPU
+runtime (Colab: *Runtime, Change runtime type, T4 GPU*; Kaggle: a GPU
+accelerator, with *Internet* on in the notebook's settings), then in a cell:
+
+```
+!curl -fsSL https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.sh | sh
+```
+
+Write a program in a cell (`%%writefile` saves it as a file), with `use gpu`
+at the top:
+
+```
+%%writefile train.ant
+use gpu
+...
+```
+
+and run it:
+
+```
+!~/.antares/bin/antares train.ant
+```
+
+Files on the notebook's machine disappear when the session ends, so `save`
+models to Google Drive on Colab (mount it with
+`from google.colab import drive; drive.mount('/content/drive')` in a Python
+cell) or to `/kaggle/working` on Kaggle. For API keys, use the notebook's
+Secrets panel and copy the key into the environment from a Python cell
+(`os.environ["ANTHROPIC_API_KEY"] = ...`); programs started with `!` then see
+it. `bash tests/gpu_check.sh`, from a copy of this repository, checks the GPU
+support on such a machine and compares it with the CPU.
 
 ### A tiny GPT
 
@@ -933,6 +967,7 @@ Things to know:
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
 | `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
 | `src/gpu.rs` | The GPU: Direct3D 11 compute shaders for matrix products, element-wise maths, gradients and optimisers, and the shader cache |
+| `src/gpu_cuda.rs` | The same on Linux with NVIDIA GPUs (Colab, Kaggle), through CUDA: kernels compiled with libnvrtc |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
@@ -949,8 +984,9 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.9. Not there yet: giving a value to a slice
-(`v[1:3] = 0`), and the GPU, game windows and sound on macOS and Linux.
+This is version 0.10. Not there yet: giving a value to a slice
+(`v[1:3] = 0`), the GPU on macOS and on non-NVIDIA Linux, and game windows
+and sound on macOS and Linux.
 
 ## Rebuilding the documentation
 
