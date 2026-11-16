@@ -42,13 +42,14 @@ person = ask claude "Who wrote Gitanjali?" as {name: text, born: number}
 show person.born + 100
 ```
 
-**Build an agent.** Give a model your own functions as tools, and it calls them:
+**Build an agent.** Give a model your own functions as tools, or built-in
+ones that run commands and read the web, and it calls them:
 
 ```
 to percent(amount, rate) = amount * rate / 100
 
-model helper = "anthropic:claude-opus-5-5" with {tools: [percent]}
-show ask helper "What is 17% of 2450?"
+model helper = "ollama:qwen2.5" with {tools: [percent, shell, read_page]}
+show ask helper "What is 17% of 2450? And which file here is the biggest?"
 ```
 
 - **AI in the language.** Conversations, tools, structured answers, images,
@@ -59,6 +60,8 @@ show ask helper "What is 17% of 2450?"
   nothing to install: on any Windows PC, and on NVIDIA GPUs on Linux,
   including Google Colab and Kaggle. 53 times faster than the CPU on Colab's
   Tesla T4.
+- **Agents that act.** `shell` runs commands and `read_page` reads the web,
+  as tools a model can use by itself; Antares asks you before each command.
 - **Any model.** Claude, OpenAI and services like it, or free and private
   models on your own computer with Ollama.
 - **One file, no dependencies.** The whole language is a single small program
@@ -107,7 +110,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.10.0`.
+You should see `Antares 0.11.0`.
 
 ### Option 2: download it yourself
 
@@ -701,6 +704,32 @@ then you get the final answer. Describe a tool to help the model use it well:
 (inputs are `"number"`, `"text"`, `"yes/no"` or `"list"`).
 `examples/agent.ant` is a complete agent.
 
+### Commands, the web, and agents that act
+
+```
+r = shell("git status")                  # {output, errors, code}
+show r.output
+
+show read_page("https://example.com")    # a web page's readable text
+found = json(fetch("https://en.wikipedia.org/w/api.php",
+                   {query: {action: "query", list: "search", srsearch: "Sigiriya", format: "json"}}))
+
+model coder = "ollama:qwen2.5-coder" with {tools: [shell, read, write, files]}
+ask coder "Run the tests and fix what fails."
+```
+
+`shell(command, {folder, input, timeout})` runs a command (in `cmd` on Windows,
+`sh` elsewhere). `fetch(url, {query, method, headers, body, timeout})` gets
+anything from the web as text; `page_text` and `page_links` take a page apart,
+and `read_page` fetches a page as text in one step. `shell`, `read_page`,
+`fetch`, `read`, `write` and `files` can be tools just as they are. Before a
+model runs a command or writes a file, Antares shows what it wants to do and
+asks `Allow it? (y/n)`; `confirm: yes` in a tool's map asks first for your own
+tools too, and `{run: shell, confirm: no}` turns it off.
+`examples/researcher.ant` answers questions from Wikipedia, and
+`examples/coder.ant` is a programming helper that runs commands to check its
+work.
+
 ### Images, streaming and embeddings
 
 ```
@@ -842,6 +871,7 @@ music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
 | Text | `upper lower trim split lines replace find text number fixed pad code char` |
 | Data and files | `save load exists program_folder json to_json read write append delete files read_binary input input_waiting` |
 | The command line | `args` (what was typed after the program's name), `env` (a setting of the computer) |
+| Commands and the web | `shell fetch read_page page_text page_links` |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
 | Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
 | Sound | `sound music beep tune effect volume silence playing` |
@@ -972,6 +1002,7 @@ Things to know:
 | `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
 | `src/llm.rs`, `src/json.rs` | Language models (Claude, OpenAI-style, Ollama): conversations, tools, shapes, images, streaming, embeddings; and JSON |
+| `src/web.rs` | Commands (`shell`) and the web (`fetch` through `curl`, readable text and links from pages) |
 
 ## A real program: a chess engine
 
@@ -984,7 +1015,7 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.10. Not there yet: giving a value to a slice
+This is version 0.11. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), the GPU on macOS and on non-NVIDIA Linux, and game windows
 and sound on macOS and Linux.
 

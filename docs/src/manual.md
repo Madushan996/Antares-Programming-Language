@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.10.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.11.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.10.0 — type a line and press Enter. `exit` to leave.
+Antares 0.11.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1188,7 +1188,36 @@ The model sees each function's name and the names of its inputs. A map describes
 {run: weather, name: "today_weather", about: "Today's weather for a city", inputs: {city: "text"}}
 ```
 
-`run` is the function; `name` (letters, digits, `_` and `-`), `about` and `inputs` are optional. Inputs are `"number"`, `"text"`, `"yes/no"` or `"list"`, in the function's order. A function's result goes back to the model as text (maps and lists as JSON). A problem in a tool doesn't stop the program: it is reported to the model, which can try something else. A model may call several tools at once and up to 25 rounds of tools per `ask`. Tools work in conversations, where the calls and results are remembered too.
+`run` is the function; `name` (letters, digits, `_` and `-`), `about`, `inputs` and `confirm` are optional. Inputs are `"number"`, `"text"`, `"yes/no"` or `"list"`, in the function's order. A function's result goes back to the model as text (maps and lists as JSON). A problem in a tool doesn't stop the program: it is reported to the model, which can try something else. A model may call several tools at once and up to 25 rounds of tools per `ask`. Tools work in conversations, where the calls and results are remembered too.
+
+## Built-in tools, and asking first
+
+Some built-in functions can be tools by themselves, so an agent that runs commands, reads the web or works with files needs no functions of your own:
+
+| Tool | What the model can do | Asks first |
+|---|---|---|
+| `shell` | Run a command and see its output, errors and exit code (Chapter 14) | yes |
+| `write` | Write a text file, replacing what was in it | yes |
+| `read` | Read a text file | no |
+| `files` | List a folder | no |
+| `read_page` | Read a web page as text (Chapter 14) | no |
+| `fetch` | Fetch a web address exactly as it is sent | no |
+
+<!-- norun -->
+```antares
+model coder = "ollama:qwen2.5-coder" with {tools: [shell, read, write, files]}
+show ask coder "Which file in this folder is the biggest?"
+```
+
+Before Antares runs a tool that asks first, it shows what the model wants to do and waits for an answer:
+
+```output
+The model wants to use the tool 'shell':
+    command: dir /s
+Allow it? (y/n)
+```
+
+Typing `y` runs it; anything else tells the model that the user did not allow it, and the model carries on without. When there is no one to answer (the program's input is not a keyboard, or has ended), the answer is no. `confirm: yes` in a tool's map asks first for your own functions too, and `confirm: no` turns asking off: `{run: shell, confirm: no}`. Turn it off only where you would be happy for the model to run any command unseen, such as a throwaway virtual machine. `examples/coder.ant` is a coding helper built this way, and `examples/researcher.ant` answers questions from Wikipedia.
 
 ## Images
 
@@ -1418,6 +1447,72 @@ show env("HOME")
 ```
 
 Compiled programs get their arguments the same way: `greet.exe Maya`.
+
+## Running commands
+
+`shell(command)` runs a command, as if typed in a terminal, and gives back a map: `output` (what it printed), `errors` (what it printed as errors) and `code` (its exit code: 0 for success). Commands run in `cmd` on Windows and `sh` elsewhere:
+
+```antares
+r = shell("echo hello")
+show r.output, r.code
+show shell("exit 4").code
+```
+
+```output
+hello 0
+4
+```
+
+A command that fails is not a problem for the program: look at `code`. The ends of lines at the very end of `output` and `errors` are removed. A map of options can follow the command:
+
+| Option | Meaning | Default |
+|---|---|---|
+| `folder` | The folder to run the command in | the current folder |
+| `input` | Text sent to the command, as if typed | nothing (the command gets no input) |
+| `timeout` | Seconds before a command still running is stopped (its `code` is then -1) | 120 |
+
+<!-- norun -->
+```antares
+show shell("git log --oneline -3", {folder: "my_project"}).output
+show shell("sort", {input: "pear\napple\n"}).output
+```
+
+> **Watch out.** `shell` runs whatever text it is given, with your permissions. Never build a command from text you don't trust, such as a web page or a model's reply, unless someone looks at it first: tools that run commands ask first for this reason.
+
+## The web
+
+`fetch(url)` gives what a web address sends back, as text: a web page's HTML, or the JSON of a web service, which `json` turns into values. Requests go through the `curl` program that comes with Windows, macOS and Linux. Redirects are followed, and an answer of 400 or more (such as 404, not found) or no answer at all is a problem, which `try` can catch. A map of options can follow the address:
+
+| Option | Meaning | Default |
+|---|---|---|
+| `query` | A map of values added to the address after `?`, made safe for addresses | none |
+| `method` | `"GET"`, `"POST"`, `"PUT"`, `"DELETE"` and so on | `"GET"`, or `"POST"` with a `body` |
+| `headers` | A map of extra headers, such as `{Authorization: "Bearer ..."}` | none |
+| `body` | Text to send; a map or list is sent as JSON | none |
+| `timeout` | Seconds to wait for the whole answer | 60 |
+
+<!-- norun -->
+```antares
+found = json(fetch("https://en.wikipedia.org/w/api.php", {query: {action: "query", list: "search", srsearch: "Sigiriya", format: "json"}}))
+show map(found.query.search, r => r.title)
+
+reply = json(fetch("https://example.com/api/notes", {body: {title: "Shopping", text: "eggs, rice"}}))
+```
+
+Three functions read web pages. `page_text(html)` gives a page's readable text: no markup, scripts or styles, no menus, side bars or footers, only the title and the main part when the page marks one, and a line for each heading, paragraph and list item. `read_page(url)` fetches a page and gives its readable text in one step, the easiest way for a program or a model to read the web. `page_links(html, address)` gives a page's links as `{text, url}` maps, made into full addresses when the page's own address is given:
+
+```antares
+html = "<h1>Moons</h1><p>Earth has <a href='/moon'>one</a>.</p><script>count()</script>"
+show page_text(html)
+show page_links(html, "https://example.com/space/")
+```
+
+```output
+Moons
+
+Earth has one.
+[{text: "one", url: "https://example.com/moon"}]
+```
 
 # Games and Live Terminal Programs {#games}
 
@@ -1804,6 +1899,16 @@ The statements `model` and `ask` are described in Chapter 12.
 | `input([prompt])` | Read a line from the user |
 | `input_waiting()` | Whether input is waiting |
 
+## Commands and the web
+
+| Function | Description |
+|---|---|
+| `shell(command [, options])` | Runs a command; gives `{output, errors, code}` |
+| `fetch(url [, options])` | What a web address sends back, as text |
+| `read_page(url)` | A web page's readable text |
+| `page_text(html)` | The readable text of a page's HTML |
+| `page_links(html [, address])` | A page's links, as `{text, url}` maps |
+
 ## Live screens
 
 | Function | Description |
@@ -1892,6 +1997,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/gfx.rs` | Games in a window: drawing, the font, PNG screenshots, and the Windows window |
 | `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
 | `src/llm.rs` | Language-model calls through `curl` |
+| `src/web.rs` | Commands (`shell`) and the web (`fetch` through `curl`, and reading pages) |
 | `src/json.rs` | JSON reading and writing |
 | `src/aot.rs` | The compiler behind `antares build --native` |
 | `src/pack.rs` | `antares build --pack`: attaches a program to a copy of `antares` |
@@ -1899,7 +2005,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.10. Not there yet:
+This is version 0.11. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
 - The GPU on macOS, and on Linux without an NVIDIA GPU.

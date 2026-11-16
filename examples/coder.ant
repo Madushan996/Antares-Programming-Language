@@ -1,0 +1,41 @@
+# A coding helper that works in the current folder: it looks at files, writes
+# them and runs commands to check its work. It asks you before every command
+# it runs and every file it writes.
+#
+#   cd my_project
+#   antares coder.ant
+#
+# It uses the model in ANTARES_MODEL (for example ollama:qwen2.5-coder, with
+# Ollama running), or Claude when ANTHROPIC_API_KEY is set; otherwise the
+# pretend echo model, so the example still runs.
+
+spec = env("ANTARES_MODEL")
+when spec == nothing and env("ANTHROPIC_API_KEY") != nothing { spec = "anthropic:claude-opus-5-5" }
+when spec == nothing {
+    spec = "echo"
+    show "(No model chosen, so this uses the pretend echo model. Set ANTARES_MODEL, like ollama:qwen2.5-coder, or ANTHROPIC_API_KEY.)"
+}
+
+where_am_i = "pwd"
+commands = "sh"
+when env("OS") == "Windows_NT" {
+    where_am_i = "cd"
+    commands = "cmd on Windows"
+}
+here = shell(where_am_i).output
+system = "You are a careful programming assistant working in the folder {here}. "
+system = system + "Commands run in {commands}. "
+system = system + "Look at the files before changing anything, make small changes, and run the code or its tests to check your work. "
+system = system + "The user is asked before every command and every file you write, and may say no."
+
+# shell and write ask the user first; read and files don't need to
+model coder = spec with {tools: [shell, read, write, files], system: system, stream: yes}
+chat = conversation(coder)
+
+show "What should I do? (An empty line ends.)"
+while yes {
+    task = input("\nyou: ")
+    when task == nothing or trim(task) == "" { stop }
+    ask chat task              # with stream: yes, the reply is shown as it arrives
+    show ""
+}

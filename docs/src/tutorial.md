@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.10.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.10.0.
+This book covers **Antares 0.11.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.11.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.10.0
+Antares 0.11.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.10.0 — type a line and press Enter. `exit` to leave.
+Antares 0.11.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -2664,6 +2664,48 @@ show ask helper "What is 17% of 2450, and when is my meeting?"
 
 The model decides which functions to call and with what inputs. Antares runs them and hands back the results, and the model uses them to answer. To help the model, you can describe a tool with a map: `{run: read_note, about: "Reads one of my notes by name", inputs: {name: "text"}}`. The `examples` folder has `agent.ant`, a complete agent.
 
+## Agents that act: commands and the web
+
+Two built-in functions reach outside your program. `shell` runs a command, just as if you typed it in the terminal, and gives back what it printed:
+
+```antares
+r = shell("echo Hello from the terminal")
+show r.output
+show r.code
+```
+
+```output
+Hello from the terminal
+0
+```
+
+`code` is 0 when the command worked. `read_page` fetches a web page and gives back its words, without the markup that tells a browser how to draw it:
+
+<!-- norun -->
+```antares
+show read_page("https://example.com")
+```
+
+These, and `read`, `write` and `files`, can be given to a model as tools just as they are. Then the model can look around your computer and the web by itself:
+
+<!-- norun -->
+```antares
+model helper = "ollama:qwen2.5" with {tools: [shell, read_page]}
+show ask helper "Which file in this folder is the biggest?"
+```
+
+Running commands is powerful, so before the model runs one (or writes a file), Antares shows you what it wants to do and asks:
+
+```output
+The model wants to use the tool 'shell':
+    command: dir
+Allow it? (y/n)
+```
+
+Type `y` to let it, or `n` to say no; the model is told and carries on without. The `examples` folder has two agents to try: `researcher.ant` answers questions by searching and reading Wikipedia, and `coder.ant` helps with programming in a folder.
+
+> **Watch out.** A model can be wrong, and a web page can contain text written to trick it. Read what it wants to run before you type `y`.
+
 ## Pictures
 
 Models like Claude can look at pictures. Add them after `with`:
@@ -2789,6 +2831,7 @@ try {
 - `as {name: text, ...}` gives an answer with exactly the fields you ask for.
 - `conversation(model)` remembers what was said; `history` shows it.
 - `with {tools: [...]}` lets the model call your functions; `with image(...)` shows it a picture; `stream: yes` shows the reply as it arrives.
+- `shell` runs a command and `read_page` reads a web page; given to a model as tools, they make an agent that acts, and Antares asks you before each command.
 - Claude, OpenAI and local Ollama models all work the same way; `embed` and `similarity` find text by meaning.
 - Real models need an API key setting; the `"echo"` model works offline.
 - Wrap model calls in `try` when the program must keep going.
@@ -3384,6 +3427,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.8.0 | 16 Nov 2026 | The AI language: deep learning building blocks, faster training, and models that remember, use tools and answer in shapes. |
 | 0.9.0 | 16 Nov 2026 | Training on the graphics card: `use gpu`, many times faster, with nothing to install (Windows). |
 | 0.10.0 | 16 Nov 2026 | `use gpu` on NVIDIA graphics cards on Linux, including the free ones on Google Colab and Kaggle. |
+| 0.11.0 | 16 Nov 2026 | Agents that act: running commands, reading the web, and built-in tools that ask before they run. |
 
 ## Version 0.1.0: the first release
 
@@ -3538,6 +3582,12 @@ The GPU works with numbers of about 7 digits, so its answers can differ from the
 ## Version 0.10.0: NVIDIA graphics cards, Colab and Kaggle
 
 `use gpu` now also works on Linux computers with an NVIDIA graphics card, through NVIDIA's CUDA. That includes Google Colab and Kaggle, websites where anyone can borrow a powerful NVIDIA graphics card for free, in the browser (Chapter 20 shows how). On Colab's Tesla T4, training a network that takes 29 seconds on the CPU takes about half a second. Programs don't change: the same `use gpu` line picks the right kind of graphics card by itself.
+
+## Version 0.11.0: agents that act
+
+Programs, and the models they talk to, can now reach outside: `shell` runs a command and gives back what it printed, `fetch` gets anything from the web, `read_page` reads a web page as plain text, and `page_text` and `page_links` take a page apart (Chapter 16). That makes 156 built-in functions.
+
+`shell`, `read_page`, `fetch`, `read`, `write` and `files` can be given to a model as tools just as they are, and before the model runs a command or writes a file, Antares asks you first; `confirm` asks first for your own tools too. Two new examples show what this makes possible: `researcher.ant` answers questions from Wikipedia, and `coder.ant` is a programming helper that runs commands to check its work.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -4387,6 +4437,7 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Deep learning | `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax`, `cross_entropy`, `mse`, `bce`, `take`, `concat`, `layer_norm`, `dropout`, `causal_mask`, `he`, `xavier`, `accuracy`, `top`, `sample` |
 | Data | `read_csv`, `columns`, `shuffle`, `batches` |
 | AI models | `conversation`, `history`, `image`, `embed`, `similarity` |
+| Commands and the web | `shell`, `fetch`, `read_page`, `page_text`, `page_links` |
 | GPU | `gpu`, and the statements `use gpu` and `use cpu` |
 
 The Antares Language Reference describes every one of them in detail.

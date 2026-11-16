@@ -23,7 +23,20 @@ pub struct Tool {
     /// "list") when it was given.
     pub inputs: Vec<(String, Option<String>)>,
     pub run: Value,
+    /// Whether the user is asked before each call.
+    pub confirm: bool,
 }
+
+/// The built-in functions that can be tools by themselves: (name, inputs,
+/// description, ask the user first?).
+const BUILTIN_TOOLS: [(&str, &[&str], &str, bool); 6] = [
+    ("shell", &["command"], "Runs a command in the computer's shell (cmd on Windows, sh elsewhere) and gives its output, errors and exit code", true),
+    ("read_page", &["url"], "Fetches a web page and gives its readable text", false),
+    ("fetch", &["url"], "Fetches a web address and gives back exactly what it sends", false),
+    ("read", &["file"], "Reads a text file", false),
+    ("write", &["file", "text"], "Writes text to a file, replacing anything in it", true),
+    ("files", &["folder"], "The names of the files and folders in a folder", false),
+];
 
 #[derive(Clone)]
 pub struct ModelSpec {
@@ -49,8 +62,9 @@ fn tool_of(v: &Value) -> Result<Tool, String> {
             about: String::new(),
             inputs: c.def.params.iter().map(|p| (p.to_string(), None)).collect(),
             run: v.clone(),
+            confirm: false,
         }),
-        Value::Rust(r) => Ok(Tool { name: r.name.clone(), about: String::new(), inputs: r.params.iter().map(|p| (p.clone(), None)).collect(), run: v.clone() }),
+        Value::Rust(r) => Ok(Tool { name: r.name.clone(), about: String::new(), inputs: r.params.iter().map(|p| (p.clone(), None)).collect(), run: v.clone(), confirm: false }),
         Value::Map(m) => {
             let get = |k: &str| m.iter().find(|(n, _)| &**n == k).map(|(_, v)| v);
             let run = get("run").ok_or("a tool described with a map needs `run`: the function to call, as in {run: weather, about: \"...\"}")?;
@@ -60,6 +74,11 @@ fn tool_of(v: &Value) -> Result<Tool, String> {
             }
             if let Some(a) = get("about") {
                 t.about = a.show();
+            }
+            match get("confirm") {
+                Some(Value::Bool(c)) => t.confirm = *c,
+                Some(_) => return Err("a tool's `confirm` is yes or no".into()),
+                None => {}
             }
             if let Some(Value::Map(ins)) = get("inputs") {
                 let mut named = vec![];
@@ -77,7 +96,20 @@ fn tool_of(v: &Value) -> Result<Tool, String> {
             }
             Ok(t)
         }
-        Value::Native(n, _) => Err(format!("the built-in function '{}' can't be a tool; wrap it in a function of your own", n)),
+        Value::Native(n, _) => match BUILTIN_TOOLS.iter().find(|t| t.0 == *n) {
+            Some((name, inputs, about, confirm)) => Ok(Tool {
+                name: name.to_string(),
+                about: about.to_string(),
+                inputs: inputs.iter().map(|p| (p.to_string(), Some("text".to_string()))).collect(),
+                run: v.clone(),
+                confirm: *confirm,
+            }),
+            None => Err(format!(
+                "the built-in function '{}' can't be a tool by itself; wrap it in a function of your own (the built-ins that can: {})",
+                n,
+                BUILTIN_TOOLS.iter().map(|t| t.0).collect::<Vec<_>>().join(", ")
+            )),
+        },
         other => Err(format!("a tool is a function, or a map like {{run: weather, about: \"...\"}}, not a {}", other.kind())),
     }
 }

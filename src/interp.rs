@@ -501,6 +501,25 @@ pub(crate) fn set_index(target: &mut Value, idx: Value, v: Value) -> Result<(), 
     set_in(target, &[Key::Idx(vec![idx])], v)
 }
 
+/// Asks the user whether a tool may run with these inputs.
+fn allowed(name: &str, inputs: &[(String, Option<String>)], args: &[Value]) -> Result<bool, String> {
+    println!();
+    println!("The model wants to use the tool '{}':", name);
+    for ((input, _), v) in inputs.iter().zip(args) {
+        let shown = v.show();
+        let mut lines = shown.lines();
+        println!("    {}: {}", input, lines.next().unwrap_or(""));
+        for l in lines {
+            println!("    {:width$}  {}", "", l, width = input.chars().count());
+        }
+    }
+    let answer = crate::builtins::read_line(Some("Allow it? (y/n) "))?;
+    if answer.is_none() {
+        println!("(no answer, so no)");
+    }
+    Ok(matches!(answer.as_deref().map(|a| a.trim().to_lowercase()).as_deref(), Some("y" | "yes")))
+}
+
 /// Asks a model and turns the reply into the kind of value wanted. Tools
 /// the model calls run here, through the interpreter.
 pub fn ask_value(it: &mut Interp, model: &Value, prompt: &Value, kind: &AskKind) -> Result<Value, String> {
@@ -527,7 +546,16 @@ pub fn ask_value(it: &mut Interp, model: &Value, prompt: &Value, kind: &AskKind)
     let tools = m.tools.clone();
     let mut run = |i: usize, input: &crate::json::J| -> Result<String, String> {
         let t = &tools[i];
-        let args: Vec<Value> = t.inputs.iter().map(|(n, _)| input.get(n).map(crate::builtins::from_json).unwrap_or(Value::Nothing)).collect();
+        let mut args: Vec<Value> = t.inputs.iter().map(|(n, _)| input.get(n).map(crate::builtins::from_json).unwrap_or(Value::Nothing)).collect();
+        if matches!(t.run, Value::Native(..)) {
+            // a built-in's optional inputs the model left out
+            while matches!(args.last(), Some(Value::Nothing)) {
+                args.pop();
+            }
+        }
+        if t.confirm && !allowed(&t.name, &t.inputs, &args)? {
+            return Ok("The user did not allow this.".to_string());
+        }
         let out = it.call_native(&t.run, args)?;
         Ok(match out {
             Value::Str(s) => s.to_string(),
