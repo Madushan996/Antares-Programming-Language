@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.13.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, in 2D and 3D, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.13.1**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, in 2D and 3D, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.13.0 — type a line and press Enter. `exit` to leave.
+Antares 0.13.1 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1697,6 +1697,7 @@ The world's `y` points up, `x` to the right and `z` towards the viewer, so the g
 | `plane(x, y, z, width, depth [, look])` | A flat rectangle facing up, such as the ground or a floor |
 | `mesh(file)` | Reads a model from a Wavefront `.obj` file |
 | `mesh(points, triangles [, places])` | A model made from its corners `[[x, y, z], ...]` and triangles `[[a, b, c], ...]` (corner numbers, from 0), with optional places on a picture `[[u, v], ...]` |
+| `mesh(model, points)` | The same model with its corners moved: for water, flags and cloth that change shape every frame |
 | `draw(model, x, y, z [, look])` | Draws a model, its own origin at `x, y, z` |
 | `sun(x, y, z [, colour [, strength]])` | Sunlight coming from that direction; `sun()` turns it off |
 | `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point, for this frame (up to 8) |
@@ -1714,6 +1715,7 @@ The world's `y` points up, `x` to the right and `z` towards the viewer, so the g
 | `shine` | From 0 (rough, like chalk) to 1 (polished, like a mirror); 0.3 unless given |
 | `metal` | From 0 to 1: metal reflects the world in its own colour |
 | `glow` | Light it gives off itself, in its colour: 1 glows softly, 3 brightly. `glow()` (the 2D effect) after `render()` makes it shine |
+| `ripples` | Fine moving ripples drawn on it by the graphics card, too small for its corners: 1 for water, 0.5 for a calm pond |
 | `picture` | A picture wrapped onto it (a texture) |
 | `tiles` | How many times the picture repeats across it, for floors and walls |
 | `turn` | Degrees to turn it: a number turns it about the up axis; `[x, y, z]` about each axis in turn |
@@ -1729,7 +1731,9 @@ sphere(0, 3, 0, 0.2, {colour: "orange", glow: 3})
 
 **Light.** The look aims for realism with little effort. Light is worked out the way real light behaves (rough and polished, plain and metal surfaces reflect it differently), the sun casts soft shadows, the sky lights everything a little from above, and edges are smoothed. Without `sun` or `sky`, there is a gentle default sun and sky light. A lamp's `strength` is 1 unless given, and its light fades out by `reach` (12 units). For a night scene, choose a dark sky, a faint bluish sun for the moon, and lamps.
 
-**Models.** `mesh` reads the triangles of an `.obj` file, the format most 3D programs (such as Blender) can save, with its normals and its places on a picture if it has them. A file is read once however often `mesh` is called with its name; it gives `{mesh, size, triangles}`, where `size` is `[width, height, depth]`. A model made from points gets normals worked out from its faces: smooth where faces meet at gentle angles, sharp at edges. Make models once, before the loop, and `draw` them each frame.
+**Models.** `mesh` reads the triangles of an `.obj` file, the format most 3D programs (such as Blender) can save, with its normals and its places on a picture if it has them. A file is read once however often `mesh` is called with its name; it gives `{mesh, size, triangles}`, where `size` is `[width, height, depth]`. A model made from points gets normals worked out from its faces: smooth where faces meet at gentle angles, sharp at edges. Make models once, before the loop, and `draw` them each frame. A model that changes shape, like the surface of the sea, keeps its triangles and gets new corners each frame with `mesh(model, points)`; the points can be worked out quickly with tensor maths and given as a table of `[x, y, z]` rows.
+
+**Water.** A shiny dark-blue surface with `ripples: 1` looks like water: the ripples break the sun's reflection into a path of glints, and where they are too small to see, far away, they make the surface a little rougher instead, as real distant water looks. Bigger waves come from moving the corners of a mesh, so an ocean combines both: long waves shape the mesh, and ripples add the detail.
 
 **Mixing with 2D.** `render()` draws over the picture as it is: with a sky, the sky fills it; without one, 3D shapes go over whatever was drawn before, such as a 2D background. Anything drawn after `render()`, like a score or `glow()`, goes on top; when `frame()` draws a scene that `render()` didn't, it goes over everything drawn that frame, so a program with 2D on top calls `render()` itself. `to_screen` puts 2D labels next to 3D things.
 
@@ -2098,7 +2102,7 @@ The statements `model` and `ask` are described in Chapter 12.
 | `sphere(x, y, z, radius [, look])` | A ball |
 | `cylinder(x, y, z, radius, height [, look])`, `cone(x, y, z, radius, height [, look])` | A cylinder, a cone |
 | `plane(x, y, z, width, depth [, look])` | A flat rectangle facing up |
-| `mesh(file)`, `mesh(points, triangles [, places])` | A model from an `.obj` file, or from corners and triangles |
+| `mesh(file)`, `mesh(points, triangles [, places])`, `mesh(model, points)` | A model from an `.obj` file, or from corners and triangles; the same model with its corners moved |
 | `draw(model, x, y, z [, look])` | Draw a model |
 | `sun([x, y, z [, colour [, strength]]])` | Sunlight from a direction; `sun()` turns it off |
 | `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point, for this frame |
@@ -2108,7 +2112,7 @@ The statements `model` and `ask` are described in Chapter 12.
 | `render()` | Draw the scene |
 | `to_screen(x, y, z)` | Where a point shows in the picture, or `nothing` |
 
-Looks: a colour, or a map with `colour`, `shine`, `metal`, `glow`, `picture`, `tiles`, `turn`, `scale`, `shadow`.
+Looks: a colour, or a map with `colour`, `shine`, `metal`, `glow`, `ripples`, `picture`, `tiles`, `turn`, `scale`, `shadow`.
 
 ## Sound
 

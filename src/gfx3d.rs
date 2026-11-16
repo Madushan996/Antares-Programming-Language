@@ -163,10 +163,68 @@ fn invert(m: &M4) -> M4 {
 pub struct Mesh {
     pub id: usize,
     pub verts: Vec<f32>,
+    /// How many times its corners have been moved (by mesh(model, points)),
+    /// so the copy on the graphics card is sent again.
+    pub version: u64,
+    /// For a model made from points: its triangles and places on a picture,
+    /// kept so its corners can be moved.
+    source: Option<Rc<Source>>,
     /// The middle and size of the box around it.
     centre: V3,
     radius: f32,
     size: V3,
+}
+
+struct Source {
+    points: usize,
+    tris: Vec<[usize; 3]>,
+    uvs: Vec<[f32; 2]>,
+    /// The faces that meet at each corner.
+    meeting: Vec<Vec<usize>>,
+}
+
+fn meeting_of(points: usize, tris: &[[usize; 3]]) -> Vec<Vec<usize>> {
+    let mut meeting: Vec<Vec<usize>> = vec![vec![]; points];
+    for (ti, t) in tris.iter().enumerate() {
+        for &k in t {
+            meeting[k].push(ti);
+        }
+    }
+    meeting
+}
+
+/// A model made from points, built again with its corners moved: like
+/// `build`, but reusing what doesn't change.
+fn rebuild(points: &[V3], src: &Source) -> Vec<f32> {
+    let face: Vec<V3> = src.tris.iter().map(|t| cross(sub(points[t[1]], points[t[0]]), sub(points[t[2]], points[t[0]]))).collect();
+    let unit: Vec<V3> = face.iter().map(|n| norm(*n)).collect();
+    let mut out = Vec::with_capacity(src.tris.len() * 24);
+    for (ti, t) in src.tris.iter().enumerate() {
+        for &k in t {
+            let mut sum = [0f32; 3];
+            for &f in &src.meeting[k] {
+                if dot(unit[f], unit[ti]) > 0.707 {
+                    sum[0] += face[f][0];
+                    sum[1] += face[f][1];
+                    sum[2] += face[f][2];
+                }
+            }
+            let uv = src.uvs.get(k).copied().unwrap_or([0.0, 0.0]);
+            corner(&mut out, points[k], norm(sum), uv[0], 1.0 - uv[1]);
+        }
+    }
+    out
+}
+
+/// Points as [x, y, z] rows, read straight from a table of numbers when
+/// they are one (the quick way, for points made by tensor maths).
+fn points_of(v: &Value, name: &str) -> Result<Vec<V3>, String> {
+    if let Value::Tensor(t) = v {
+        if t.shape.len() == 2 && t.shape[1] == 3 {
+            return Ok(t.vals().chunks(3).map(|c| [c[0] as f32, c[1] as f32, c[2] as f32]).collect());
+        }
+    }
+    Ok(rows(v, 3, name, "its points")?.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect())
 }
 
 fn make_mesh(id: usize, verts: Vec<f32>) -> Mesh {
@@ -183,7 +241,7 @@ fn make_mesh(id: usize, verts: Vec<f32>) -> Mesh {
     let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0, (lo[2] + hi[2]) / 2.0];
     let size = sub(hi, lo);
     let radius = dot(size, size).sqrt() / 2.0;
-    Mesh { id, verts, centre, radius, size }
+    Mesh { id, verts, version: 0, source: None, centre, radius, size }
 }
 
 fn corner(out: &mut Vec<f32>, p: V3, n: V3, u: f32, v: f32) {
@@ -312,14 +370,16 @@ fn mesh(id: usize) -> Rc<Mesh> {
     })
 }
 
-fn add_mesh(verts: Vec<f32>) -> Result<Rc<Mesh>, String> {
+fn add_mesh(verts: Vec<f32>, source: Option<Rc<Source>>) -> Result<Rc<Mesh>, String> {
     mesh(0);
     MESHES.with(|m| {
         let mut m = m.borrow_mut();
         if m.len() > 10_000 {
-            return Err("there are already 10000 models: make each model once, before the loop, and draw it many times".to_string());
+            return Err("there are already 10000 models: make each model once, before the loop, and draw it many times (mesh(model, points) moves a model's corners)".to_string());
         }
-        let made = Rc::new(make_mesh(m.len(), verts));
+        let mut made = make_mesh(m.len(), verts);
+        made.source = source;
+        let made = Rc::new(made);
         m.push(made.clone());
         Ok(made)
     })
@@ -464,6 +524,7 @@ struct Look {
     shine: f32,
     metal: f32,
     glow: f32,
+    ripples: f32,
     tiles: f32,
     picture: Option<usize>,
     turn: V3,
@@ -479,6 +540,7 @@ pub struct Item {
     normal: M4,
     colour: [f32; 4],
     mat: [f32; 4],
+    ripples: f32,
     picture: Option<usize>,
     casts: bool,
     centre: V3,
@@ -559,11 +621,11 @@ fn three(v: &Value, name: &str, what: &str) -> Result<V3, String> {
     }
 }
 
-const LOOK_OPTIONS: &[&str] = &["colour", "picture", "tiles", "shine", "metal", "glow", "turn", "scale", "shadow"];
+const LOOK_OPTIONS: &[&str] = &["colour", "picture", "tiles", "shine", "metal", "glow", "ripples", "turn", "scale", "shadow"];
 
 /// A shape's look: a colour, or a map of options.
 fn look(v: Option<&Value>, name: &str) -> Result<Look, String> {
-    let mut l = Look { colour: [linear(200.0), linear(200.0), linear(200.0), 1.0], shine: 0.3, metal: 0.0, glow: 0.0, tiles: 1.0, picture: None, turn: [0.0; 3], scale: [1.0; 3], casts: true };
+    let mut l = Look { colour: [linear(200.0), linear(200.0), linear(200.0), 1.0], shine: 0.3, metal: 0.0, glow: 0.0, ripples: 0.0, tiles: 1.0, picture: None, turn: [0.0; 3], scale: [1.0; 3], casts: true };
     let Some(v) = v else { return Ok(l) };
     let Value::Map(m) = v else {
         l.colour = colour3(v, name)?;
@@ -583,6 +645,7 @@ fn look(v: Option<&Value>, name: &str) -> Result<Look, String> {
             "shine" => l.shine = unit(x)?,
             "metal" => l.metal = unit(x)?,
             "glow" => l.glow = num(x, name)?.clamp(0.0, 100.0) as f32,
+            "ripples" => l.ripples = num(x, name)?.clamp(0.0, 10.0) as f32,
             "tiles" => l.tiles = coord(x, name)?,
             "turn" => {
                 l.turn = match x {
@@ -627,6 +690,7 @@ fn place(mesh: Rc<Mesh>, pos: V3, size: V3, l: Look) {
         normal,
         colour: l.colour,
         mat: [l.shine, l.metal, l.glow, l.tiles],
+        ripples: l.ripples,
         picture: l.picture,
         casts: l.casts,
         centre: [c[0], c[1], c[2]],
@@ -892,9 +956,13 @@ fn rows(v: &Value, n: usize, name: &str, what: &str) -> Result<Vec<Vec<f64>>, St
 
 /// mesh(file): reads a model from a Wavefront .obj file; mesh(points,
 /// triangles [, places]): a model made of corners [x, y, z] and triangles
-/// [a, b, c] (corner numbers, from 0).
+/// [a, b, c] (corner numbers, from 0); mesh(model, points): the same model
+/// with its corners moved (water, flags, cloth), keeping its triangles.
 pub fn b_mesh(_: &mut Interp, a: Vec<Value>) -> Res {
     inputs(&a, 1, 3, "mesh", "an .obj file's name, or a list of points and a list of triangles")?;
+    if a.len() == 2 && is_model(&a[0]) {
+        return move_corners(&a[0], &a[1]);
+    }
     if a.len() == 1 {
         let file = text(&a[0], "mesh")?.to_string();
         if let Some(id) = LOADED.with(|l| l.borrow().iter().find(|(f, _)| *f == file).map(|(_, i)| *i)) {
@@ -906,11 +974,11 @@ pub fn b_mesh(_: &mut Interp, a: Vec<Value>) -> Res {
             None => std::fs::read_to_string(&file).map_err(|e| format!("couldn't read the model \"{}\": {}", file, e))?,
         };
         let verts = read_obj(&src).map_err(|e| format!("couldn't read the model \"{}\": {}", file, e))?;
-        let m = add_mesh(verts)?;
+        let m = add_mesh(verts, None)?;
         LOADED.with(|l| l.borrow_mut().push((file, m.id)));
         return Ok(model_value(&m));
     }
-    let pts: Vec<V3> = rows(&a[0], 3, "mesh", "its points")?.iter().map(|p| [p[0] as f32, p[1] as f32, p[2] as f32]).collect();
+    let pts = points_of(&a[0], "mesh")?;
     let mut tris = vec![];
     for t in rows(&a[1], 3, "mesh", "its triangles")? {
         let mut c = [0usize; 3];
@@ -932,7 +1000,41 @@ pub fn b_mesh(_: &mut Interp, a: Vec<Value>) -> Res {
         }
         None => vec![],
     };
-    let m = add_mesh(build(&pts, &uvs, &tris, None, None, None))?;
+    let verts = build(&pts, &uvs, &tris, None, None, None);
+    let meeting = meeting_of(pts.len(), &tris);
+    let m = add_mesh(verts, Some(Rc::new(Source { points: pts.len(), tris, uvs, meeting })))?;
+    Ok(model_value(&m))
+}
+
+/// The number of a model made by `mesh`.
+fn model_id(v: &Value, name: &str) -> Result<usize, String> {
+    let id = match v {
+        Value::Map(m) => m.iter().find(|(k, _)| &**k == "mesh").and_then(|(_, v)| v.scalar()),
+        _ => None,
+    };
+    let count = MESHES.with(|m| m.borrow().len());
+    match id {
+        Some(n) if n >= 0.0 && n == n.trunc() && (n as usize) < count => Ok(n as usize),
+        _ => Err(format!("{} needs a model made by mesh(...), not {}", name, v.show())),
+    }
+}
+
+/// mesh(model, points): moves the corners of a model made from points.
+fn move_corners(model: &Value, points: &Value) -> Res {
+    let id = model_id(model, "mesh")?;
+    let old = mesh(id);
+    let Some(src) = old.source.clone() else {
+        return Err("mesh can move the corners only of a model made from points and triangles, not of a shape or a model read from a file".into());
+    };
+    let pts = points_of(points, "mesh")?;
+    if pts.len() != src.points {
+        return Err(format!("mesh needs the model's {} points, moved, not {}", src.points, pts.len()));
+    }
+    let mut m = make_mesh(id, rebuild(&pts, &src));
+    m.version = old.version + 1;
+    m.source = Some(src);
+    let m = Rc::new(m);
+    MESHES.with(|all| all.borrow_mut()[id] = m.clone());
     Ok(model_value(&m))
 }
 
@@ -940,15 +1042,7 @@ pub fn b_mesh(_: &mut Interp, a: Vec<Value>) -> Res {
 /// (x, y, z) (its own origin, for a model made of points).
 pub fn b_draw_model(a: Vec<Value>) -> Res {
     inputs(&a, 4, 5, "draw", "a model, where to put it (x, y, z), and optionally a colour or a map of options")?;
-    let id = match &a[0] {
-        Value::Map(m) => m.iter().find(|(k, _)| &**k == "mesh").and_then(|(_, v)| v.scalar()),
-        _ => None,
-    };
-    let count = MESHES.with(|m| m.borrow().len());
-    let id = match id {
-        Some(n) if n >= 0.0 && n == n.trunc() && (n as usize) < count => n as usize,
-        _ => return Err(format!("draw needs a model made by mesh(...), not {}", a[0].show())),
-    };
+    let id = model_id(&a[0], "draw")?;
     let p = position(&a[1..4], "draw")?;
     place(mesh(id), p, [1.0, 1.0, 1.0], look(a.get(4), "draw")?);
     Ok(Value::Nothing)
@@ -1030,6 +1124,15 @@ pub struct ItemConsts {
 
 pub const SHADOW_SIZE: u32 = 2048;
 
+/// Seconds since the program's first 3D picture, for things that move by
+/// themselves on the graphics card (ripples).
+fn seconds() -> f32 {
+    thread_local! {
+        static START: std::time::Instant = std::time::Instant::now();
+    }
+    START.with(|s| s.elapsed().as_secs_f32())
+}
+
 fn render() -> Result<(), String> {
     let scene = SCENE.with(|s| {
         let mut s = s.borrow_mut();
@@ -1054,8 +1157,9 @@ fn render() -> Result<(), String> {
             sky_hor: [s.sky[1][0], s.sky[1][1], s.sky[1][2], 1.0],
             sky_gnd: [s.sky[2][0], s.sky[2][1], s.sky[2][2], 1.0],
             fog_col: [0.0; 4],
-            params: [0.0, 1.0, 0.0, lamps.len() as f32],
-            shadow_info: [0.0, 1.0 / SHADOW_SIZE as f32, 0.0, 0.0],
+            params: [0.0, 1.0, seconds(), lamps.len() as f32],
+            // the last but one: how wide a pixel is, for each unit away
+            shadow_info: [0.0, 1.0 / SHADOW_SIZE as f32, 2.0 * (s.fov.to_radians() / 2.0).tan() / h.max(1) as f32, 0.0],
             lamp_pos: [[0.0; 4]; 8],
             lamp_col: [[0.0; 4]; 8],
         };
@@ -1135,7 +1239,7 @@ fn draw_scene(w: usize, h: usize, frame: &FrameConsts, items: &[Item], sky: bool
                     normal: i.normal,
                     colour: i.colour,
                     mat: i.mat,
-                    flags: [i.picture.is_some() as u32 as f32, see_through as u32 as f32, 0.0, 0.0],
+                    flags: [i.picture.is_some() as u32 as f32, see_through as u32 as f32, i.ripples, 0.0],
                 },
                 picture: i.picture,
                 casts: i.casts && !see_through,
@@ -1143,7 +1247,13 @@ fn draw_scene(w: usize, h: usize, frame: &FrameConsts, items: &[Item], sky: bool
             }
         })
         .collect();
-    let px = d3d::with_renderer(|r| r.render(w, h, frame, &draws, sky, shadows))?;
+    let px = match d3d::with_renderer(|r| r.render(w, h, frame, &draws, sky, shadows)) {
+        Ok(px) => px,
+        Err(e) => {
+            d3d::reset();
+            return Err(e);
+        }
+    };
     crate::gfx::paint_rendered(w, h, px, sky)
 }
 
@@ -1435,12 +1545,18 @@ mod d3d {
         white: (Com, Com),
         samples: u32,
         target: Option<Target>,
-        meshes: HashMap<usize, (Com, Com, u32)>,
+        meshes: HashMap<usize, (u64, Com, Com, u32)>,
         pictures: HashMap<usize, (u64, Com, Com)>,
     }
 
     thread_local! {
         static RENDERER: RefCell<Option<Result<Renderer, String>>> = const { RefCell::new(None) };
+    }
+
+    /// Forgets the renderer, so the next picture sets up a new one (after
+    /// the graphics card was reset, say).
+    pub fn reset() {
+        RENDERER.with(|r| *r.borrow_mut() = None);
     }
 
     pub fn with_renderer<R>(f: impl FnOnce(&mut Renderer) -> Result<R, String>) -> Result<R, String> {
@@ -1679,15 +1795,27 @@ mod d3d {
         }
 
         fn mesh_srv(&mut self, m: &Mesh) -> Result<(*mut c_void, u32), String> {
-            if !self.meshes.contains_key(&m.id) {
-                let bytes: &[u8] = unsafe { std::slice::from_raw_parts(m.verts.as_ptr().cast(), m.verts.len() * 4) };
-                let n = (m.verts.len() / 8) as u32;
-                let buf = self.buffer((bytes.len() as u32).max(32), BIND_SRV, MISC_STRUCTURED, 32, if bytes.is_empty() { None } else { Some(bytes) })?;
-                let srv = self.view(DEV_CREATE_SRV, &buf, None)?;
-                self.meshes.insert(m.id, (buf, srv, n));
+            let n = (m.verts.len() / 8) as u32;
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(m.verts.as_ptr().cast(), m.verts.len() * 4) };
+            match self.meshes.get_mut(&m.id) {
+                Some(e) if e.0 == m.version => {}
+                // corners moved, same number of them: overwrite in place
+                Some(e) if e.3 == n && n > 0 => {
+                    let c = self.context.0;
+                    unsafe {
+                        let update: unsafe extern "system" fn(Ptr, Ptr, u32, *const c_void, *const c_void, u32, u32) = method(c, CTX_UPDATE);
+                        update(c, e.1.0, 0, std::ptr::null(), bytes.as_ptr().cast(), 0, 0);
+                    }
+                    e.0 = m.version;
+                }
+                _ => {
+                    let buf = self.buffer((bytes.len() as u32).max(32), BIND_SRV, MISC_STRUCTURED, 32, if bytes.is_empty() { None } else { Some(bytes) })?;
+                    let srv = self.view(DEV_CREATE_SRV, &buf, None)?;
+                    self.meshes.insert(m.id, (m.version, buf, srv, n));
+                }
             }
             let e = &self.meshes[&m.id];
-            Ok((e.1.0, e.2))
+            Ok((e.2.0, e.3))
         }
 
         /// A picture on the graphics card, sent again whenever it has been
@@ -1814,7 +1942,7 @@ mod d3d {
                     }
                     self.update(&self.cb_item, &d.consts);
                     vs_srvs(c, 0, 1, &p.0);
-                    let srvs = [p.2, if shadows { self.shadow_srv.0 } else { self.white.1.0 }];
+                    let srvs = [p.2, self.shadow_srv.0];
                     ps_srvs(c, 1, 2, srvs.as_ptr());
                     draw(c, p.1, 0);
                 }
@@ -1874,8 +2002,8 @@ cbuffer Frame : register(b0) {
     float4 skyHor;
     float4 skyGnd;
     float4 fogCol;      // w: 1 if there is fog
-    float4 params;      // fog near, fog far, -, number of lamps
-    float4 shadowInfo;  // size of a shadow-map pixel in the world, and on the map
+    float4 params;      // fog near, fog far, seconds, number of lamps
+    float4 shadowInfo;  // size of a shadow-map pixel in the world, and on the map; a pixel's width per unit away
     float4 lampPos[8];  // w: reach
     float4 lampCol[8];
 };
@@ -1884,7 +2012,7 @@ cbuffer Item : register(b1) {
     row_major float4x4 nworld;
     float4 albedo;      // colour in light units, and alpha
     float4 mat;         // shine, metal, glow, tiles
-    float4 flags;       // has a picture, is see-through
+    float4 flags;       // has a picture, is see-through, ripples
 };
 struct Vert { float3 p; float3 n; float2 uv; };
 StructuredBuffer<Vert> verts : register(t0);
@@ -1950,10 +2078,36 @@ float sunShadow(float3 wp, float3 n) {
     float2 uv = float2(lp.x * 0.5 + 0.5, 0.5 - lp.y * 0.5);
     if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1 || lp.z > 1) return 1;
     float s = 0;
-    [unroll] for (int y = -2; y <= 2; y++)
-        [unroll] for (int x = -2; x <= 2; x++)
-            s += shadowMap.SampleCmpLevelZero(shadowSamp, uv + float2(x, y) * shadowInfo.y, lp.z - 0.0008);
-    return s / 25.0;
+    [unroll] for (int y = -1; y <= 1; y++)
+        [unroll] for (int x = -1; x <= 1; x++)
+            s += shadowMap.SampleCmpLevelZero(shadowSamp, uv + float2(x, y) * shadowInfo.y * 1.6, lp.z - 0.0008);
+    return s / 9.0;
+}
+
+// Small waves too fine for the shape's corners, worked out for each pixel:
+// fourteen trains of ripples, from 2.5 m long down to a few centimetres,
+// spread round one direction like wind-blown water, each moving at the
+// speed water waves of its length travel. Ripples too small for a pixel
+// (counting how stretched pixels are, seen at a glancing angle) fade out
+// so the distance doesn't shimmer, and what they would have added comes
+// back as roughness: far water looks smoother, with a wider path of glints.
+float3 rippled(float3 n, float3 wp, float3 v, float amount, inout float lost) {
+    float2 p = wp.xz;
+    float glance = max(abs(dot(n, v)), 0.3);
+    float pixel = max(length(camPos.xyz - wp) * shadowInfo.z / glance, 1e-4);
+    float2 g = 0;
+    [unroll] for (int k = 0; k < 14; k++) {
+        float L = 2.5 * pow(0.76, k);
+        float kk = 6.2832 / L;
+        float ang = 0.35 + sin(k * 12.9898) * 1.2;
+        float2 d = float2(cos(ang), sin(ang));
+        float fade = saturate(L / (pixel * 6) - 1);
+        float ph = dot(d, p) * kk - sqrt(9.81 * kk) * params.z + k * 4.37;
+        float slope = 0.075 * amount;
+        g += d * (slope * cos(ph) * fade);
+        lost += slope * slope * 0.5 * (1 - fade * fade);
+    }
+    return normalize(n + float3(-g.x, 0, -g.y) * n.y);
 }
 
 // light arriving from direction l, reflected towards v
@@ -1990,9 +2144,12 @@ float4 ps_main(PSIn i) : SV_Target {
     float3 g = normalize(cross(ddx(i.wp), ddy(i.wp)));
     if (dot(g, v) < 0) g = -g;
     if (dot(n, g) < 0) n = -n;
+    float lost = 0;
+    if (flags.z > 0) n = rippled(n, i.wp, v, flags.z, lost);
     float nv = saturate(dot(n, v)) + 1e-4;
     float rough = clamp(1 - mat.x * 0.95, 0.05, 1);
-    float a = rough * rough;
+    float a = sqrt(rough * rough * rough * rough + lost);
+    rough = sqrt(a);
     float metal = mat.y;
     float3 f0 = lerp(0.04, base.rgb, metal);
     float3 diff = base.rgb * (1 - metal);
@@ -2017,6 +2174,8 @@ float4 ps_main(PSIn i) : SV_Target {
     col += diff * skyLight(n) * 0.3 * (1 - Fa * 0.5);
     col += skyColour(reflect(-v, n)) * Fa * (1 - rough * 0.85);
     col += base.rgb * mat.z * 2.5;
+    // light through the thin tops of water waves, lit from behind
+    if (flags.z > 0 && sunDir.w > 0) col += diff * sunCol.rgb * 0.6 * pow(saturate(dot(-v, sunDir.xyz) * 0.5 + 0.5), 4) * saturate(n.y);
     float3 c = finish(col);
     // fog and sky are shown as their own colours, so they meet
     if (fogCol.w > 0) {
@@ -2042,7 +2201,7 @@ float4 ps_sky(SkyOut i) : SV_Target {
     float3 c = skyColour(d);
     if (sunDir.w > 0) {
         float s = saturate(dot(d, sunDir.xyz));
-        c += sunCol.rgb * (pow(s, 1500) * 6 + pow(s, 40) * 0.15);
+        c += sunCol.rgb * (pow(s, 6000) * 10 + pow(s, 300) * 0.25 + pow(s, 12) * 0.12);
     }
     if (fogCol.w > 0) c = lerp(c, fogCol.rgb, saturate(1 - abs(d.y) * 4) * 0.8);
     return float4(gamma(c), 1);

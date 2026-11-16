@@ -413,7 +413,8 @@ impl Canvas {
     }
 
     /// Bright parts of the picture glow: they are picked out, blurred and
-    /// added back, like light bleeding in a camera.
+    /// added back, like light bleeding in a camera. The work is shared out
+    /// between the processor's cores, a band of rows each.
     pub fn glow(&mut self, amount: f64, radius: f64, threshold: f64) {
         if amount <= 0.0 || self.w == 0 || self.h == 0 {
             return;
@@ -421,23 +422,37 @@ impl Canvas {
         // worked out at a quarter of the size, which is much faster and
         // looks the same once blurred
         let f = 4usize;
-        let (sw, sh) = (self.w.div_ceil(f), self.h.div_ceil(f));
+        let (w, h) = (self.w, self.h);
+        let (sw, sh) = (w.div_ceil(f), h.div_ceil(f));
+        let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 8);
         let mut planes = vec![vec![0f32; sw * sh]; 3];
         let th = (threshold.clamp(0.0, 0.99) * 255.0) as i32;
         let gain = 1.0 / (255 - th) as f32;
-        for y in 0..self.h {
-            let srow = (y / f) * sw;
-            for (x, p) in self.px[y * self.w..(y + 1) * self.w].iter().enumerate() {
-                let (r, g, b) = (((p >> 16) & 255) as i32, ((p >> 8) & 255) as i32, (p & 255) as i32);
-                let lum = (54 * r + 183 * g + 19 * b) >> 8;
-                if lum > th {
-                    let k = (lum - th) as f32 * gain;
-                    let i = srow + x / f;
-                    planes[0][i] += r as f32 * k;
-                    planes[1][i] += g as f32 * k;
-                    planes[2][i] += b as f32 * k;
+        {
+            let band = sh.div_ceil(threads).max(1);
+            let (a, rest) = planes.split_at_mut(1);
+            let (b, c) = rest.split_at_mut(1);
+            let px = &self.px;
+            std::thread::scope(|s| {
+                for (((pr, pg), pb), rows) in a[0].chunks_mut(sw * band).zip(b[0].chunks_mut(sw * band)).zip(c[0].chunks_mut(sw * band)).zip(px.chunks(w * f * band)) {
+                    s.spawn(move || {
+                        for (ry, row) in rows.chunks(w).enumerate() {
+                            let srow = (ry / f) * sw;
+                            for (x, p) in row.iter().enumerate() {
+                                let (r, g, b) = (((p >> 16) & 255) as i32, ((p >> 8) & 255) as i32, (p & 255) as i32);
+                                let lum = (54 * r + 183 * g + 19 * b) >> 8;
+                                if lum > th {
+                                    let k = (lum - th) as f32 * gain;
+                                    let i = srow + x / f;
+                                    pr[i] += r as f32 * k;
+                                    pg[i] += g as f32 * k;
+                                    pb[i] += b as f32 * k;
+                                }
+                            }
+                        }
+                    });
                 }
-            }
+            });
         }
         let norm = amount as f32 / (f * f) as f32;
         let r = box_radius(radius / f as f64);
@@ -451,25 +466,33 @@ impl Canvas {
             let a = v as usize;
             (a, (a + 1).min(n - 1), v - a as f32)
         };
-        let cols: Vec<(usize, usize, f32)> = (0..self.w).map(|x| place(x, sw)).collect();
-        let mut rows = vec![vec![0f32; sw]; 3];
-        for y in 0..self.h {
-            // the two rows around this one, mixed, then across
-            let (y0, y1, ty) = place(y, sh);
-            for (row, p) in rows.iter_mut().zip(&planes) {
-                for (i, r) in row.iter_mut().enumerate() {
-                    let (a, b) = (p[y0 * sw + i], p[y1 * sw + i]);
-                    *r = a + (b - a) * ty;
-                }
+        let cols: Vec<(usize, usize, f32)> = (0..w).map(|x| place(x, sw)).collect();
+        let band = h.div_ceil(threads).max(1);
+        let (planes, cols) = (&planes, &cols);
+        std::thread::scope(|s| {
+            for (bi, chunk) in self.px.chunks_mut(w * band).enumerate() {
+                s.spawn(move || {
+                    let mut rows = vec![vec![0f32; sw]; 3];
+                    for (ry, line) in chunk.chunks_mut(w).enumerate() {
+                        // the two rows around this one, mixed, then across
+                        let (y0, y1, ty) = place(bi * band + ry, sh);
+                        for (row, p) in rows.iter_mut().zip(planes) {
+                            for (i, r) in row.iter_mut().enumerate() {
+                                let (a, b) = (p[y0 * sw + i], p[y1 * sw + i]);
+                                *r = a + (b - a) * ty;
+                            }
+                        }
+                        for (px, &(x0, x1, tx)) in line.iter_mut().zip(cols) {
+                            let s = |r: &[f32]| (r[x0] + (r[x1] - r[x0]) * tx).clamp(0.0, 255.0) as u32;
+                            let add = s(&rows[0]) << 16 | s(&rows[1]) << 8 | s(&rows[2]);
+                            if add != 0 {
+                                *px = add_sat(*px, add);
+                            }
+                        }
+                    }
+                });
             }
-            for (px, &(x0, x1, tx)) in self.px[y * self.w..(y + 1) * self.w].iter_mut().zip(&cols) {
-                let s = |r: &[f32]| (r[x0] + (r[x1] - r[x0]) * tx).clamp(0.0, 255.0) as u32;
-                let add = s(&rows[0]) << 16 | s(&rows[1]) << 8 | s(&rows[2]);
-                if add != 0 {
-                    *px = add_sat(*px, add);
-                }
-            }
-        }
+        });
     }
 
     /// Darkens the edges and corners, like an old camera lens.

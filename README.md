@@ -116,7 +116,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.13.0`.
+You should see `Antares 0.13.1`.
 
 ### Option 2: download it yourself
 
@@ -887,14 +887,16 @@ while window_open() {
 | `camera(x, y, z, look_x, look_y, look_z [, {fov, near, far}])` | Where the camera is, and what it looks at (`y` is up) |
 | `cube`, `box`, `sphere`, `cylinder`, `cone`, `plane` | Shapes, placed by their middle: `cube(x, y, z, size [, look])` |
 | `mesh(file)`, `mesh(points, triangles)` | A model from an `.obj` file, or built from corners and triangles |
+| `mesh(model, points)` | The same model with its corners moved, every frame if you like: water, flags, cloth |
 | `draw(model, x, y, z [, look])` | Draws a model |
 | `sun(x, y, z [, colour [, strength]])` | Sunlight from that direction, with soft shadows |
 | `lamp(x, y, z [, colour [, strength [, reach]]])` | A light at a point (up to 8) |
 | `sky(top [, horizon [, ground]])`, `fog([colour,] near, far)` | The sky, and fog |
 | `shadows(yes or no)`, `render()`, `to_screen(x, y, z)` | Shadows on or off; draws the scene; where a 3D point shows on screen |
 
-A look is a colour or a map: `{colour, shine, metal, glow, picture, tiles,
-turn, scale, shadow}`. `examples/world.ant` is a village to roll a ball
+A look is a colour or a map: `{colour, shine, metal, glow, ripples, picture,
+tiles, turn, scale, shadow}`; `ripples: 1` makes a shiny surface look like
+water. `examples/world.ant` is a village to roll a ball
 around, by day and by night.
 
 ## Sound
