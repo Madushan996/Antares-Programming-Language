@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.6.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files and live terminal programs. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.6.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -1256,6 +1256,103 @@ while yes {
 
 Run it in a terminal with `antares examples/snake.ant`. Steer with the arrow keys or W A S D, and press Q to quit.
 
+## Games in a window
+
+On Windows, a program can open a window and draw in it pixel by pixel. Antares draws every picture itself and the window only shows it, scaled up by a whole number so pixels stay square and sharp, so nothing else needs to be installed. Positions are in the game's own pixels, from (0, 0) at the top-left; fractions are rounded down.
+
+| Function | What it does |
+|---|---|
+| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled up to fit the screen (or by `scale`) |
+| `window_open()` | `yes` until the player closes the window |
+| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second |
+| `fill([colour])` | Paints the whole picture (black if no colour is given) |
+| `rect(x, y, width, height [, colour])` | A filled rectangle, its top-left corner at `x`, `y` |
+| `circle(x, y, radius [, colour])` | A filled circle centred on `x`, `y` |
+| `line(x1, y1, x2, y2 [, colour])` | A line |
+| `pixel(x, y [, colour])` | One pixel |
+| `label(text, x, y [, colour [, size]])` | Text in the built-in font: 6 by 8 pixels a character, times `size` |
+| `sprite(rows, x, y, colours [, size])` | Pixel art written as rows of text (see below) |
+| `held(key)` | `yes` while a key is held down |
+| `pressed(key)` | `yes` if a key went down since the last frame |
+| `mouse()` | `{x, y, left, right}`: where the mouse is, in the game's pixels, and which buttons are held |
+| `screenshot(file)` | Saves the picture as a PNG file |
+
+A game loop asks `window_open()`, reads the keys, updates the game, draws the whole picture and calls `frame()`:
+
+<!-- norun -->
+```antares
+window(160, 120, "Dodge")
+x = 72
+while window_open() {
+    when held("left") { x -= 2 }
+    when held("right") { x += 2 }
+    fill("navy")
+    rect(x, 100, 16, 6, "orange")
+    label("Hello!", 4, 4, "yellow")
+    frame()
+}
+```
+
+`examples/catch.ant` is a complete game built this way, with sound, in under 90 lines.
+
+**The window.** Without a scale, the window is as large as fits comfortably on the screen. A program has one window at a time. Closing it makes `window_open()` give `no`; a program that calls `frame()` after that ends, so `while yes` loops end too. A program built with `antares build` and started by double-clicking hides its own console window, and a problem that stops it is then shown in a message box. With `--icon`, the window shows the program's icon.
+
+**Colours** are names, codes or lists. The names are the usual web colours: `black`, `white`, `gray`, `grey`, `lightgray`, `darkgray`, `silver`, `red`, `maroon`, `orange`, `gold`, `yellow`, `olive`, `lime`, `green`, `teal`, `cyan`, `skyblue`, `blue`, `navy`, `purple`, `magenta`, `pink`, `brown`. Codes are `"#rrggbb"` or `"#rgb"`, and lists are `[red, green, blue]` with each part from 0 to 255. Without a colour, shapes and text are white, and `fill()` is black.
+
+**Keys** are named `"left"`, `"right"`, `"up"`, `"down"`, `"space"`, `"enter"`, `"escape"`, `"backspace"`, `"tab"`, `"shift"`, `"ctrl"`, `"alt"`, `"delete"`, `"a"` to `"z"`, `"0"` to `"9"` and `"f1"` to `"f12"`, and `"click"` and `"right click"` are the mouse buttons. `held` is for movement (it stays `yes` while the key is down); `pressed` is for actions like jumping (it is `yes` for one frame per press). A name `held` and `pressed` don't know is a problem, which catches typing mistakes. While a window is open, `key()` gives the keys pressed in it, including a key's repeats when it is held, and `wait()` keeps the window answering.
+
+**Text** uses the built-in font, 5 by 7 pixels in a 6 by 8 cell, so a label is 6 pixels wide per character, times its size. Characters outside plain English letters, digits and punctuation show as `?`.
+
+**Sprites** are pixel art written as text, one character per pixel. The map says which character is which colour, and every other character (`.` by convention) shows what's behind:
+
+<!-- norun -->
+```antares
+heart = [".r.r.", "rrrrr", ".rrr.", "..r.."]
+sprite(heart, 20, 10, {r: "red"}, 3)      # three times as big
+```
+
+**Screenshots.** `screenshot(file)` saves the picture at its own size, as a PNG file, and gives back the file name.
+
+Windows only for now: on macOS and Linux, `window()` stops with a problem that says so, and the other functions ask for a window first.
+
+## Sound
+
+Programs can play sound files, tones, tunes written as text, ready-made effects and looping music, all at the same time, in a window or in the terminal. Antares mixes every sound itself, 44,100 numbers a second, and hands the result to the speakers.
+
+| Function | What it does |
+|---|---|
+| `sound(file [, volume])` | Plays a WAV file once. Sounds can overlap |
+| `music(file)` | Plays a WAV file over and over, in the background |
+| `music(notes, step [, wave])` | Plays a tune over and over, in the background |
+| `music()` | Stops the music |
+| `beep(frequency, seconds [, wave])` | A tone. 440 is the note A |
+| `tune(notes [, step [, wave]])` | Plays a tune written as text, once; gives back its length in seconds |
+| `effect(name)` | A ready-made sound effect: `"coin"`, `"jump"`, `"hit"`, `"laser"`, `"explosion"`, `"powerup"` or `"select"` |
+| `volume(level)` | How loud everything is, from 0 (silent) to 1 (full) |
+| `silence()` | Stops every sound, and the music |
+| `playing()` | How many sounds are still playing (not counting music) |
+
+<!-- norun -->
+```antares
+effect("coin")
+beep(440, 0.2, "sine")
+tune("C E G C5:2", 0.15)
+sound("splash.wav", 0.5)                  # at half volume
+music("C - E - G - E -", 0.2, "triangle")
+```
+
+**Tunes** are notes separated by spaces. A note is a letter from `A` to `G`, then `#` (sharp) or `b` (flat) if needed, then an octave from 0 to 8 (4 if none is given): `C`, `F#`, `Bb3`, `A5`. A `-` is a rest. Each note or rest lasts one step, 0.15 seconds unless another is given, or several steps with `:n`: `G:3` lasts three. Notes are separated by a short gap, so repeated notes stay apart.
+
+**Waves** give a tone its character: `"square"` (the default, the classic sound of old games), `"sine"` (soft and pure), `"triangle"` (between the two), `"saw"` (buzzy) and `"noise"` (hiss, for drums and crashes). They are balanced to sound about equally loud.
+
+**Sound files** are WAV files: 8, 16, 24 or 32-bit whole numbers, or 32-bit floating point, at any sample rate, mono or stereo. Each file is read once and kept, so playing it every frame is cheap. A file packed into a program with `antares build --embed` is played as `sound("embedded:<file name>")`. Other formats, like MP3, can be saved as WAV with a free sound editor.
+
+**Music** loops until it is stopped or replaced: there is one piece of music at a time. `playing()` doesn't count it, so a program can wait for its sound effects with `while playing() > 0 { wait(0.01) }`.
+
+**Timing.** The sound device is opened the first time a sound is played, in the background, which can take up to a second; sounds asked for meanwhile start as soon as it is ready. After that, sounds start at most 60 ms after they are asked for. When a program ends, it waits for the sounds still playing (not the music) to finish.
+
+On macOS and Linux, and on a computer without a sound device, the sound functions do nothing (a missing or broken sound file is still a problem), so games still run there, silently.
+
 # Performance and the Native Compiler {#perf}
 
 ## The interpreter
@@ -1501,6 +1598,38 @@ The statements `learn` and `descend` are described in Chapter 11.
 | `draw(text)` | Redraw the screen in place |
 | `clear()` | Clear the screen |
 
+## Games in a window
+
+| Function | Description |
+|---|---|
+| `window(width, height [, title [, scale]])` | Open a window (Windows) |
+| `window_open()` | `yes` until the window is closed |
+| `frame()` | Show the picture; wait for the next of 60 frames a second |
+| `fill([colour])` | Paint the whole picture |
+| `rect(x, y, width, height [, colour])` | Filled rectangle |
+| `circle(x, y, radius [, colour])` | Filled circle |
+| `line(x1, y1, x2, y2 [, colour])` | Line |
+| `pixel(x, y [, colour])` | One pixel |
+| `label(text, x, y [, colour [, size]])` | Text in the built-in font |
+| `sprite(rows, x, y, colours [, size])` | Pixel art written as text |
+| `held(key)` | Whether a key is held down |
+| `pressed(key)` | Whether a key went down since the last frame |
+| `mouse()` | `{x, y, left, right}` |
+| `screenshot(file)` | Save the picture as a PNG |
+
+## Sound
+
+| Function | Description |
+|---|---|
+| `sound(file [, volume])` | Play a WAV file once |
+| `music(file)`, `music(notes, step [, wave])` | Loop music; `music()` stops it |
+| `beep(frequency, seconds [, wave])` | A tone |
+| `tune(notes [, step [, wave]])` | Play a tune once; its length in seconds |
+| `effect(name)` | A ready-made sound effect |
+| `volume(level)` | Overall loudness, 0 to 1 |
+| `silence()` | Stop all sound |
+| `playing()` | How many sounds are playing |
+
 ## Other
 
 | Function | Description |
@@ -1542,6 +1671,8 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/value.rs` | The value kinds and how they print |
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, SGD and Adam |
 | `src/builtins.rs` | The built-in functions |
+| `src/gfx.rs` | Games in a window: drawing, the font, PNG screenshots, and the Windows window |
+| `src/sound.rs` | Sound: the mixer, WAV files, tones, tunes and effects, and Windows sound output |
 | `src/llm.rs` | Language-model calls through `curl` |
 | `src/json.rs` | JSON reading and writing |
 | `src/aot.rs` | The compiler behind `antares build --native` |
@@ -1556,6 +1687,7 @@ This is version 0.6. Not there yet:
 - Tools and multi-turn chat for language models.
 - Model providers other than Anthropic.
 - GPU support.
+- Game windows and sound on macOS and Linux.
 
 # Grammar Summary {#grammar .appendix}
 

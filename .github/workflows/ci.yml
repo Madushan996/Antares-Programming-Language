@@ -21,10 +21,13 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Unit tests
+        run: cargo test --release
+
       - name: Self-check suites
         shell: bash
         run: |
-          for t in check features engine integers; do
+          for t in check features engine integers graphics sound; do
             ./target/release/antares tests/$t.ant
           done
 

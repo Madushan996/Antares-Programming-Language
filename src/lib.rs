@@ -7,6 +7,7 @@
 pub mod aot;
 pub mod ast;
 pub mod builtins;
+pub mod gfx;
 pub mod interp;
 pub mod json;
 pub mod lexer;
@@ -14,6 +15,7 @@ pub mod llm;
 pub mod pack;
 pub mod parser;
 pub mod rt;
+pub mod sound;
 pub mod tensor;
 pub mod value;
 pub mod vm;

@@ -1,0 +1,86 @@
+# Star Catch
+# Catch the falling stars in your basket, and dodge the rocks. With sound.
+# Left and right arrows (or A and D) move. After the game, Space plays again.
+# Run it (Windows):  antares examples/catch.ant
+
+W = 160
+H = 120
+window(W, H, "Star Catch")
+
+basket = ["o......o", "oo....oo", ".oooooo."]          # 8 by 3, drawn twice as big
+star = ["..y..", ".yyy.", "yyyyy", ".yyy.", "..y.."]
+rock = [".gg.", "gggg", "ggdg", ".gg."]
+
+to new_game() = {x: W / 2 - 8, score: 0, lives: 3, things: [], timer: 0, hurt: 0, over: no}
+
+game = new_game()
+
+while window_open() {
+    when game.over {
+        when pressed("space") {
+            game = new_game()
+            effect("select")
+        }
+    } else {
+        # move the basket, keeping it on the screen
+        when held("left") or held("a") { game.x -= 2 }
+        when held("right") or held("d") { game.x += 2 }
+        when game.x < 0 { game.x = 0 }
+        when game.x > W - 16 { game.x = W - 16 }
+
+        # now and then something new falls, more often as the score goes up
+        game.timer += 1
+        gap = 30 - game.score
+        when gap < 10 { gap = 10 }
+        when game.timer >= gap {
+            game.timer = 0
+            kind = "star"
+            when rand() < 0.3 { kind = "rock" }
+            speed = 1 + rand() + game.score / 15
+            game.things = push(game.things, {x: floor(rand() * (W - 5)), y: -5, kind: kind, speed: speed})
+        }
+
+        # everything falls; what lands in the basket counts
+        falling = []
+        each t in game.things {
+            t.y += t.speed
+            caught = t.x < game.x + 16 and t.x + 5 > game.x and t.y + 5 > H - 10 and t.y < H - 4
+            when caught and t.kind == "star" {
+                game.score += 1
+                effect("coin")
+            } else when caught {
+                game.lives -= 1
+                game.hurt = 20
+                effect("hit")
+                when game.lives == 0 {
+                    game.over = yes
+                    tune("G4 E4 C4 G3:3", 0.12)
+                }
+            } else when t.y < H {
+                falling = push(falling, t)
+            }
+        }
+        game.things = falling
+        when game.hurt > 0 { game.hurt -= 1 }
+    }
+
+    # draw everything, back to front
+    sky = "navy"
+    when game.hurt > 0 { sky = "maroon" }
+    fill(sky)
+    each t in game.things {
+        when t.kind == "star" {
+            sprite(star, t.x, t.y, {y: "gold"})
+        } else {
+            sprite(rock, t.x, t.y, {g: "gray", d: "darkgray"})
+        }
+    }
+    sprite(basket, game.x, H - 10, {o: "orange"}, 2)
+    label("Stars {game.score}", 4, 4)
+    label("Lives {game.lives}", W - 46, 4, "pink")
+    when game.over {
+        label("GAME OVER", W / 2 - 54, 40, "yellow", 2)
+        label("Space to play again", W / 2 - 57, 66)
+    }
+    frame()
+}

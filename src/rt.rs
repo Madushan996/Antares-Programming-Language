@@ -61,14 +61,18 @@ fn report(files: &[(&str, &str)], main_src: &str, msg: &str, line: u32) {
         Some((name, text)) => (*text, format!(" of {}", name)),
         None => (main_src, String::new()),
     };
+    let mut told = if line > 0 { format!("Problem on line {}{}: {}", line, place, msg) } else { format!("Problem: {}", msg) };
+    eprintln!("{}", told);
     if line > 0 {
-        eprintln!("Problem on line {}{}: {}", line, place, msg);
         if let Some(text) = src.lines().nth(line as usize - 1) {
             eprintln!("  {:>4} | {}", line, text.trim_end());
+            told = format!("{}
+
+  {:>4} | {}", told, line, text.trim_end());
         }
-    } else {
-        eprintln!("Problem: {}", msg);
     }
+    // a game whose console was hidden shows the problem in a message box
+    crate::gfx::tell_problem(&told);
 }
 
 /// Runs a compiled program's body on a thread with a large stack.
@@ -99,6 +103,8 @@ pub fn start(files: &'static [(&'static str, &'static str)], main_src: &'static 
         })
         .expect("couldn't start");
     let code = child.join().unwrap_or(1);
+    // sounds still playing are heard to the end
+    crate::sound::finish();
     std::process::exit(code);
 }
 

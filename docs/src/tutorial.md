@@ -1803,7 +1803,7 @@ The message points at the function's first line, where the range is written, and
 
 Ranges can be used on top-level variables (not inside a function) and on function inputs. For a one-off check anywhere, there is also the function `within(x, lowest, highest)`, which gives back `x` if it is in range and raises a problem otherwise.
 
-Ranges also make compiled programs faster, as Chapter 19 explains.
+Ranges also make compiled programs faster, as Chapter 20 explains.
 
 ## Try it yourself
 
@@ -2769,6 +2769,146 @@ The `examples` folder that comes with Antares includes `snake.ant`, a complete S
 - `key()` reads a key without waiting; `wait` pauses; `draw` redraws the screen; `clear` clears it.
 - Games loop forever: read keys, update, draw, wait.
 
+# Games in a Window {#window}
+
+The terminal is fine for Snake, but real games have colours, shapes and smooth movement. On Windows, Antares can open a window and let you draw in it, one pixel at a time if you like.
+
+## Your first window
+
+<!-- norun -->
+```antares
+window(160, 120, "My Game")
+while window_open() {
+    fill("navy")
+    circle(80, 60, 20, "gold")
+    label("Hello!", 62, 10)
+    frame()
+}
+```
+
+Run it, and a window opens with a gold circle on a dark blue sky. Close the window to end the program.
+
+Three things are new:
+
+- `window(160, 120, "My Game")` opens a window 160 **pixels** wide and 120 tall. Pixels are the little squares a picture is made of. 160 by 120 is small, so Antares makes each one bigger to fill your screen nicely, and they stay sharp, just like in old video games.
+- `while window_open()` keeps going until someone closes the window.
+- `frame()` shows what you've drawn. It also waits a moment, so the loop runs 60 times a second: each time round is one **frame**, like the pictures of a cartoon.
+
+Positions are counted from the top-left corner: `x` goes right and `y` goes **down**. So `(0, 0)` is the top-left corner and `(159, 119)` the bottom-right.
+
+## Drawing
+
+| Function | What it draws |
+|---|---|
+| `fill(colour)` | The whole picture in one colour |
+| `rect(x, y, width, height, colour)` | A filled rectangle, its top-left corner at `x`, `y` |
+| `circle(x, y, radius, colour)` | A filled circle around `x`, `y` |
+| `line(x1, y1, x2, y2, colour)` | A line from one point to another |
+| `pixel(x, y, colour)` | A single pixel |
+| `label(text, x, y, colour, size)` | Text. Each letter is 6 pixels wide and 8 tall, times `size` |
+
+The colour can be left out, and then it's white. Colours have names like `"red"`, `"orange"`, `"gold"`, `"lime"`, `"skyblue"`, `"pink"` and `"gray"`, or you can mix your own from red, green and blue, each from 0 to 255: `[255, 128, 0]` is orange.
+
+Each frame, draw the **whole** picture again, starting with `fill`. That's how things move: draw them in a slightly different place each time.
+
+## Moving with the keys
+
+`held(key)` says whether a key is being held down right now. This program moves a box with the arrow keys:
+
+<!-- norun -->
+```antares
+window(160, 120, "Move me")
+x = 70
+y = 50
+while window_open() {
+    when held("left") { x -= 2 }
+    when held("right") { x += 2 }
+    when held("up") { y -= 2 }
+    when held("down") { y += 2 }
+    fill("black")
+    rect(x, y, 20, 20, "lime")
+    frame()
+}
+```
+
+Keys have names: `"left"`, `"right"`, `"up"`, `"down"`, `"space"`, `"enter"`, `"escape"`, and the letters and digits like `"a"` or `"7"`.
+
+`held` is right for moving, because it stays `yes` as long as the key is down. For something that should happen **once** per press, like jumping or firing, use `pressed(key)`: it's `yes` only in the frame when the key went down.
+
+The mouse works too. `mouse()` gives a map with `x` and `y`, the position in your game's pixels, and `left` and `right`, which say whether those buttons are held. `pressed("click")` is `yes` in the frame the left button is clicked.
+
+## Pixel art
+
+A **sprite** is a small picture. In Antares you draw it with text: one character per pixel, and a map that says which character is which colour. Any other character, like `.`, shows what's behind it:
+
+<!-- norun -->
+```antares
+ship = ["..w..",
+        ".www.",
+        "wwrww"]
+sprite(ship, 70, 100, {w: "white", r: "red"}, 3)
+```
+
+The last input makes the sprite 3 times as big, so this 5 by 3 ship covers 15 by 9 pixels.
+
+## Sound
+
+Games are much more fun with sound. Antares can play sound effects, tones, tunes and music, and you don't need any sound files to start:
+
+<!-- norun -->
+```antares
+effect("coin")
+```
+
+That plays a ready-made effect. There are seven: `"coin"`, `"jump"`, `"hit"`, `"laser"`, `"explosion"`, `"powerup"` and `"select"`. Put one wherever something happens in your game: `effect("jump")` when the player jumps, `effect("hit")` when they bump into something.
+
+You can make your own sounds too:
+
+| Function | What it plays |
+|---|---|
+| `beep(frequency, seconds)` | A tone. The bigger the frequency, the higher the sound: 440 is the note A |
+| `tune(notes, step)` | A tune written as text |
+| `sound(file)` | A sound file (a WAV file) |
+| `music(notes, step)` | A tune that plays over and over in the background; `music()` stops it |
+| `volume(level)` | How loud everything is, from 0 (silent) to 1 (full) |
+| `silence()` | Stops all the sounds |
+
+A tune is written as notes with spaces between them. The notes are the letters `C D E F G A B`, and a number after a letter makes it higher or lower: `C5` is higher than `C`, and `C3` lower. A `-` is a rest, a moment of silence. Each note lasts one **step**, and `:2` makes a note last two steps:
+
+<!-- norun -->
+```antares
+tune("C D E F G:2 G:2", 0.2)
+```
+
+Sounds can play at the same time, so music, a jump and a coin can all be heard together. Each sound starts straight away; your game doesn't stop and wait for it to finish.
+
+## A whole game
+
+`examples/catch.ant`, which comes with Antares, is a complete game with sound, in under 90 lines: catch the falling stars in your basket and dodge the rocks. Run it with `antares examples/catch.ant`. Its main loop follows the same pattern as every game:
+
+1. Read the keys and move the player.
+2. Update everything else: make new stars and rocks, let them fall, and check what landed in the basket. A star plays `effect("coin")`, a rock plays `effect("hit")`, and losing the last life plays a sad little tune.
+3. Draw the whole picture, back to front: the sky, then the falling things, the basket, and the score on top.
+4. Call `frame()`.
+
+When the game is finished, `antares build catch.ant` turns it into a program you can give to friends. Double-clicking it opens just the game window.
+
+These game windows and sounds work on Windows. On macOS and Linux, `window()` tells you windows aren't available there yet, and sounds are silent.
+
+## Try it yourself
+
+1. Change your first window so the circle is red and the sky is black, and add your name at the bottom.
+2. In the "Move me" program, stop the box from leaving the window. (Hint: after moving, if `x` is less than 0, set it back to 0; the box is 20 wide, so `x` must not go above 140.)
+3. Make a box that jumps up by 30 pixels each time you press Space, using `pressed("space")`.
+4. Add sound to your jumping box: play `effect("jump")` each time it jumps. Then write the start of a song you know as a tune, and play it once when the program starts.
+
+## Summary
+
+- `window(width, height, title)` opens a window; `while window_open()` runs the game until it's closed; `frame()` shows each picture, 60 times a second.
+- Draw with `fill`, `rect`, `circle`, `line`, `pixel`, `label` and `sprite`. Colours are names, or `[red, green, blue]`.
+- `held(key)` is for moving, `pressed(key)` for one-off actions, and `mouse()` for the mouse.
+- `effect(name)` plays a ready-made sound; `beep`, `tune`, `sound` and `music` play your own.
+
 # Making Programs Fast {#fast}
 
 Most programs are fast enough just as they are. When a program does a lot of work, like a game engine or a big simulation, Antares can turn it into a native program that runs much faster. This chapter shows how.
@@ -3136,7 +3276,7 @@ That makes 100 built-in functions. This book, *Learn Antares*, was also publishe
 
 ## Version 0.6.0: programs to share without Rust
 
-`antares build` no longer needs Rust (Chapter 19). Without it, your program is **packed**: attached to a copy of Antares, so you still get one file to share, made in under a second. A packed program runs at the same speed as `antares program.ant`. With Rust installed, `antares build` compiles as before.
+`antares build` no longer needs Rust (Chapter 20). Without it, your program is **packed**: attached to a copy of Antares, so you still get one file to share, made in under a second. A packed program runs at the same speed as `antares program.ant`. With Rust installed, `antares build` compiles as before.
 
 | Option | What it does |
 |---|---|
@@ -3812,7 +3952,66 @@ draw("Done!")
 
 2. Add `when pressed == "up" and y > 0 { y = y - 1 }` and the same for `"down"`, and draw `y` new lines before the line with the `@`.
 
-## Chapter 19: Making Programs Fast
+## Chapter 19: Games in a Window
+
+1. For example:
+
+<!-- norun -->
+```antares
+window(160, 120, "My Game")
+while window_open() {
+    fill("black")
+    circle(80, 60, 20, "red")
+    label("Maya", 68, 108)
+    frame()
+}
+```
+
+2. After the four `when held(...)` lines, add:
+
+<!-- norun -->
+```antares
+when x < 0 { x = 0 }
+when x > 140 { x = 140 }
+when y < 0 { y = 0 }
+when y > 100 { y = 100 }
+```
+
+3. For example:
+
+<!-- norun -->
+```antares
+window(160, 120, "Jump")
+y = 90
+while window_open() {
+    when pressed("space") { y -= 30 }
+    when y < 90 { y += 1 }
+    fill("skyblue")
+    rect(70, y, 20, 20, "orange")
+    frame()
+}
+```
+
+Here the box also falls back down slowly, one pixel a frame.
+
+4. Put `effect("jump")` inside the jump's braces, on its own line:
+
+<!-- norun -->
+```antares
+when pressed("space") {
+    y -= 30
+    effect("jump")
+}
+```
+
+and before the loop, play a tune, for example the start of "Twinkle, Twinkle, Little Star":
+
+<!-- norun -->
+```antares
+tune("C C G G A A G:2", 0.25)
+```
+
+## Chapter 20: Making Programs Fast
 
 1. and 2. Results depend on your computer. As a guide, on the laptop used for this book `fib(30)` took 0.28 seconds interpreted and 0.009 seconds compiled, about 30 times faster.
 
@@ -3883,6 +4082,8 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Checking | `check fail within kind` |
 | Files and data | `read write append delete files exists save load json to_json read_binary program_folder` |
 | Input and screen | `input input_waiting key wait draw clear clock now args env` |
+| Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
+| Sound | `sound music beep tune effect volume silence playing` |
 
 The Antares Language Reference describes every one of them in detail.
 
