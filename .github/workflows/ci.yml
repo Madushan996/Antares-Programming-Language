@@ -27,7 +27,7 @@ jobs:
       - name: Self-check suites
         shell: bash
         run: |
-          for t in check features engine integers graphics sound; do
+          for t in check features engine integers graphics sound deep_learning; do
             ./target/release/antares tests/$t.ant
           done
 

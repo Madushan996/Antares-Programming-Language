@@ -491,7 +491,7 @@ pub fn learn(v: &Value, line: u32) -> R<Value> {
     }
 }
 
-pub fn descend(loss: &Value, rate: &Value, adam: bool, line: u32) -> R<()> {
+pub fn descend(loss: &Value, rate: &Value, optim: tensor::Optim, clip: Option<Value>, line: u32) -> R<()> {
     let rate = match rate.scalar() {
         Some(x) => x,
         None => return fail("the rate after `by` must be a number", line),
@@ -500,7 +500,14 @@ pub fn descend(loss: &Value, rate: &Value, adam: bool, line: u32) -> R<()> {
         Some(t) => t,
         None => return fail(format!("`descend` needs a number to make smaller, not a {}", loss.kind()), line),
     };
-    at(tensor::descend(&t, rate, adam), line)
+    let clip = match clip {
+        Some(c) => match c.scalar() {
+            Some(x) if x > 0.0 => Some(x),
+            _ => return fail("the limit after `clip` must be a number above 0", line),
+        },
+        None => None,
+    };
+    at(tensor::descend(&t, rate, optim, clip), line)
 }
 
 pub fn model(spec: &Value, opts: Option<&Value>, line: u32) -> R<Value> {

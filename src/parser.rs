@@ -648,9 +648,12 @@ impl Parser {
                         self.keep_in_range(b, nest)?;
                     }
                 }
-                Stmt::Descend { loss, rate, .. } => {
+                Stmt::Descend { loss, rate, clip, .. } => {
                     self.keep_in_range_expr(loss, nest)?;
                     self.keep_in_range_expr(rate, nest)?;
+                    if let Some(c) = clip {
+                        self.keep_in_range_expr(c, nest)?;
+                    }
                 }
                 Stmt::Try { body, var, handler } => {
                     counter(var, 0)?;
@@ -845,21 +848,30 @@ impl Parser {
                 let loss = self.expr()?;
                 self.expect(Tok::By, "`by` and a rate (for example: descend loss by 0.01)")?;
                 let rate = self.expr()?;
-                let mut adam = false;
+                let mut optim = crate::tensor::Optim::Sgd;
                 if self.eat(&Tok::Using) {
-                    let m = self.ident("`adam` or `sgd` after `using`")?;
-                    adam = match m.as_str() {
-                        "adam" => true,
-                        "sgd" => false,
+                    let m = self.ident("`adam`, `adamw`, `momentum` or `sgd` after `using`")?;
+                    optim = match m.as_str() {
+                        "adam" => crate::tensor::Optim::Adam,
+                        "adamw" => crate::tensor::Optim::AdamW,
+                        "momentum" => crate::tensor::Optim::Momentum,
+                        "sgd" => crate::tensor::Optim::Sgd,
                         other => {
                             return self.err(format!(
-                                "I know the methods `adam` and `sgd`, but not '{}'",
+                                "I know the methods `adam`, `adamw`, `momentum` and `sgd`, but not '{}'",
                                 other
                             ))
                         }
                     };
                 }
-                Ok(Stmt::Descend { loss, rate, adam, line })
+                // `clip 1.0`: limit the overall size of the gradients
+                let clip = if matches!(self.peek(), Tok::Ident(s) if s == "clip") {
+                    self.advance();
+                    Some(self.expr()?)
+                } else {
+                    None
+                };
+                Ok(Stmt::Descend { loss, rate, optim, clip, line })
             }
             Tok::Change => {
                 self.advance();

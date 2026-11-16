@@ -32,6 +32,25 @@ pub enum UFn {
     Abs,
     Sin,
     Cos,
+    /// GELU (the tanh approximation used by GPT models).
+    Gelu,
+    /// SiLU, also called swish: x * sigmoid(x).
+    Silu,
+    /// log(1 + exp(x)), a smooth relu.
+    Softplus,
+    /// relu that lets 1% through below zero.
+    LeakyRelu,
+}
+
+/// How `descend` changes `learn` variables.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Optim {
+    Sgd,
+    Adam,
+    /// Adam with decoupled weight decay (0.01).
+    AdamW,
+    /// Gradient descent with momentum (0.9).
+    Momentum,
 }
 
 pub enum Op {
@@ -50,6 +69,13 @@ pub enum Op {
     Gather(T, Vec<usize>),
     /// Sum along one dimension.
     SumAxis(T, usize),
+    /// Log of softmax along the last dimension.
+    LogSoftmax(T),
+    /// Mean cross-entropy of softmax(logits) against target probabilities
+    /// (one row of targets per row of logits).
+    CrossEntropy(T, Rc<Vec<f64>>),
+    /// Tensors joined along one dimension.
+    Concat(Vec<T>, usize),
 }
 
 pub struct Adam {
@@ -85,7 +111,10 @@ impl Node {
             | Op::Reshape(a)
             | Op::Index(a, _)
             | Op::Gather(a, _)
-            | Op::SumAxis(a, _) => vec![a],
+            | Op::SumAxis(a, _)
+            | Op::LogSoftmax(a)
+            | Op::CrossEntropy(a, _) => vec![a],
+            Op::Concat(parts, _) => parts.iter().collect(),
         }
     }
 }
@@ -262,21 +291,43 @@ fn mat_dims(a: &T, b: &T) -> Result<(usize, usize, usize), String> {
     Ok((m, n, p))
 }
 
+/// Splits `out` (rows of `width` numbers) among the CPU's cores and runs
+/// `f(first_row, rows)` on each part, when there is enough work (`work`
+/// multiply-adds) to be worth it. Each row is still worked out by one core
+/// in the usual order, so the results are exactly the same either way.
+fn par_rows(out: &mut [f64], width: usize, work: usize, f: impl Fn(usize, &mut [f64]) + Sync) {
+    let rows = if width == 0 { 0 } else { out.len() / width };
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(16);
+    if cores < 2 || rows < 2 || work < 1_000_000 {
+        f(0, out);
+        return;
+    }
+    let per = rows.div_ceil(cores.min(rows));
+    std::thread::scope(|sc| {
+        for (k, part) in out.chunks_mut(per * width).enumerate() {
+            let f = &f;
+            sc.spawn(move || f(k * per, part));
+        }
+    });
+}
+
 fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
     let mut o = vec![0.0; m * p];
-    for i in 0..m {
-        let orow = &mut o[i * p..(i + 1) * p];
-        for k in 0..n {
-            let x = a[i * n + k];
-            if x == 0.0 {
-                continue;
-            }
-            let row = &b[k * p..(k + 1) * p];
-            for j in 0..p {
-                orow[j] += x * row[j];
+    par_rows(&mut o, p, m * n * p, |first, part| {
+        for (r, orow) in part.chunks_mut(p.max(1)).enumerate() {
+            let i = first + r;
+            for k in 0..n {
+                let x = a[i * n + k];
+                if x == 0.0 {
+                    continue;
+                }
+                let row = &b[k * p..(k + 1) * p];
+                for j in 0..p {
+                    orow[j] += x * row[j];
+                }
             }
         }
-    }
+    });
     o
 }
 
@@ -310,8 +361,28 @@ pub fn apply(f: UFn, x: f64) -> f64 {
         UFn::Abs => x.abs(),
         UFn::Sin => x.sin(),
         UFn::Cos => x.cos(),
+        UFn::Gelu => 0.5 * x * (1.0 + (GELU_K * (x + 0.044715 * x * x * x)).tanh()),
+        UFn::Silu => x / (1.0 + (-x).exp()),
+        UFn::Softplus => {
+            // log(1 + e^x) without overflow for large x
+            if x > 30.0 {
+                x
+            } else {
+                x.exp().ln_1p()
+            }
+        }
+        UFn::LeakyRelu => {
+            if x > 0.0 {
+                x
+            } else {
+                0.01 * x
+            }
+        }
     }
 }
+
+/// sqrt(2 / pi), for GELU.
+const GELU_K: f64 = 0.797_884_560_802_865_4;
 
 pub fn unary(f: UFn, a: &T) -> T {
     let d: Vec<f64> = a.data.borrow().iter().map(|&x| apply(f, x)).collect();
@@ -476,6 +547,80 @@ pub fn mean_axis(t: &T, axis: i64) -> Result<T, String> {
     binary(BinK::Div, &s, &scalar(n.max(1) as f64))
 }
 
+/// log(softmax(x)) along the last dimension, computed without overflow.
+pub fn log_softmax(a: &T) -> T {
+    let d = a.shape.last().copied().unwrap_or(1).max(1);
+    let src = a.data.borrow();
+    let mut out = vec![0.0; src.len()];
+    for (row, orow) in src.chunks(d).zip(out.chunks_mut(d)) {
+        let mx = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let lse = mx + row.iter().map(|x| (x - mx).exp()).sum::<f64>().ln();
+        for (o, &x) in orow.iter_mut().zip(row) {
+            *o = x - lse;
+        }
+    }
+    drop(src);
+    make(a.shape.clone(), out, Op::LogSoftmax(a.clone()), a.requires)
+}
+
+/// The mean cross-entropy loss of `logits` (one row per example, one
+/// column per class) against `target`, the right probabilities for each
+/// class (usually one 1 per row). Softmax is part of it, so `logits` are
+/// the raw scores.
+pub fn cross_entropy(logits: &T, target: Vec<f64>) -> Result<T, String> {
+    if target.len() != logits.len() {
+        return Err(format!("cross_entropy has {} scores but {} target values", logits.len(), target.len()));
+    }
+    let lsm = log_softmax(logits);
+    let d = logits.shape.last().copied().unwrap_or(1).max(1);
+    let rows = (logits.len() / d).max(1);
+    let total: f64 = lsm.data.borrow().iter().zip(&target).map(|(l, t)| if *t == 0.0 { 0.0 } else { l * t }).sum();
+    let loss = -total / rows as f64;
+    Ok(make(vec![], vec![loss], Op::CrossEntropy(logits.clone(), Rc::new(target)), logits.requires))
+}
+
+/// Joins tensors along dimension `axis`; the other dimensions must match.
+pub fn concat(parts: &[T], axis: i64) -> Result<T, String> {
+    let first = parts.first().ok_or("concat needs at least one tensor")?;
+    let rank = first.shape.len() as i64;
+    let ax = if axis < 0 { axis + rank } else { axis };
+    if rank == 0 || ax < 0 || ax >= rank {
+        return Err(format!(
+            "concat can't join along dimension {}: the tensors have {} dimension(s), numbered from 0",
+            axis, rank
+        ));
+    }
+    let ax = ax as usize;
+    for p in parts {
+        let same = p.shape.len() == first.shape.len()
+            && p.shape.iter().zip(&first.shape).enumerate().all(|(i, (x, y))| i == ax || x == y);
+        if !same {
+            return Err(format!(
+                "concat can't join shapes {} and {} along dimension {}",
+                fmt_shape(&first.shape),
+                fmt_shape(&p.shape),
+                ax
+            ));
+        }
+    }
+    let outer: usize = first.shape[..ax].iter().product();
+    let inner: usize = first.shape[ax + 1..].iter().product();
+    let total: usize = parts.iter().map(|p| p.shape[ax]).sum();
+    let mut out = Vec::with_capacity(outer * total * inner);
+    let datas: Vec<_> = parts.iter().map(|p| p.data.borrow()).collect();
+    for o in 0..outer {
+        for (p, d) in parts.iter().zip(&datas) {
+            let n = p.shape[ax] * inner;
+            out.extend_from_slice(&d[o * n..(o + 1) * n]);
+        }
+    }
+    drop(datas);
+    let mut shape = first.shape.clone();
+    shape[ax] = total;
+    let req = parts.iter().any(|p| p.requires);
+    Ok(make(shape, out, Op::Concat(parts.to_vec(), ax), req))
+}
+
 // ---------- backward pass ----------
 
 fn acc(t: &T, d: &[f64]) {
@@ -558,24 +703,41 @@ fn back(node: &Node, g: &[f64]) {
             let bd = b.data.borrow();
             let mut da = if a.requires { vec![0.0; m * n] } else { vec![] };
             let mut db = if b.requires { vec![0.0; n * p] } else { vec![] };
-            for i in 0..m {
-                for k in 0..n {
-                    let x = ad[i * n + k];
-                    let mut s = 0.0;
-                    for j in 0..p {
-                        let gij = g[i * p + j];
-                        s += gij * bd[k * p + j];
-                        if b.requires {
-                            db[k * p + j] += x * gij;
+            // plain slices, so the cores can share them
+            let (ad, bd) = (&ad[..], &bd[..]);
+            if a.requires {
+                // da[i, k] = sum over j of g[i, j] * b[k, j]
+                par_rows(&mut da, n, m * n * p, |first, part| {
+                    for (r, drow) in part.chunks_mut(n.max(1)).enumerate() {
+                        let i = first + r;
+                        let grow = &g[i * p..(i + 1) * p];
+                        for (k, d) in drow.iter_mut().enumerate() {
+                            let brow = &bd[k * p..(k + 1) * p];
+                            let mut s = 0.0;
+                            for j in 0..p {
+                                s += grow[j] * brow[j];
+                            }
+                            *d = s;
                         }
                     }
-                    if a.requires {
-                        da[i * n + k] = s;
-                    }
-                }
+                });
             }
-            drop(ad);
-            drop(bd);
+            if b.requires {
+                // db[k, j] = sum over i of a[i, k] * g[i, j], adding i in order
+                par_rows(&mut db, p, m * n * p, |first, part| {
+                    let rows = part.len() / p.max(1);
+                    for i in 0..m {
+                        let grow = &g[i * p..(i + 1) * p];
+                        for r in 0..rows {
+                            let x = ad[i * n + first + r];
+                            let drow = &mut part[r * p..(r + 1) * p];
+                            for j in 0..p {
+                                drow[j] += x * grow[j];
+                            }
+                        }
+                    }
+                });
+            }
             acc(a, &da);
             acc(b, &db);
         }
@@ -612,6 +774,23 @@ fn back(node: &Node, g: &[f64]) {
                             }
                             UFn::Sin => x.cos(),
                             UFn::Cos => -x.sin(),
+                            UFn::Gelu => {
+                                let u = GELU_K * (x + 0.044715 * x * x * x);
+                                let th = u.tanh();
+                                0.5 * (1.0 + th) + 0.5 * x * (1.0 - th * th) * GELU_K * (1.0 + 3.0 * 0.044715 * x * x)
+                            }
+                            UFn::Silu => {
+                                let sg = 1.0 / (1.0 + (-x).exp());
+                                sg * (1.0 + x * (1.0 - sg))
+                            }
+                            UFn::Softplus => 1.0 / (1.0 + (-x).exp()),
+                            UFn::LeakyRelu => {
+                                if x > 0.0 {
+                                    1.0
+                                } else {
+                                    0.01
+                                }
+                            }
                         }
                     })
                     .collect()
@@ -672,6 +851,57 @@ fn back(node: &Node, g: &[f64]) {
             d[*off..*off + g.len()].copy_from_slice(g);
             acc(a, &d);
         }
+        Op::LogSoftmax(a) => {
+            // d/dx: g - softmax(x) * sum(g), row by row
+            let d = node.shape.last().copied().unwrap_or(1).max(1);
+            let mut out = vec![0.0; g.len()];
+            {
+                let y = node.data.borrow();
+                for ((yrow, grow), orow) in y.chunks(d).zip(g.chunks(d)).zip(out.chunks_mut(d)) {
+                    let total: f64 = grow.iter().sum();
+                    for j in 0..yrow.len() {
+                        orow[j] = grow[j] - yrow[j].exp() * total;
+                    }
+                }
+            }
+            acc(a, &out);
+        }
+        Op::CrossEntropy(a, target) => {
+            // d/dlogits: (softmax(logits) * sum(target row) - target) / rows
+            let d = a.shape.last().copied().unwrap_or(1).max(1);
+            let rows = (a.len() / d).max(1) as f64;
+            let mut out = vec![0.0; a.len()];
+            {
+                let x = a.data.borrow();
+                for ((xrow, trow), orow) in x.chunks(d).zip(target.chunks(d)).zip(out.chunks_mut(d)) {
+                    let mx = xrow.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let total: f64 = xrow.iter().map(|v| (v - mx).exp()).sum();
+                    let tsum: f64 = trow.iter().sum();
+                    for j in 0..xrow.len() {
+                        orow[j] = g[0] * ((xrow[j] - mx).exp() / total * tsum - trow[j]) / rows;
+                    }
+                }
+            }
+            acc(a, &out);
+        }
+        Op::Concat(parts, ax) => {
+            let outer: usize = parts[0].shape[..*ax].iter().product();
+            let inner: usize = parts[0].shape[*ax + 1..].iter().product();
+            let total: usize = parts.iter().map(|p| p.shape[*ax]).sum();
+            let mut start = 0;
+            for p in parts {
+                let n = p.shape[*ax] * inner;
+                if p.requires {
+                    let mut d = Vec::with_capacity(p.len());
+                    for o in 0..outer {
+                        let row = o * total * inner + start;
+                        d.extend_from_slice(&g[row..row + n]);
+                    }
+                    acc(p, &d);
+                }
+                start += n;
+            }
+        }
     }
 }
 
@@ -692,7 +922,9 @@ fn backward(root: &T) -> Vec<T> {
 }
 
 /// One optimisation step: nudge every `learn` variable that `loss` depends on.
-pub fn descend(loss: &T, rate: f64, adam: bool) -> Result<(), String> {
+/// With `clip`, the gradients are first scaled down if their overall size
+/// (the square root of the sum of their squares) is larger.
+pub fn descend(loss: &T, rate: f64, optim: Optim, clip: Option<f64>) -> Result<(), String> {
     if !loss.requires {
         return Err(
             "there is nothing to learn here: this value doesn't depend on any `learn` variable"
@@ -706,12 +938,27 @@ pub fn descend(loss: &T, rate: f64, adam: bool) -> Result<(), String> {
         );
     }
     let order = backward(loss);
+    let mut scale = 1.0;
+    if let Some(limit) = clip {
+        let total: f64 = order
+            .iter()
+            .filter(|n| matches!(n.op, Op::Leaf) && n.requires)
+            .map(|n| n.grad.borrow().iter().map(|x| x * x).sum::<f64>())
+            .sum();
+        let norm = total.sqrt();
+        if norm > limit && norm > 0.0 {
+            scale = limit / norm;
+        }
+    }
     for n in &order {
         if matches!(n.op, Op::Leaf) && n.requires {
+            if scale != 1.0 {
+                n.grad.borrow_mut().iter_mut().for_each(|x| *x *= scale);
+            }
             let g = n.grad.borrow();
             if !g.is_empty() {
                 let mut d = n.data.borrow_mut();
-                if adam {
+                if optim == Optim::Adam || optim == Optim::AdamW {
                     let mut o = n.opt.borrow_mut();
                     let len = d.len();
                     let st = o.get_or_insert_with(|| Adam {
@@ -723,10 +970,21 @@ pub fn descend(loss: &T, rate: f64, adam: bool) -> Result<(), String> {
                     let (b1, b2) = (0.9f64, 0.999f64);
                     let c1 = 1.0 - b1.powi(st.t);
                     let c2 = 1.0 - b2.powi(st.t);
+                    let decay = if optim == Optim::AdamW { 0.01 } else { 0.0 };
                     for i in 0..len {
                         st.m[i] = b1 * st.m[i] + (1.0 - b1) * g[i];
                         st.v[i] = b2 * st.v[i] + (1.0 - b2) * g[i] * g[i];
-                        d[i] -= rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
+                        // (written exactly as before AdamW existed, so Adam's results don't change)
+                        let step = rate * (st.m[i] / c1) / ((st.v[i] / c2).sqrt() + 1e-8);
+                        d[i] -= if decay == 0.0 { step } else { step + rate * decay * d[i] };
+                    }
+                } else if optim == Optim::Momentum {
+                    let mut o = n.opt.borrow_mut();
+                    let len = d.len();
+                    let st = o.get_or_insert_with(|| Adam { m: vec![0.0; len], v: vec![], t: 0 });
+                    for i in 0..len {
+                        st.m[i] = 0.9 * st.m[i] + g[i];
+                        d[i] -= rate * st.m[i];
                     }
                 } else {
                     for i in 0..d.len() {

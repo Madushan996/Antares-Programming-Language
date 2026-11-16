@@ -840,7 +840,7 @@ impl Interp {
                     return fail(m, *line);
                 }
             }
-            Stmt::Descend { loss, rate, adam, line } => {
+            Stmt::Descend { loss, rate, optim, clip, line } => {
                 let l = self.eval(loss, env)?;
                 let r = self.eval(rate, env)?;
                 let rate = match r.scalar() {
@@ -853,7 +853,14 @@ impl Interp {
                         return fail(format!("`descend` needs a number to make smaller, not a {}", l.kind()), *line)
                     }
                 };
-                tensor::descend(&t, rate, *adam).map_err(|m| Ctrl::Err(m, *line))?;
+                let clip = match clip {
+                    Some(c) => match self.eval(c, env)?.scalar() {
+                        Some(x) if x > 0.0 => Some(x),
+                        _ => return fail("the limit after `clip` must be a number above 0", *line),
+                    },
+                    None => None,
+                };
+                tensor::descend(&t, rate, *optim, clip).map_err(|m| Ctrl::Err(m, *line))?;
             }
             _ => {}
         }

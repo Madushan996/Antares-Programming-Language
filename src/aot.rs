@@ -933,9 +933,12 @@ impl<'a> Cx<'a> {
                     self.walk_block(b, sc);
                 }
             }
-            Stmt::Descend { loss, rate, .. } => {
+            Stmt::Descend { loss, rate, clip, .. } => {
                 self.walk_expr(loss, sc);
                 self.walk_expr(rate, sc);
+                if let Some(c) = clip {
+                    self.walk_expr(c, sc);
+                }
             }
             Stmt::Try { body, var, handler } => {
                 self.walk_block(body, sc);
@@ -1799,9 +1802,12 @@ impl<'a> Cx<'a> {
                         self.fast_scan_block(b, sc, v, f);
                     }
                 }
-                Stmt::Descend { loss, rate, .. } => {
+                Stmt::Descend { loss, rate, clip, .. } => {
                     self.fast_scan_expr(loss, sc, v, f);
                     self.fast_scan_expr(rate, sc, v, f);
+                    if let Some(c) = clip {
+                        self.fast_scan_expr(c, sc, v, f);
+                    }
                 }
                 Stmt::Try { body, var, handler } => {
                     if let Some(x) = var {
@@ -2223,9 +2229,12 @@ impl<'a> Cx<'a> {
                         self.whole_sources(b, sc, out);
                     }
                 }
-                Stmt::Descend { loss, rate, .. } => {
+                Stmt::Descend { loss, rate, clip, .. } => {
                     self.whole_sources_expr(loss, sc, out);
                     self.whole_sources_expr(rate, sc, out);
+                    if let Some(c) = clip {
+                        self.whole_sources_expr(c, sc, out);
+                    }
                 }
                 Stmt::Try { body, var, handler } => {
                     if let Some(v) = var {
@@ -4312,10 +4321,17 @@ impl<'a> Cx<'a> {
                 out.push('\n');
                 out
             }
-            Stmt::Descend { loss, rate, adam, line } => {
+            Stmt::Descend { loss, rate, optim, clip, line } => {
                 let l = self.dyn_code(loss, sc);
                 let r = self.dyn_code(rate, sc);
-                format!("{{ let l_ = {}; let r_ = {}; descend(&l_, &r_, {}, {})?; }}\n", l, r, adam, line)
+                let c = match clip {
+                    Some(c) => format!("Some({})", self.dyn_code(c, sc)),
+                    None => "None".to_string(),
+                };
+                format!(
+                    "{{ let l_ = {}; let r_ = {}; let c_ = {}; descend(&l_, &r_, antares::tensor::Optim::{:?}, c_, {})?; }}\n",
+                    l, r, c, optim, line
+                )
             }
             Stmt::Try { body, var, handler } => self.try_stmt(body, *var, handler, sc, false),
             Stmt::Stop(line) => self.stop_code(*line),

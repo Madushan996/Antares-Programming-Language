@@ -75,7 +75,8 @@ pub enum Stmt {
     Each { var: u32, iter: Expr, body: Vec<Stmt>, line: u32 },
     While { cond: Expr, body: Vec<Stmt>, line: u32 },
     When { arms: Vec<(Expr, Vec<Stmt>, u32)>, otherwise: Option<Vec<Stmt>> },
-    Descend { loss: Expr, rate: Expr, adam: bool, line: u32 },
+    /// `descend loss by rate [using method] [clip limit]`
+    Descend { loss: Expr, rate: Expr, optim: crate::tensor::Optim, clip: Option<Expr>, line: u32 },
     Try { body: Vec<Stmt>, var: Option<u32>, handler: Vec<Stmt> },
     Stop(u32),
     Skip(u32),
