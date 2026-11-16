@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.13.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.13.0.
+This book covers **Antares 0.13.1**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.13.1.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.13.0
+Antares 0.13.1
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.13.0 — type a line and press Enter. `exit` to leave.
+Antares 0.13.1 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -3262,6 +3262,8 @@ roof = mesh([[-1, 0, -1], [1, 0, -1], [1, 0, 1], [-1, 0, 1], [0, 1, -1], [0, 1, 
             [[0, 3, 5], [0, 5, 4], [1, 4, 5], [1, 5, 2], [0, 4, 1], [3, 2, 5], [0, 1, 2], [0, 2, 3]])
 ```
 
+A model can also change shape as the program runs. `mesh(roof, new_points)` gives the same model new corners, keeping its triangles: that is how to make a flag that waves, or the surface of the sea, moving every frame. For water, add `ripples: 1` to its look, and the graphics card draws fine moving ripples on it, which break the sunlight into glints.
+
 `examples/world.ant` puts all of this together: a village of houses with such roofs, trees made of cylinders and cones, lamp posts, a pond and a ball you roll around with the arrow keys while the camera follows. Press N for night, when the lamps light up. Run it with `antares examples/world.ant`.
 
 ![examples/world.ant at night: lamps light the village, the pond reflects them, and fog hides the distance](images/world.png)
@@ -3631,6 +3633,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.11.1 | 16 Nov 2026 | A command stopped by its time limit stops everything it started, such as a game window. |
 | 0.12.0 | 16 Nov 2026 | Graphics that look good: smooth shapes, see-through colours, gradients, pictures, real fonts, shadows and lighting effects. |
 | 0.13.0 | 16 Nov 2026 | 3D: a camera, shapes and models, sunlight, lamps, soft shadows, sky, fog and realistic materials, drawn on the graphics card. |
+| 0.13.1 | 16 Nov 2026 | Models that change shape every frame, and water ripples drawn by the graphics card. |
 
 ## Version 0.1.0: the first release
 
@@ -3803,6 +3806,10 @@ Games and pictures look much better. Shapes have smooth edges and can be placed 
 ## Version 0.13.0: 3D
 
 Programs can draw worlds in 3D (Chapter 19). `camera` places the view; `cube`, `box`, `sphere`, `cylinder`, `cone` and `plane` are ready-made shapes, and `mesh` reads models from `.obj` files or builds them from points and triangles. The light is worked out the way real light behaves: `sun` casts soft shadows, `sky` lights everything from above, `lamp` adds lights of any colour, and surfaces can be rough or polished, plain or metal, see-through or glowing, and wrapped in pictures. `fog` fades the distance. The graphics card does the drawing, through Direct3D 11, with smooth edges; without one, Windows' own software renderer draws the same picture more slowly. 3D goes into the same picture as 2D, so labels and effects go on top, and `to_screen` puts labels next to 3D things. The new example `world.ant` is a village to roll a ball around, by day and by night. That makes 191 built-in functions.
+
+## Version 0.13.1: water
+
+`mesh(model, points)` moves the corners of a model made from points, keeping its triangles, so shapes like the sea, flags and cloth can change every frame without making a new model each time. The look option `ripples` adds fine moving ripples drawn by the graphics card, which make a shiny surface look like water. Glow is several times faster on computers with several cores, and turning shadows off no longer upsets some graphics cards.
 
 # Answers to the Exercises {#answers .appendix}
 
