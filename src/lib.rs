@@ -16,6 +16,8 @@ pub mod llm;
 pub mod nn;
 pub mod pack;
 pub mod parser;
+pub mod png;
+pub mod raster;
 pub mod rt;
 pub mod sound;
 pub mod tensor;

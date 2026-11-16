@@ -1,0 +1,100 @@
+# Firefly Night
+# A night scene that shows off Antares graphics: gradients, smooth shapes,
+# see-through colours, light that adds up, glow, shadows and real fonts.
+# Move the mouse to lead the fireflies; hold the button to gather them.
+# F switches fullscreen; Escape leaves.
+# Run it (Windows):  antares examples/night.ant
+
+W = 960
+H = 540
+window(W, H, "Firefly Night")
+
+# The parts that don't move are drawn once, on a picture, and the picture
+# is drawn every frame: much quicker than drawing them again each time.
+to hills(base, height, seed) {
+    pts = [[0, H]]
+    x = 0
+    while x <= W {
+        y = base - height * (0.5 + 0.5 * sin(x / 140 + seed) * cos(x / 61 + seed * 2))
+        pts = push(pts, [x, y])
+        x += 16
+    }
+    give push(pts, [W, H])
+}
+
+scenery = picture(W, H)
+canvas(scenery)
+fill(gradient(0, 0, 0, H, ["#060b1e", "#16224a", "#3b2f5e", "#6a4a6e"]))
+# the moon, with a soft halo
+circle(760, 110, 150, radial(760, 110, 150, [[255, 240, 210, 0.22], [255, 240, 210, 0]]))
+circle(760, 110, 42, radial(748, 98, 46, ["#fffbea", "#e8dcc0"]))
+circle(742, 98, 7, [200, 190, 170, 0.35])
+circle(772, 124, 10, [200, 190, 170, 0.3])
+# three ranges of hills, lighter further away
+polygon(hills(360, 90, 1), gradient(0, 250, 0, H, ["#2c2850", "#1a1934"]))
+polygon(hills(420, 70, 4), gradient(0, 330, 0, H, ["#1d1b3a", "#110f24"]))
+polygon(hills(480, 50, 7), "#0a0916")
+canvas()
+
+stars = []
+repeat 90 {
+    stars = push(stars, {x: rand() * W, y: rand() * 300, size: 0.5 + rand() * 1.2, phase: rand() * 6})
+}
+flies = []
+repeat 40 {
+    flies = push(flies, {x: rand() * W, y: 300 + rand() * 200, vx: 0, vy: 0, phase: rand() * 6, hue: 50 + rand() * 40})
+}
+title_font = "Segoe UI"
+t = 0
+
+while window_open() {
+    dt = frame()
+    t += dt
+    when pressed("escape") { stop }
+    when pressed("f") { fullscreen(not fullscreen()) }
+    m = mouse()
+
+    draw(scenery, 0, 0)
+    # twinkling stars
+    each s in stars {
+        a = 0.45 + 0.4 * sin(t * 2 + s.phase)
+        circle(s.x, s.y, s.size, [255, 255, 255, a])
+    }
+
+    # fireflies drift, and are drawn towards the mouse (strongly while the
+    # button is held)
+    pull = 0.6
+    when m.left { pull = 3 }
+    moved = []
+    each f in flies {
+        dx = m.x - f.x
+        dy = m.y - f.y
+        d = sqrt(dx * dx + dy * dy) + 1
+        f.vx = f.vx * 0.96 + (dx / d * pull + sin(t + f.phase) * 0.8) * dt * 30
+        f.vy = f.vy * 0.96 + (dy / d * pull + cos(t * 1.3 + f.phase) * 0.8) * dt * 30
+        f.x += f.vx * dt * 20
+        f.y += f.vy * dt * 20
+        moved = push(moved, f)
+    }
+    flies = moved
+    # light adds up where fireflies gather
+    blend("add")
+    each f in flies {
+        bright = 0.55 + 0.45 * sin(t * 4 + f.phase)
+        circle(f.x, f.y, 22, radial(f.x, f.y, 22, [hsl(f.hue, 1, 0.55, 0.7 * bright), hsl(f.hue, 1, 0.5, 0)]))
+        circle(f.x, f.y, 2.5, hsl(f.hue, 1, 0.9, bright))
+    }
+    blend()
+
+    # a glassy title card with a soft shadow
+    shadow(0, 8, 18, [0, 0, 0, 0.5])
+    rect(40, 36, 360, 96, [255, 255, 255, 0.10], 18)
+    shadow()
+    font(title_font, 34, "bold")
+    label("Firefly Night", 64, 50, gradient(64, 50, 64, 90, ["#fff6d8", "#ffcf7a"]))
+    font(title_font, 16)
+    label("Move the mouse to lead them. F: fullscreen", 66, 96, [255, 255, 255, 0.75])
+
+    glow(0.9, 18)
+    vignette(0.45)
+}

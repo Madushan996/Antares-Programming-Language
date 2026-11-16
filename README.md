@@ -62,6 +62,9 @@ show ask helper "What is 17% of 2450? And which file here is the biggest?"
   Tesla T4.
 - **Agents that act.** `shell` runs commands and `read_page` reads the web,
   as tools a model can use by itself; Antares asks you before each command.
+- **Graphics that look good.** Games in a window with smooth shapes,
+  see-through colours, gradients, PNG pictures, real fonts, soft shadows and
+  glowing light, drawn by Antares itself with nothing to install.
 - **Any model.** Claude, OpenAI and services like it, or free and private
   models on your own computer with Ollama.
 - **One file, no dependencies.** The whole language is a single small program
@@ -110,7 +113,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.11.1`.
+You should see `Antares 0.12.0`.
 
 ### Option 2: download it yourself
 
@@ -756,9 +759,10 @@ Linux, and API keys never appear in the list of running programs.
 
 ## Games in a window
 
-On Windows, Antares can open a window and draw in it, pixel by pixel, for
-small games. It needs nothing else installed. Coordinates are in the game's
-own pixels, which are scaled up to fit the screen and stay sharp:
+On Windows, Antares can open a window and draw in it, with nothing else
+installed: smooth shapes, see-through colours, gradients, pictures from PNG
+files, real fonts, soft shadows and lighting effects, or chunky pixel art.
+Small games are scaled up to fit the screen and stay sharp:
 
 ```
 window(160, 120, "Dodge")                # 160 x 120 pixels, scaled to fit
@@ -773,27 +777,67 @@ while window_open() {
 }
 ```
 
+And a scene with light:
+
+```
+window(640, 360, "Glow")
+ship = picture("ship.png")
+while window_open() {
+    fill(gradient(0, 0, 0, 360, ["#0b1d3a", "#f08a5d"]))
+    blend("add")                         # light adds up
+    circle(320, 180, 90, radial(320, 180, 90, ["#ffd27f", "#ffd27f00"]))
+    blend()
+    shadow(4, 6, 10)                     # soft shadows from here on
+    draw(ship, 280, 150, {angle: 20, scale: 2})
+    shadow()
+    font("Segoe UI", 28, "bold")
+    label("Hello!", 20, 20, "white")
+    glow(1)                              # bright parts shine
+    frame()
+}
+```
+
 | Function | What it does |
 |---|---|
-| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled up to fit the screen (or by `scale`) |
+| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled to fit the screen (or by `scale`) |
 | `window_open()` | `yes` until the player closes the window |
-| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second |
+| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second; gives the seconds since the last frame |
+| `fullscreen([yes or no])` | Fills the screen, or goes back to a window |
 | `fill([colour])` | Paints the whole picture (black if no colour is given) |
-| `rect(x, y, width, height [, colour])` | A filled rectangle, its top-left corner at `x`, `y` |
-| `circle(x, y, radius [, colour])` | A filled circle centred on `x`, `y` |
-| `line(x1, y1, x2, y2 [, colour])` | A line |
-| `pixel(x, y [, colour])` | One pixel |
-| `label(text, x, y [, colour [, size]])` | Text in the built-in font: 6 by 8 pixels a character, times `size` |
-| `sprite(rows, x, y, colours [, size])` | Pixel art written as rows of text (see below) |
+| `rect(x, y, width, height [, colour [, radius]])` | A filled rectangle, its top-left corner at `x`, `y`, with rounded corners if a radius is given |
+| `circle(x, y, radius [, colour])`, `ellipse(x, y, rx, ry [, colour])` | A filled circle or ellipse |
+| `ring(x, y, radius, thickness [, colour])` | The outline of a circle |
+| `polygon(points [, colour])` | A filled shape through `[[x, y], [x, y], ...]` |
+| `line(x1, y1, x2, y2 [, colour [, width]])`, `path(points [, colour [, width]])` | Lines of any thickness |
+| `pixel(x, y [, colour])`, `colour_at(x, y)` | Sets or reads one pixel |
+| `label(text, x, y [, colour [, size]])` | Text: the built-in pixel font, or the font chosen with `font` |
+| `font([name [, size [, style]]])`, `measure(text [, size])` | Chooses a font (`"Segoe UI"`, 24, `"bold"`); the size a label takes |
+| `sprite(rows, x, y, colours [, size])` | Pixel art written as rows of text |
+| `picture(file)`, `picture(width, height)` | Reads a PNG file; makes a new picture to draw on |
+| `draw(picture, x, y [, options])` | Draws a picture: options `scale`, `width`, `height`, `angle`, `alpha`, `flip`, `part`, `tint`, `smooth` |
+| `canvas([picture])` | Draws on a picture instead of the window; `canvas()` goes back |
+| `gradient(x1, y1, x2, y2, colours)`, `radial(x, y, radius, colours)` | Colours changing smoothly, used anywhere a colour goes |
+| `hsl(hue, saturation, lightness [, alpha])`, `mix(colour1, colour2, amount)` | Makes colours |
+| `blend([mode])` | `"add"` (light), `"multiply"` (darken), `"screen"` or `"normal"` |
+| `smooth(yes or no)` | Smooth edges, or hard pixel edges for pixel art |
+| `shadow([across, down, softness [, colour]])` | Soft shadows for what is drawn next |
+| `glow(amount)`, `blur(radius)`, `vignette(amount)` | Effects on the whole picture |
 | `held(key)` | `yes` while a key is held down |
 | `pressed(key)` | `yes` if a key went down since the last frame |
 | `mouse()` | `{x, y, left, right}`: where the mouse is, in the game's pixels, and which buttons are held |
 | `screenshot(file)` | Saves the picture as a PNG file |
 
 - Colours are names (`"red"`, `"gold"`, `"skyblue"`, `"lightgray"` and the
-  other usual web colour names), codes (`"#ff8800"`, `"#f80"`) or
-  `[red, green, blue]` with each from 0 to 255. The colour is optional, and
-  shapes and text are white without one.
+  other usual web colour names, and `"transparent"`), codes (`"#ff8800"`,
+  `"#f80"`, `"#ff880080"` with an alpha) or `[red, green, blue]` with each
+  from 0 to 255, and an optional fourth part, the alpha, from 0
+  (see-through) to 1 (solid). The colour is optional, and shapes and text
+  are white without one.
+- Positions can have fractions, and shapes have smooth edges; `smooth(no)`
+  gives hard pixel edges for the classic look. `examples/night.ant` shows
+  gradients, light, shadows and fonts together.
+- Pictures, and drawing on them, work on every system, so programs on Linux
+  and macOS can make PNG files; windows are Windows-only for now.
 - Keys are named `"left"`, `"right"`, `"up"`, `"down"`, `"space"`,
   `"enter"`, `"escape"`, `"a"` to `"z"`, `"0"` to `"9"`, `"shift"`, `"ctrl"`
   and `"f1"` to `"f12"`; `"click"` and `"right click"` are the mouse buttons.
@@ -873,7 +917,7 @@ music("C - E - G - E -", 0.2, "triangle")    # a tune that loops
 | The command line | `args` (what was typed after the program's name), `env` (a setting of the computer) |
 | Commands and the web | `shell fetch read_page page_text page_links` |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
-| Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
+| Games in a window | `window window_open frame fullscreen fill rect circle ellipse ring polygon line path pixel colour_at label font measure sprite picture draw canvas gradient radial hsl mix blend smooth shadow blur glow vignette held pressed mouse screenshot` |
 | Sound | `sound music beep tune effect volume silence playing` |
 | Other | `kind clock now check fail` |
 

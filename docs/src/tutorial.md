@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.11.1**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.11.1.
+This book covers **Antares 0.12.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.12.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.11.1
+Antares 0.12.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.11.1 — type a line and press Enter. `exit` to leave.
+Antares 0.12.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -2995,7 +2995,7 @@ The `examples` folder that comes with Antares includes `snake.ant`, a complete S
 
 # Games in a Window {#window}
 
-The terminal is fine for Snake, but real games have colours, shapes and smooth movement. On Windows, Antares can open a window and let you draw in it, one pixel at a time if you like.
+The terminal is fine for Snake, but real games have colours, shapes and smooth movement. On Windows, Antares can open a window and let you draw in it: chunky pixel art like old video games, or smooth shapes, see-through colours, gradients, pictures and real fonts.
 
 ## Your first window
 
@@ -3075,6 +3075,106 @@ sprite(ship, 70, 100, {w: "white", r: "red"}, 3)
 
 The last input makes the sprite 3 times as big, so this 5 by 3 ship covers 15 by 9 pixels.
 
+## Smooth shapes and see-through colours
+
+Look closely at the circle in your first window: its edge is smooth. Where the circle covers only part of a pixel, that pixel gets only part of the circle's colour, so the edge blends into the sky instead of looking like stairs.
+
+Positions can have fractions too. A box at `x = 10.5` is drawn half a pixel further right than one at `x = 10`, so something moving slowly glides instead of jumping a whole pixel at a time.
+
+A colour can also be **see-through**. Add a fourth number, the **alpha**, from 0 (invisible) to 1 (solid):
+
+<!-- norun -->
+```antares
+fill("white")
+circle(60, 60, 30, [255, 0, 0, 0.5])      # half see-through red
+circle(90, 60, 30, [0, 0, 255, 0.5])      # where they overlap, it's purple
+```
+
+If you prefer the blocky look of old games, `smooth(no)` turns the smoothing off, and `smooth(yes)` turns it back on.
+
+There are more shapes than boxes and circles:
+
+| Function | What it draws |
+|---|---|
+| `rect(x, y, width, height, colour, radius)` | A box with rounded corners |
+| `ellipse(x, y, radius_x, radius_y, colour)` | An oval |
+| `ring(x, y, radius, thickness, colour)` | The outline of a circle |
+| `polygon(points, colour)` | A shape with corners at the points |
+| `line(x1, y1, x2, y2, colour, width)` | A line of any thickness |
+| `path(points, colour, width)` | Lines joining the points |
+
+Points are written as a list of `[x, y]` pairs: `polygon([[80, 20], [120, 100], [40, 100]], "gold")` draws a triangle.
+
+## Gradients and light
+
+A **gradient** is a colour that changes smoothly. You can use one anywhere a colour goes:
+
+<!-- norun -->
+```antares
+sky = gradient(0, 0, 0, 120, ["skyblue", "navy"])
+fill(sky)
+```
+
+That sky is sky blue at the top (`0, 0`) and navy at the bottom (`0, 120`). `radial` makes colours that change outwards from a centre, which is just right for a light, the sun or a glowing ball:
+
+<!-- norun -->
+```antares
+circle(80, 40, 30, radial(80, 40, 30, ["white", "#ffffff00"]))
+```
+
+`"#ffffff00"` is white with an alpha of 0, so the light fades away to nothing at its edge.
+
+Light adds up. After `blend("add")`, everything you draw is added to what is already there, so two lights overlapping make a brighter spot, just as in real life. `blend()` goes back to normal. And `hsl(hue, 1, 0.5)` gives a bright colour from its place on the colour wheel, from 0 to 360: 0 is red, 120 green and 240 blue, so `hsl(frame_number * 3, 1, 0.5)` changes colour all the time, like a rainbow.
+
+## Pictures
+
+You can draw pictures made in any paint program. Save them as PNG files, and read them with `picture`:
+
+<!-- norun -->
+```antares
+ship = picture("ship.png")
+angle = 0
+while window_open() {
+    angle += 2
+    fill("black")
+    draw(ship, 60, 40, {angle: angle, scale: 2})
+    frame()
+}
+```
+
+`draw(ship, x, y)` draws the picture with its top-left corner at `x`, `y`, and the map at the end changes how: `angle` turns it (in degrees), `scale` makes it bigger or smaller, `alpha` fades it, `flip: yes` mirrors it, and `part` draws only part of it, for pictures that hold many frames of an animation side by side. PNG pictures can have see-through parts, so a ship isn't stuck in a box.
+
+You can also make your own pictures to draw on. `picture(width, height)` makes an empty one, and `canvas(p)` sends drawing to it until `canvas()` sends it back to the window. That is a good way to draw a detailed background once, before the game loop, and then draw it every frame with one quick `draw`.
+
+## Real fonts
+
+The built-in letters are small and blocky. `font` chooses one of the fonts on your computer, and then labels are smooth and can be any size:
+
+<!-- norun -->
+```antares
+font("Segoe UI", 32, "bold")
+label("Game Over", 40, 50, "white")
+```
+
+The size is the height of the letters in pixels. The style can be `"bold"`, `"italic"` or `"bold italic"`, and `font()` goes back to the built-in letters. `measure(text)` tells you how big a label will be, which helps to put it in the middle: `label(t, (160 - measure(t).width) / 2, 50)`.
+
+## Shadows and effects
+
+`shadow(across, down, softness)` gives everything drawn after it a soft shadow, until `shadow()`. It makes buttons, cards and characters look as if they float above the background:
+
+<!-- norun -->
+```antares
+shadow(4, 6, 10)
+rect(30, 30, 100, 60, "white", 12)
+shadow()
+```
+
+Three effects change the whole picture, so call them last, just before `frame()`. `glow(1)` makes the bright parts shine into their surroundings. `vignette(0.5)` darkens the corners, like an old camera. `blur(4)` makes everything soft, which looks good behind a pause menu.
+
+`examples/night.ant` uses all of these: a sky with a gradient, a glowing moon, hills drawn once on a picture, fireflies whose light adds up, and a title in a real font on a see-through card with a shadow. Run it with `antares examples/night.ant` and move the mouse; press F to fill the screen.
+
+![examples/night.ant: a gradient sky, a glowing moon, hills drawn once on a picture, fireflies whose light adds up, and a title in a real font on a see-through card](images/night.png)
+
 ## Sound
 
 Games are much more fun with sound. Antares can play sound effects, tones, tunes and music, and you don't need any sound files to start:
@@ -3125,11 +3225,16 @@ These game windows and sounds work on Windows. On macOS and Linux, `window()` te
 2. In the "Move me" program, stop the box from leaving the window. (Hint: after moving, if `x` is less than 0, set it back to 0; the box is 20 wide, so `x` must not go above 140.)
 3. Make a box that jumps up by 30 pixels each time you press Space, using `pressed("space")`.
 4. Add sound to your jumping box: play `effect("jump")` each time it jumps. Then write the start of a song you know as a tune, and play it once when the program starts.
+5. Draw a sunset: fill a 320 by 180 window with a gradient from orange at the top to purple at the bottom, add a sun that glows (a circle with a `radial` gradient), and write a title in a real font with a soft shadow.
 
 ## Summary
 
 - `window(width, height, title)` opens a window; `while window_open()` runs the game until it's closed; `frame()` shows each picture, 60 times a second.
-- Draw with `fill`, `rect`, `circle`, `line`, `pixel`, `label` and `sprite`. Colours are names, or `[red, green, blue]`.
+- Draw with `fill`, `rect`, `circle`, `line`, `pixel`, `label` and `sprite`, and `ellipse`, `ring`, `polygon` and `path`. Colours are names, or `[red, green, blue]`, with a fourth number to make them see-through.
+- Shapes have smooth edges and can be at fractions of a pixel; `smooth(no)` gives the classic blocky look.
+- `gradient` and `radial` make colours that change smoothly, and `blend("add")` makes light add up.
+- `picture` reads PNG files and makes pictures to draw on; `draw` draws them turned, scaled or faded.
+- `font` chooses a real font for labels, `shadow` adds soft shadows, and `glow`, `vignette` and `blur` change the whole picture.
 - `held(key)` is for moving, `pressed(key)` for one-off actions, and `mouse()` for the mouse.
 - `effect(name)` plays a ready-made sound; `beep`, `tune`, `sound` and `music` play your own.
 
@@ -3429,6 +3534,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.10.0 | 16 Nov 2026 | `use gpu` on NVIDIA graphics cards on Linux, including the free ones on Google Colab and Kaggle. |
 | 0.11.0 | 16 Nov 2026 | Agents that act: running commands, reading the web, and built-in tools that ask before they run. |
 | 0.11.1 | 16 Nov 2026 | A command stopped by its time limit stops everything it started, such as a game window. |
+| 0.12.0 | 16 Nov 2026 | Graphics that look good: smooth shapes, see-through colours, gradients, pictures, real fonts, shadows and lighting effects. |
 
 ## Version 0.1.0: the first release
 
@@ -3593,6 +3699,10 @@ Programs, and the models they talk to, can now reach outside: `shell` runs a com
 ## Version 0.11.1: timeouts stop everything
 
 When a command run with `shell` takes longer than its `timeout`, Antares stops it, and now also stops every program the command started. Before, a program like a game, started by the command, kept running in its own window after the command was stopped. This matters most for agents, which often try a program for a few seconds to see whether it starts.
+
+## Version 0.12.0: graphics that look good
+
+Games and pictures look much better. Shapes have smooth edges and can be placed at fractions of a pixel, so movement glides; colours can be see-through; and there are gradients, rounded corners, ellipses, rings, polygons and lines of any thickness (Chapter 19). `picture` reads PNG files, which `draw` draws turned, scaled, faded, tinted or flipped, and pictures can be drawn on and saved on every system, even without a window. Labels can use the fonts on your computer, `shadow` adds soft shadows, `blend("add")` makes light add up, and `glow`, `blur` and `vignette` change the whole picture. `fullscreen` fills the screen, and `frame()` gives the time since the last frame. Pixel-art games still work as before, and `smooth(no)` gives them hard pixel edges. The new example `night.ant` shows it all together. That makes 176 built-in functions.
 
 # Answers to the Exercises {#answers .appendix}
 
@@ -4366,6 +4476,23 @@ and before the loop, play a tune, for example the start of "Twinkle, Twinkle, Li
 tune("C C G G A A G:2", 0.25)
 ```
 
+5. For example:
+
+<!-- norun -->
+```antares
+window(320, 180, "Sunset")
+while window_open() {
+    fill(gradient(0, 0, 0, 180, ["orange", "purple"]))
+    circle(160, 120, 60, radial(160, 120, 60, ["#fff6d8", "#ffcf7a80", "#ff8a0000"]))
+    circle(160, 120, 22, "#fff6d8")
+    shadow(2, 3, 6)
+    font("Segoe UI", 28, "bold")
+    label("Sunset", 20, 16, "white")
+    shadow()
+    frame()
+}
+```
+
 ## Chapter 20: Making Programs Fast
 
 1. and 2. Results depend on your computer. As a guide, on the laptop used for this book `fib(30)` took 0.28 seconds interpreted and 0.009 seconds compiled, about 30 times faster.
@@ -4437,7 +4564,9 @@ These words can't be used as names: `and`, `as`, `ask`, `by`, `change`, `descend
 | Checking | `check fail within kind` |
 | Files and data | `read write append delete files exists save load json to_json read_binary program_folder` |
 | Input and screen | `input input_waiting key wait draw clear clock now args env` |
-| Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
+| Games in a window | `window window_open frame fullscreen held pressed mouse screenshot` |
+| Drawing | `fill rect circle ellipse ring polygon line path pixel colour_at label font measure sprite` |
+| Pictures and effects | `picture draw canvas gradient radial hsl mix blend smooth shadow blur glow vignette` |
 | Sound | `sound music beep tune effect volume silence playing` |
 | Deep learning | `gelu`, `silu`, `softplus`, `leaky_relu`, `log_softmax`, `cross_entropy`, `mse`, `bce`, `take`, `concat`, `layer_norm`, `dropout`, `causal_mask`, `he`, `xavier`, `accuracy`, `top`, `sample` |
 | Data | `read_csv`, `columns`, `shuffle`, `batches` |
