@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.9.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.9.0.
+This book covers **Antares 0.10.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.10.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.9.0
+Antares 0.10.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.9.0 — type a line and press Enter. `exit` to leave.
+Antares 0.10.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -3154,7 +3154,7 @@ Your computer's **graphics card**, or **GPU**, was made to work out the colours 
 use gpu
 ```
 
-Everything else stays the same. Big matrix multiplications, the squashing functions, and the nudging done by `descend` then run on the graphics card. On an ordinary laptop, a network that takes half a minute to train on the CPU trains in about two seconds this way. `gpu()` tells you which graphics card Antares found:
+Everything else stays the same. Big matrix multiplications, the squashing functions, and the nudging done by `descend` then run on the graphics card. On an ordinary laptop, a network that takes half a minute to train on the CPU trains in about two seconds this way, and on a proper AI graphics card in about half a second. `gpu()` tells you which graphics card Antares found:
 
 <!-- norun -->
 ```antares
@@ -3165,7 +3165,16 @@ show gpu()
 Intel(R) HD Graphics 520
 ```
 
-The GPU works with numbers that have about 7 digits instead of 16, so its answers can differ from the CPU's in the last few digits. That doesn't matter for machine learning, but it's why you turn the GPU on yourself. Without a graphics card Antares can use, `use gpu` says so and the program carries on with the CPU. The GPU works on Windows for now.
+The GPU works with numbers that have about 7 digits instead of 16, so its answers can differ from the CPU's in the last few digits. That doesn't matter for machine learning, but it's why you turn the GPU on yourself. Without a graphics card Antares can use, `use gpu` says so and the program carries on with the CPU. The GPU works on Windows, and on Linux computers with an NVIDIA graphics card.
+
+**No graphics card? Borrow one.** Google Colab and Kaggle are free websites that run programs on powerful NVIDIA graphics cards, in your browser. In a Colab notebook, choose *Runtime*, *Change runtime type* and a *T4 GPU*, then install Antares by typing this into a cell and pressing the run button:
+
+<!-- norun -->
+```shell
+!curl -fsSL https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.sh | sh
+```
+
+Start another cell with `%%writefile train.ant` and your program below it (with `use gpu` at the top) to save it, and run it with `!~/.antares/bin/antares train.ant`.
 
 ## Try it yourself
 
@@ -3374,6 +3383,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.7.0 | 16 Nov 2026 | Games in a window, with sound: drawing, the keyboard and mouse, sound effects, tunes and music (Windows). |
 | 0.8.0 | 16 Nov 2026 | The AI language: deep learning building blocks, faster training, and models that remember, use tools and answer in shapes. |
 | 0.9.0 | 16 Nov 2026 | Training on the graphics card: `use gpu`, many times faster, with nothing to install (Windows). |
+| 0.10.0 | 16 Nov 2026 | `use gpu` on NVIDIA graphics cards on Linux, including the free ones on Google Colab and Kaggle. |
 
 ## Version 0.1.0: the first release
 
@@ -3524,6 +3534,10 @@ That makes 149 built-in functions. The `examples` folder has five new programs, 
 One new line, `use gpu`, sends the heavy sums of machine learning to the computer's graphics card (Chapter 20): matrix multiplications, the squashing functions, the gradients, and the nudging done by `descend`. On a laptop's built-in graphics, training a network went from 29.5 seconds to under 2. `use cpu` switches back, and the new function `gpu()` says which graphics card Antares found. That makes 151 built-in functions.
 
 The GPU works with numbers of about 7 digits, so its answers can differ from the CPU's in the last few digits; that is why you turn it on yourself, and programs without `use gpu` print exactly what they printed before. It works on Windows, through Direct3D, which Windows includes, so there is nothing to install; elsewhere, programs carry on with the CPU.
+
+## Version 0.10.0: NVIDIA graphics cards, Colab and Kaggle
+
+`use gpu` now also works on Linux computers with an NVIDIA graphics card, through NVIDIA's CUDA. That includes Google Colab and Kaggle, websites where anyone can borrow a powerful NVIDIA graphics card for free, in the browser (Chapter 20 shows how). On Colab's Tesla T4, training a network that takes 29 seconds on the CPU takes about half a second. Programs don't change: the same `use gpu` line picks the right kind of graphics card by itself.
 
 # Answers to the Exercises {#answers .appendix}
 

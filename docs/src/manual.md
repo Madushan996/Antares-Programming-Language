@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.9.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.10.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models, integers, files, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.9.0 — type a line and press Enter. `exit` to leave.
+Antares 0.10.0 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1033,9 +1033,17 @@ With the GPU on:
 
 The GPU works in 32-bit numbers (about 7 significant digits) where the CPU uses 64-bit ones, so results agree with the CPU's to about 6 digits. Programs without `use gpu` are unaffected and give exactly the results they always did. `use gpu` and `use cpu` belong at the top level of a file; `use_gpu(yes)` and `use_gpu(no)` do the same anywhere.
 
-Antares uses Direct3D 11 compute shaders, which every Windows PC with a graphics card or built-in graphics has, and picks the graphics card with the most memory of its own. The first time a program needs one of its GPU programs (shaders), it compiles it, which takes a moment, and keeps it in the local app data folder, so later programs don't wait. Without a usable GPU, and on macOS and Linux for now, `use gpu` notes this once on the error output and everything stays on the CPU. The environment variable `ANTARES_GPU=warp` uses Windows' software GPU (for testing on machines without a graphics card), and `ANTARES_GPU=none` behaves as if there were no GPU.
+On Windows, Antares uses Direct3D 11 compute shaders, which every PC with a graphics card or built-in graphics has. On Linux, it uses NVIDIA GPUs through CUDA, as on Google Colab and Kaggle: it opens the driver's library (libcuda) and CUDA's run-time compiler (libnvrtc, part of the CUDA toolkit) when first needed, looking in the usual CUDA folders. Either way it picks the GPU with the most memory of its own. The first time a program needs one of its GPU programs, it compiles it, which takes a moment, and keeps it (in the local app data folder on Windows, in `~/.cache/antares` on Linux), so later programs don't wait. Without a usable GPU, and on macOS for now, `use gpu` notes this once on the error output and everything stays on the CPU. The environment variable `ANTARES_GPU=warp` uses Windows' software GPU (for testing on machines without a graphics card), and `ANTARES_GPU=none` behaves as if there were no GPU.
 
-On a laptop's Intel HD Graphics 520, training a 784-1024-1024-10 classifier for 10 steps takes 1.89 s with `use gpu` against 29.5 s on its 4-core CPU, and a 1024 x 1024 matrix product 49 ms against 360 ms.
+Training a 784-1024-1024-10 classifier for 10 steps takes 0.55 s with `use gpu` on Google Colab's Tesla T4, against 29.0 s on Colab's CPU, and 1.89 s on a laptop's Intel HD Graphics 520, against 29.5 s on its 4-core CPU. A 1024 x 1024 matrix product takes 7.9 ms on the T4 and 49 ms on the HD 520.
+
+On Colab or Kaggle, choose a GPU runtime and install Antares in a cell:
+
+```shell
+!curl -fsSL https://raw.githubusercontent.com/Madushan996/Antares-Programming-Language/main/install.sh | sh
+```
+
+Then save programs with `%%writefile program.ant` at the top of a cell, and run them with `!~/.antares/bin/antares program.ant`.
 
 ## Data
 
@@ -1878,6 +1886,7 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 | `src/value.rs` | The value kinds and how they print |
 | `src/nn.rs` | Deep learning and data: activations, losses, layers, starting weights, sampling, CSV and batches |
 | `src/gpu.rs` | The GPU: Direct3D 11 compute shaders for matrix products, element-wise maths, gradients and optimisers |
+| `src/gpu_cuda.rs` | The same on Linux with NVIDIA GPUs, through CUDA |
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, the optimisers, and matrix maths on every core |
 | `src/builtins.rs` | The built-in functions |
 | `src/gfx.rs` | Games in a window: drawing, the font, PNG screenshots, and the Windows window |
@@ -1890,10 +1899,10 @@ The parser resolves every name to a numbered slot up front, so the engine never 
 
 ## Current limits
 
-This is version 0.9. Not there yet:
+This is version 0.10. Not there yet:
 
 - Giving a value to a slice (`v[1:3] = 0`).
-- The GPU on macOS and Linux.
+- The GPU on macOS, and on Linux without an NVIDIA GPU.
 - Game windows and sound on macOS and Linux.
 
 # Grammar Summary {#grammar .appendix}
