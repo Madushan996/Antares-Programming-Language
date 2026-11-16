@@ -103,7 +103,9 @@ each provider in ["anthropic", "openai"] {
 r = shell("echo hello")
 check(r.output == "hello" and r.code == 0 and r.errors == "", "shell gives the output")
 check(shell("exit 3").code == 3, "shell gives the exit code")
-check(has(shell("cd", {folder: "tests"}).output, "tests"), "shell runs in a folder")
+where_am_i = "pwd"
+when env("OS") == "Windows_NT" { where_am_i = "cd" }
+check(has(shell(where_am_i, {folder: "tests"}).output, "tests"), "shell runs in a folder")
 sorter = "sort"
 check(replace(shell(sorter, {input: "pear
 apple
