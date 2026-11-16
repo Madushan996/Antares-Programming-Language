@@ -78,7 +78,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.6.0`.
+You should see `Antares 0.7.0`.
 
 ### Option 2: download it yourself
 
@@ -765,7 +765,7 @@ the original C++ generic build.
 
 ## Current limits
 
-This is version 0.6. Not there yet: giving a value to a slice
+This is version 0.7. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
 than Anthropic, GPU support, and game windows and sound on macOS and Linux.
 
