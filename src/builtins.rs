@@ -43,7 +43,7 @@ fn normal() -> f64 {
 
 // ---------- argument helpers ----------
 
-fn want(a: &[Value], n: usize, name: &str) -> Result<(), String> {
+pub(crate) fn want(a: &[Value], n: usize, name: &str) -> Result<(), String> {
     if a.len() != n {
         Err(format!("{} takes {} input{} but was given {}", name, n, if n == 1 { "" } else { "s" }, a.len()))
     } else {
@@ -51,7 +51,7 @@ fn want(a: &[Value], n: usize, name: &str) -> Result<(), String> {
     }
 }
 
-fn num(v: &Value, name: &str) -> Result<f64, String> {
+pub(crate) fn num(v: &Value, name: &str) -> Result<f64, String> {
     v.scalar().ok_or_else(|| format!("{} needs a number, not a {}", name, v.kind()))
 }
 
@@ -59,14 +59,14 @@ fn ten(v: &Value, name: &str) -> Result<T, String> {
     v.as_tensor().ok_or_else(|| format!("{} needs numbers, not a {}", name, v.kind()))
 }
 
-fn text(v: &Value, name: &str) -> Result<Rc<str>, String> {
+pub(crate) fn text(v: &Value, name: &str) -> Result<Rc<str>, String> {
     match v {
         Value::Str(s) => Ok(s.clone()),
         other => Err(format!("{} needs text, not a {}", name, other.kind())),
     }
 }
 
-fn s(x: impl AsRef<str>) -> Value {
+pub(crate) fn s(x: impl AsRef<str>) -> Value {
     Value::Str(x.as_ref().into())
 }
 
@@ -2104,6 +2104,9 @@ fn ansi_ready() {
 
 fn b_key(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 0, "key")?;
+    if let Some(k) = crate::gfx::next_key() {
+        return Ok(k.map(s).unwrap_or(Value::Nothing));
+    }
     Ok(match console::poll_key() {
         Some(k) => s(k),
         None => Value::Nothing,
@@ -2118,7 +2121,9 @@ fn b_input_waiting(_: &mut Interp, a: Vec<Value>) -> Res {
 fn b_wait(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 1, "wait")?;
     let secs = num(&a[0], "wait")?;
-    if secs > 0.0 && secs.is_finite() {
+    if secs > 0.0 && secs.is_finite() && crate::gfx::window_is_open() {
+        crate::gfx::wait(secs);
+    } else if secs > 0.0 && secs.is_finite() {
         std::thread::sleep(std::time::Duration::from_secs_f64(secs));
     }
     Ok(Value::Nothing)
@@ -2343,5 +2348,19 @@ pub fn all() -> Vec<(&'static str, NativeFn)> {
         ("wait", b_wait),
         ("clear", b_clear),
         ("draw", b_draw),
+        ("window", crate::gfx::b_window),
+        ("window_open", crate::gfx::b_window_open),
+        ("frame", crate::gfx::b_frame),
+        ("fill", crate::gfx::b_fill),
+        ("rect", crate::gfx::b_rect),
+        ("circle", crate::gfx::b_circle),
+        ("line", crate::gfx::b_line),
+        ("pixel", crate::gfx::b_pixel),
+        ("label", crate::gfx::b_label),
+        ("sprite", crate::gfx::b_sprite),
+        ("held", crate::gfx::b_held),
+        ("pressed", crate::gfx::b_pressed),
+        ("mouse", crate::gfx::b_mouse),
+        ("screenshot", crate::gfx::b_screenshot),
     ]
 }

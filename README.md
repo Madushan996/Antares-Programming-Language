@@ -48,7 +48,7 @@ count = ask claude "How many moons does Mars have?" as number
 - [Making an executable to share](#making-an-executable-to-share)
 - [Troubleshooting](#troubleshooting)
 - [The language in five minutes](#the-language-in-five-minutes)
-- [Machine learning](#machine-learning) · [Language models](#language-models) · [Built-in functions](#built-in-functions)
+- [Machine learning](#machine-learning) · [Language models](#language-models) · [Games in a window](#games-in-a-window) · [Built-in functions](#built-in-functions)
 
 ## Install
 
@@ -517,6 +517,62 @@ Linux. Options after `with`: `system` (text) and `max_tokens` (number).
 `model fake = "echo"` makes a pretend model that repeats the prompt, for
 trying things offline (see `examples/ask.ant`).
 
+## Games in a window
+
+On Windows, Antares can open a window and draw in it, pixel by pixel, for
+small games. It needs nothing else installed. Coordinates are in the game's
+own pixels, which are scaled up to fit the screen and stay sharp:
+
+```
+window(160, 120, "Dodge")                # 160 x 120 pixels, scaled to fit
+x = 72
+while window_open() {
+    when held("left") { x -= 2 }
+    when held("right") { x += 2 }
+    fill("navy")
+    rect(x, 100, 16, 6, "orange")
+    label("Hello!", 4, 4, "yellow")
+    frame()                              # show it; 60 frames a second
+}
+```
+
+| Function | What it does |
+|---|---|
+| `window(width, height [, title [, scale]])` | Opens a window of `width` by `height` pixels, scaled up to fit the screen (or by `scale`) |
+| `window_open()` | `yes` until the player closes the window |
+| `frame()` | Shows what you've drawn, then waits, so the game runs at 60 frames a second |
+| `fill([colour])` | Paints the whole picture (black if no colour is given) |
+| `rect(x, y, width, height [, colour])` | A filled rectangle, its top-left corner at `x`, `y` |
+| `circle(x, y, radius [, colour])` | A filled circle centred on `x`, `y` |
+| `line(x1, y1, x2, y2 [, colour])` | A line |
+| `pixel(x, y [, colour])` | One pixel |
+| `label(text, x, y [, colour [, size]])` | Text in the built-in font: 6 by 8 pixels a character, times `size` |
+| `sprite(rows, x, y, colours [, size])` | Pixel art written as rows of text (see below) |
+| `held(key)` | `yes` while a key is held down |
+| `pressed(key)` | `yes` if a key went down since the last frame |
+| `mouse()` | `{x, y, left, right}`: where the mouse is, in the game's pixels, and which buttons are held |
+| `screenshot(file)` | Saves the picture as a PNG file |
+
+- Colours are names (`"red"`, `"gold"`, `"skyblue"`, `"lightgray"` and the
+  other usual web colour names), codes (`"#ff8800"`, `"#f80"`) or
+  `[red, green, blue]` with each from 0 to 255. The colour is optional, and
+  shapes and text are white without one.
+- Keys are named `"left"`, `"right"`, `"up"`, `"down"`, `"space"`,
+  `"enter"`, `"escape"`, `"a"` to `"z"`, `"0"` to `"9"`, `"shift"`, `"ctrl"`
+  and `"f1"` to `"f12"`; `"click"` and `"right click"` are the mouse buttons.
+  `key()` and `wait()` work in a window too.
+- A sprite is pixel art written as text, one character a pixel, with a map
+  saying which character is which colour. Any other character shows what's
+  behind: `sprite([".r.", "rrr"], x, y, {r: "red"}, 4)` draws it four times
+  as big.
+- Closing the window ends the game. A game made with `antares build` and
+  started by double-clicking hides its console window, and shows a problem
+  that stops it in a message box. With `--icon`, the window shows the icon too.
+- `examples/catch.ant` is a complete game: catch the falling stars and dodge
+  the rocks.
+
+Windows only for now; on macOS and Linux, `window()` says so.
+
 ## Built-in functions
 
 | Area | Functions |
@@ -534,6 +590,7 @@ trying things offline (see `examples/ask.ant`).
 | Data and files | `save load exists program_folder json to_json read write append delete files read_binary input input_waiting` |
 | The command line | `args` (what was typed after the program's name), `env` (a setting of the computer) |
 | Games and live screens | `key` (the key being pressed, or nothing), `wait` (pause, in seconds), `draw` (redraw the screen in place), `clear` |
+| Games in a window | `window window_open frame fill rect circle line pixel label sprite held pressed mouse screenshot` |
 | Other | `kind clock now check fail` |
 
 ## Speed
@@ -651,6 +708,7 @@ Things to know:
 | `src/interp.rs` | Values, indexing, and the fallback evaluator for rarer constructs |
 | `src/tensor.rs` | Tensors, broadcasting, reverse-mode autodiff, SGD and Adam |
 | `src/builtins.rs` | The built-in functions |
+| `src/gfx.rs` | Games in a window: drawing, the built-in font, PNG screenshots, and the Windows window and its keyboard and mouse |
 | `src/llm.rs`, `src/json.rs` | Model calls and JSON |
 
 ## A real program: a chess engine
@@ -666,7 +724,7 @@ the original C++ generic build.
 
 This is version 0.6. Not there yet: giving a value to a slice
 (`v[1:3] = 0`), tools and multi-turn chat for models, model providers other
-than Anthropic, and GPU support.
+than Anthropic, GPU support, and game windows on macOS and Linux.
 
 ## Rebuilding the documentation
 

@@ -34,14 +34,18 @@ fn report(session: &Session, src: &str, msg: &str, line: u32) {
         Some((name, text)) => (text, format!(" of {}", name)),
         None => (src, String::new()),
     };
+    let mut told = if line > 0 { format!("Problem on line {}{}: {}", line, place, msg) } else { format!("Problem: {}", msg) };
+    eprintln!("{}", told);
     if line > 0 {
-        eprintln!("Problem on line {}{}: {}", line, place, msg);
         if let Some(text) = src.lines().nth(line as usize - 1) {
             eprintln!("  {:>4} | {}", line, text.trim_end());
+            told = format!("{}
+
+  {:>4} | {}", told, line, text.trim_end());
         }
-    } else {
-        eprintln!("Problem: {}", msg);
     }
+    // a game whose console was hidden shows the problem in a message box
+    antares::gfx::tell_problem(&told);
 }
 
 fn run_file(path: &str) -> i32 {
