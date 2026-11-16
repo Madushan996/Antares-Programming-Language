@@ -38,7 +38,7 @@ show count + 1
 
 ## About this manual
 
-This manual describes **Antares 0.11.0**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
+This manual describes **Antares 0.11.1**. Chapters 2 to 9 cover the core language: values, operators, control flow, functions, errors and modules. Chapters 10 to 15 cover what makes Antares different: tensors, learning, language models and agents, integers, files, commands and the web, and games in the terminal and in a window, with sound. Chapter 16 explains performance and the native compiler. Chapter 17 is a complete reference of built-in functions, and the appendices give a grammar summary and complete example programs.
 
 Code is shown in boxes like this. Output is shown in a lighter box underneath where it helps:
 
@@ -95,7 +95,7 @@ antares examples/hello.ant
 Run `antares` with no file to get an interactive session (a REPL). Type a line and press Enter; the value of each expression is printed. If a line opens a bracket or brace that is not yet closed, the prompt changes from `>` to `.` and Antares keeps reading until it is balanced, so functions and loops can be typed over several lines. Type `exit` or `quit` to leave.
 
 ```session
-Antares 0.11.0 — type a line and press Enter. `exit` to leave.
+Antares 0.11.1 — type a line and press Enter. `exit` to leave.
 > v = [1, 2, 3]
 > v * 10
 [10, 20, 30]
@@ -1469,7 +1469,7 @@ A command that fails is not a problem for the program: look at `code`. The ends 
 |---|---|---|
 | `folder` | The folder to run the command in | the current folder |
 | `input` | Text sent to the command, as if typed | nothing (the command gets no input) |
-| `timeout` | Seconds before a command still running is stopped (its `code` is then -1) | 120 |
+| `timeout` | Seconds before a command still running is stopped, together with any programs it started, such as a game window (its `code` is then -1) | 120 |
 
 <!-- norun -->
 ```antares

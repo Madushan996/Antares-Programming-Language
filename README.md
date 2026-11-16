@@ -110,7 +110,7 @@ new one**, then check it works:
 antares version
 ```
 
-You should see `Antares 0.11.0`.
+You should see `Antares 0.11.1`.
 
 ### Option 2: download it yourself
 
@@ -719,7 +719,7 @@ ask coder "Run the tests and fix what fails."
 ```
 
 `shell(command, {folder, input, timeout})` runs a command (in `cmd` on Windows,
-`sh` elsewhere). `fetch(url, {query, method, headers, body, timeout})` gets
+`sh` elsewhere); at the timeout it is stopped with everything it started. `fetch(url, {query, method, headers, body, timeout})` gets
 anything from the web as text; `page_text` and `page_links` take a page apart,
 and `read_page` fetches a page as text in one step. `shell`, `read_page`,
 `fetch`, `read`, `write` and `files` can be tools just as they are. Before a

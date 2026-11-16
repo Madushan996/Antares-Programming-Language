@@ -74,14 +74,30 @@ fn shell_command(command: &str) -> Command {
     }
     #[cfg(not(windows))]
     {
+        use std::os::unix::process::CommandExt;
         let mut c = Command::new("sh");
         c.arg("-c").arg(command);
+        // its own process group, so a timeout can stop everything it started
+        c.process_group(0);
         c
     }
 }
 
+/// Stops a command and every program it started (a game window, a server,
+/// a test runner's workers), not just the shell running it.
+fn stop_tree(child: &mut std::process::Child) {
+    let pid = child.id().to_string();
+    #[cfg(windows)]
+    let _ = Command::new("taskkill").args(["/T", "/F", "/PID", &pid]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    #[cfg(not(windows))]
+    let _ = Command::new("kill").args(["-KILL", &format!("-{}", pid)]).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Runs a command, giving (output, errors, exit code). A command still running
-/// after `timeout` seconds is stopped, with code -1.
+/// after `timeout` seconds is stopped, along with everything it started, with
+/// code -1.
 pub fn run_command(command: &str, folder: Option<&str>, input: Option<&str>, timeout: f64) -> Result<(String, String, i64), String> {
     let mut c = shell_command(command);
     if let Some(f) = folder {
@@ -117,8 +133,7 @@ pub fn run_command(command: &str, folder: Option<&str>, input: Option<&str>, tim
         match child.try_wait().map_err(|e| format!("couldn't run the command: {}", e))? {
             Some(status) => break status.code().unwrap_or(-1) as i64,
             None if start.elapsed().as_secs_f64() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
+                stop_tree(&mut child);
                 stopped = true;
                 break -1;
             }
@@ -704,5 +719,24 @@ Text.");
         let cat = if cfg!(windows) { "findstr x" } else { "grep x" };
         let (out, _, _) = run_command(cat, None, Some("axe\nbee\nfox\n"), 30.0).unwrap();
         assert_eq!(out.replace('\r', "").trim(), "axe\nfox");
+    }
+
+    #[test]
+    fn a_timeout_stops_what_the_command_started() {
+        // a program started by the command writes a file after 3 seconds,
+        // unless the timeout stops it too
+        let file = std::env::temp_dir().join(format!("antares_tree_{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let f = file.to_string_lossy().to_string();
+        let command = if cfg!(windows) {
+            format!("cmd /C \"ping -n 4 127.0.0.1 >nul & echo late> \"{}\"\"", f)
+        } else {
+            format!("(sleep 3; echo late > '{}') & wait", f)
+        };
+        let (_, errors, code) = run_command(&command, None, None, 0.5).unwrap();
+        assert_eq!(code, -1);
+        assert!(errors.contains("stopped after 0.5 seconds"));
+        std::thread::sleep(Duration::from_secs(5));
+        assert!(!file.exists(), "a program the command started kept running after the timeout");
     }
 }
