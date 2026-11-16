@@ -63,7 +63,7 @@ Each chapter ends with **Try it yourself** exercises. Do them! The answers are i
 
 ## Which version this book covers
 
-This book covers **Antares 0.7.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.7.0.
+This book covers **Antares 0.8.0**, released in November 2026. Everything in it also works in later versions. Appendix A describes what changed in each version, from 0.1.0 to 0.8.0.
 
 ## Summary
 
@@ -99,7 +99,7 @@ antares version
 ```
 
 ```output
-Antares 0.7.0
+Antares 0.8.0
 ```
 
 If you see a version number, Antares is installed. You can also download Antares by hand from the project's page on GitHub, github.com/Madushan996/Antares-Programming-Language, under **Releases**.
@@ -182,7 +182,7 @@ This book shows programs and what they print, so the examples work the same way 
 Sometimes you just want to try something quickly. Run `antares` on its own, with no file name, and you get the **interactive mode**: you type a line, press Enter, and Antares answers straight away.
 
 ```session
-Antares 0.7.0 — type a line and press Enter. `exit` to leave.
+Antares 0.8.0 — type a line and press Enter. `exit` to leave.
 > 2 + 3
 5
 > 10 * 7
@@ -3349,6 +3349,7 @@ Antares follows a simple rule: a new version never changes what an existing prog
 | 0.5.0 | 15 Nov 2026 | Everyday features: `+=`, the command line, laying out numbers, editing lists, the date and time, and files. |
 | 0.6.0 | 15 Nov 2026 | `antares build` works without Rust: programs to share are packed with Antares when Rust isn't installed. |
 | 0.7.0 | 16 Nov 2026 | Games in a window, with sound: drawing, the keyboard and mouse, sound effects, tunes and music (Windows). |
+| 0.8.0 | 16 Nov 2026 | The AI language: deep learning building blocks, faster training, and models that remember, use tools and answer in shapes. |
 
 ## Version 0.1.0: the first release
 
@@ -3483,6 +3484,16 @@ Antares can make real games now (Chapter 19). On Windows, a program can open a w
 That makes 122 built-in functions. `key()` and `wait()` work in a window too, and the `examples` folder has a new game, `catch.ant`: catch the falling stars and dodge the rocks.
 
 A game built with `antares build` opens just its window when you double-click it, and `--embed` packs its sound files inside. On macOS and Linux, windows aren't available yet and sounds are silent. Programs print exactly what they printed before; if one of yours already used a name like `line` or `sound` for a variable, it still works.
+
+## Version 0.8.0: the AI language
+
+Antares became a language made for artificial intelligence, in both halves: training your own models, and using big ones.
+
+**Training (Chapter 15):** `cross_entropy` for choosing between classes, with `accuracy` to check; the activations `gelu`, `silu`, `softplus` and `leaky_relu`; the building blocks of transformers (`take`, `concat`, `layer_norm`, `dropout`, `causal_mask`); starting weights with `he` and `xavier`; `top` and `sample` for reading results and writing text; and `read_csv`, `columns`, `shuffle` and `batches` for data. `descend` learned `using adamw`, `using momentum` and `clip`. Big matrix sums now use every core of the computer, with exactly the same results.
+
+**AI models (Chapter 16):** answers with a shape (`as {name: text, age: number}`), conversations that remember (`conversation`, `history`), tools that let a model call your functions, pictures (`with image(...)`), replies that appear as they are written (`stream: yes`), OpenAI and free local models with Ollama as well as Claude, and embeddings (`embed`, `similarity`) for finding text by meaning.
+
+That makes 149 built-in functions. The `examples` folder has five new programs, among them `tiny_gpt.ant`, a small transformer that learns to write. Programs print exactly what they printed before.
 
 # Answers to the Exercises {#answers .appendix}
 
