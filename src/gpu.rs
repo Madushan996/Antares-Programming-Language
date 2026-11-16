@@ -15,17 +15,58 @@
 //! macOS and Linux have no GPU support yet: `available()` is `None` there.
 
 #[cfg(windows)]
-pub use win::{available, matmul};
+pub use win::{available, binary, download, matmul, matmul_bufs, unary, upload, Buf};
 
 #[cfg(not(windows))]
-pub fn available() -> Option<String> {
-    None
+pub use none::*;
+
+/// Without GPU support, nothing ever reaches the GPU.
+#[cfg(not(windows))]
+mod none {
+    const NO: &str = "the GPU isn't available on this computer";
+
+    /// Numbers on the GPU (there are never any here).
+    #[derive(Clone)]
+    pub struct Buf(());
+
+    pub fn available() -> Option<String> {
+        None
+    }
+    pub fn matmul(_: &[f64], _: &[f64], _: usize, _: usize, _: usize) -> Result<Vec<f64>, String> {
+        Err(NO.into())
+    }
+    pub fn upload(_: &[f64]) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    pub fn download(_: &Buf, _: usize) -> Result<Vec<f64>, String> {
+        Err(NO.into())
+    }
+    pub fn matmul_bufs(_: &Buf, _: &Buf, _: usize, _: usize, _: usize, _: bool, _: bool) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    pub fn binary(_: u32, _: u32, _: &Buf, _: &Buf, _: usize, _: usize) -> Result<Buf, String> {
+        Err(NO.into())
+    }
+    pub fn unary(_: u32, _: &Buf, _: usize) -> Result<Buf, String> {
+        Err(NO.into())
+    }
 }
 
-#[cfg(not(windows))]
-pub fn matmul(_: &[f64], _: &[f64], _: usize, _: usize, _: usize) -> Result<Vec<f64>, String> {
-    Err("the GPU isn't available on this computer".into())
-}
+/// Two-input operations, by number: + - * / ^ and %.
+pub const ADD: u32 = 0;
+pub const SUB: u32 = 1;
+pub const MUL: u32 = 2;
+pub const DIV: u32 = 3;
+pub const POW: u32 = 4;
+pub const MOD: u32 = 5;
+
+/// How the second (or first) input of a two-input operation lines up:
+/// the same shape, a single number, or a row repeated for every row.
+pub const SAME: u32 = 0;
+pub const B_ONE: u32 = 1;
+pub const A_ONE: u32 = 2;
+pub const B_ROW: u32 = 3;
+pub const A_ROW: u32 = 4;
 
 /// gpu(): the name of the graphics card Antares would use, or nothing.
 pub fn b_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> Result<crate::value::Value, String> {
@@ -52,16 +93,19 @@ pub fn b_use_gpu(_: &mut crate::interp::Interp, a: Vec<crate::value::Value>) -> 
 
 /// The matrix-multiply shader: each group of 16 x 16 threads works out a
 /// 16 x 16 tile of the result, reading tiles of A and B into fast shared
-/// memory once instead of every thread reading them separately.
+/// memory once instead of every thread reading them separately. FLAGS
+/// reads A (bit 1) or B (bit 2) as if flipped, so gradients need no copies.
 #[cfg_attr(not(windows), allow(dead_code))]
 const MATMUL_HLSL: &str = r#"
-cbuffer Dims : register(b0) { uint M; uint N; uint P; uint pad; };
+cbuffer Dims : register(b0) { uint M; uint N; uint P; uint FLAGS; uint4 unused; };
 StructuredBuffer<float> A : register(t0);
 StructuredBuffer<float> B : register(t1);
 RWStructuredBuffer<float> C : register(u0);
 #define T 16
 groupshared float As[T][T];
 groupshared float Bs[T][T];
+float a_at(uint i, uint k) { return (FLAGS & 1) ? A[k * M + i] : A[i * N + k]; }
+float b_at(uint k, uint j) { return (FLAGS & 2) ? B[j * N + k] : B[k * P + j]; }
 [numthreads(T, T, 1)]
 void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
     uint row = g.y * T + t.y;
@@ -70,8 +114,8 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
     for (uint k0 = 0; k0 < N; k0 += T) {
         uint ka = k0 + t.x;
         uint kb = k0 + t.y;
-        As[t.y][t.x] = (row < M && ka < N) ? A[row * N + ka] : 0;
-        Bs[t.y][t.x] = (kb < N && col < P) ? B[kb * P + col] : 0;
+        As[t.y][t.x] = (row < M && ka < N) ? a_at(row, ka) : 0;
+        Bs[t.y][t.x] = (kb < N && col < P) ? b_at(kb, col) : 0;
         GroupMemoryBarrierWithGroupSync();
         [unroll] for (uint k = 0; k < T; k++) acc += As[t.y][k] * Bs[k][t.x];
         GroupMemoryBarrierWithGroupSync();
@@ -80,9 +124,76 @@ void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
 }
 "#;
 
+/// Element by element: two inputs (+ - * / ^ %), lined up as MODE says.
+/// Threads are numbered across up to 65535 groups in x, then rows in y.
+#[cfg_attr(not(windows), allow(dead_code))]
+const BINARY_HLSL: &str = r#"
+cbuffer C : register(b0) { uint OP; uint MODE; uint N; uint INNER; uint GX; uint3 unused; };
+StructuredBuffer<float> A : register(t0);
+StructuredBuffer<float> B : register(t1);
+RWStructuredBuffer<float> O : register(u0);
+float power(float a, float b) {
+    if (b == 2) return a * a;
+    float r = pow(abs(a), b);
+    if (a < 0) {
+        if (frac(b) != 0) return asfloat(0x7fc00000);
+        if (fmod(abs(b), 2) == 1) r = -r;
+    }
+    if (a == 0 && b == 0) r = 1;
+    return r;
+}
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint i = (g.y * GX + g.x) * 256 + t.x;
+    if (i >= N) return;
+    float a = (MODE == 2) ? A[0] : (MODE == 4) ? A[i % INNER] : A[i];
+    float b = (MODE == 1) ? B[0] : (MODE == 3) ? B[i % INNER] : B[i];
+    float r;
+    if (OP == 0) r = a + b;
+    else if (OP == 1) r = a - b;
+    else if (OP == 2) r = a * b;
+    else if (OP == 3) r = a / b;
+    else if (OP == 4) r = power(a, b);
+    else { r = fmod(a, b); if (r < 0) r += abs(b); }
+    O[i] = r;
+}
+"#;
+
+/// Element by element: one input through a function (the numbers match
+/// the order of UFn in tensor.rs, then 13 for minus).
+#[cfg_attr(not(windows), allow(dead_code))]
+const UNARY_HLSL: &str = r#"
+cbuffer C : register(b0) { uint OP; uint MODE; uint N; uint INNER; uint GX; uint3 unused; };
+StructuredBuffer<float> A : register(t0);
+RWStructuredBuffer<float> O : register(u0);
+float safe_tanh(float x) { return 1 - 2 / (exp(2 * x) + 1); }
+[numthreads(256, 1, 1)]
+void main(uint3 g : SV_GroupID, uint3 t : SV_GroupThreadID) {
+    uint i = (g.y * GX + g.x) * 256 + t.x;
+    if (i >= N) return;
+    float x = A[i];
+    float r;
+    if (OP == 0) r = exp(x);
+    else if (OP == 1) r = log(x);
+    else if (OP == 2) r = safe_tanh(x);
+    else if (OP == 3) r = 1 / (1 + exp(-x));
+    else if (OP == 4) r = max(x, 0);
+    else if (OP == 5) r = sqrt(x);
+    else if (OP == 6) r = abs(x);
+    else if (OP == 7) r = sin(x);
+    else if (OP == 8) r = cos(x);
+    else if (OP == 9) r = 0.5 * x * (1 + safe_tanh(0.7978845608 * (x + 0.044715 * x * x * x)));
+    else if (OP == 10) r = x / (1 + exp(-x));
+    else if (OP == 11) r = (x > 30) ? x : log(1 + exp(x));
+    else if (OP == 12) r = (x > 0) ? x : 0.01 * x;
+    else r = -x;
+    O[i] = r;
+}
+"#;
+
 #[cfg(windows)]
 mod win {
-    use super::MATMUL_HLSL;
+    use super::{BINARY_HLSL, MATMUL_HLSL, UNARY_HLSL};
     use std::cell::RefCell;
     use std::ffi::c_void;
 
@@ -178,7 +289,19 @@ mod win {
         context: Com,
         compile: CompileFn,
         matmul: Com,
+        binary: Com,
+        unary: Com,
     }
+
+    struct BufInner {
+        buf: Com,
+        srv: Com,
+        uav: Com,
+    }
+
+    /// Numbers on the GPU, shared between the tensors that use them.
+    #[derive(Clone)]
+    pub struct Buf(std::rc::Rc<BufInner>);
 
     thread_local! {
         /// The GPU, set up the first time it is asked for (None: there isn't one).
@@ -250,8 +373,11 @@ mod win {
             return None;
         }
         let (device, context) = (Com(device), Com(context));
-        let mut g = Gpu { name, device, context, compile, matmul: Com(std::ptr::null_mut()) };
+        let null = || Com(std::ptr::null_mut());
+        let mut g = Gpu { name, device, context, compile, matmul: null(), binary: null(), unary: null() };
         g.matmul = g.shader(MATMUL_HLSL).ok()?;
+        g.binary = g.shader(BINARY_HLSL).ok()?;
+        g.unary = g.shader(UNARY_HLSL).ok()?;
         Some(g)
     }
 
@@ -288,35 +414,41 @@ mod win {
             Ok(Com(buf))
         }
 
-        /// Numbers for the GPU to read.
-        fn input(&self, xs: &[f32]) -> Result<(Com, Com), String> {
-            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast(), xs.len().max(1) * 4) };
-            let pad = [0u8; 4];
-            let init = if xs.is_empty() { &pad[..] } else { bytes };
-            let buf = self.buffer(BufferDesc { byte_width: init.len() as u32, usage: USAGE_DEFAULT, bind_flags: BIND_SHADER_RESOURCE, cpu_access: 0, misc: MISC_STRUCTURED, stride: 4 }, Some(init))?;
-            let create: unsafe extern "system" fn(Ptr, Ptr, *const c_void, *mut Ptr) -> HResult = unsafe { method(self.device.0, 7) };
-            let mut view: Ptr = std::ptr::null_mut();
-            if unsafe { create(self.device.0, buf.0, std::ptr::null(), &mut view) } < 0 {
-                return Err("the GPU couldn't read the numbers".into());
-            }
-            Ok((buf, Com(view)))
-        }
-
-        /// Room for `n` numbers for the GPU to write.
-        fn output(&self, n: usize) -> Result<(Com, Com), String> {
-            let buf = self.buffer(BufferDesc { byte_width: (n.max(1) * 4) as u32, usage: USAGE_DEFAULT, bind_flags: BIND_UNORDERED_ACCESS, cpu_access: 0, misc: MISC_STRUCTURED, stride: 4 }, None)?;
-            let create: unsafe extern "system" fn(Ptr, Ptr, *const c_void, *mut Ptr) -> HResult = unsafe { method(self.device.0, 8) };
-            let mut view: Ptr = std::ptr::null_mut();
-            if unsafe { create(self.device.0, buf.0, std::ptr::null(), &mut view) } < 0 {
-                return Err("the GPU couldn't write the numbers".into());
-            }
-            Ok((buf, Com(view)))
-        }
-
         /// Small numbers every thread can see (a constant buffer).
-        fn constants(&self, words: [u32; 4]) -> Result<Com, String> {
-            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), 16) };
-            self.buffer(BufferDesc { byte_width: 16, usage: USAGE_DEFAULT, bind_flags: BIND_CONSTANT, cpu_access: 0, misc: 0, stride: 0 }, Some(bytes))
+        fn constants(&self, words: [u32; 8]) -> Result<Com, String> {
+            let bytes: &[u8] = unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), 32) };
+            self.buffer(BufferDesc { byte_width: 32, usage: USAGE_DEFAULT, bind_flags: BIND_CONSTANT, cpu_access: 0, misc: 0, stride: 0 }, Some(bytes))
+        }
+
+        /// Room for `n` numbers that shaders can write and later read,
+        /// starting with `init` if given.
+        fn rw(&self, n: usize, init: Option<&[f32]>) -> Result<Buf, String> {
+            let bytes = init.map(|xs| unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<u8>(), xs.len() * 4) });
+            let size = (n.max(1) * 4) as u32;
+            let pad;
+            let init = match bytes {
+                Some(b) if b.len() == size as usize => Some(b),
+                Some(b) => {
+                    pad = { let mut v = b.to_vec(); v.resize(size as usize, 0); v };
+                    Some(&pad[..])
+                }
+                None => None,
+            };
+            let buf = self.buffer(BufferDesc { byte_width: size, usage: USAGE_DEFAULT, bind_flags: BIND_SHADER_RESOURCE | BIND_UNORDERED_ACCESS, cpu_access: 0, misc: MISC_STRUCTURED, stride: 4 }, init)?;
+            let srv_of: unsafe extern "system" fn(Ptr, Ptr, *const c_void, *mut Ptr) -> HResult = unsafe { method(self.device.0, 7) };
+            let uav_of: unsafe extern "system" fn(Ptr, Ptr, *const c_void, *mut Ptr) -> HResult = unsafe { method(self.device.0, 8) };
+            let (mut srv, mut uav): (Ptr, Ptr) = (std::ptr::null_mut(), std::ptr::null_mut());
+            if unsafe { srv_of(self.device.0, buf.0, std::ptr::null(), &mut srv) } < 0 || unsafe { uav_of(self.device.0, buf.0, std::ptr::null(), &mut uav) } < 0 {
+                return Err("the GPU couldn't make room for the numbers".into());
+            }
+            Ok(Buf(std::rc::Rc::new(BufInner { buf, srv: Com(srv), uav: Com(uav) })))
+        }
+
+        /// Groups of 256 threads covering n numbers: up to 65535 across, then rows.
+        fn spread(n: usize) -> (u32, u32) {
+            let groups = n.div_ceil(256).max(1);
+            let gx = groups.min(65535);
+            (gx as u32, groups.div_ceil(gx) as u32)
         }
 
         /// Runs `shader` with these inputs and outputs, in (x, y, z) groups.
@@ -384,20 +516,65 @@ mod win {
         with_gpu(|g| g.name.clone())
     }
 
-    /// The m x n matrix `a` times the n x p matrix `b`, worked out on the
-    /// GPU in 32-bit numbers.
-    pub fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Result<Vec<f64>, String> {
+    const NO_GPU: &str = "the GPU isn't available on this computer";
+
+    /// Numbers sent to the GPU (as 32-bit numbers).
+    pub fn upload(xs: &[f64]) -> Result<Buf, String> {
         with_gpu(|g| {
-            let fa: Vec<f32> = a.iter().map(|&x| x as f32).collect();
-            let fb: Vec<f32> = b.iter().map(|&x| x as f32).collect();
-            let (_ab, av) = g.input(&fa)?;
-            let (_bb, bv) = g.input(&fb)?;
-            let (cb, cv) = g.output(m * p)?;
-            let consts = g.constants([m as u32, n as u32, p as u32, 0])?;
-            g.run(&g.matmul, &consts, &[&av, &bv], &[&cv], (p.div_ceil(16) as u32, m.div_ceil(16) as u32, 1));
-            Ok(g.read(&cb, m * p)?.into_iter().map(|x| x as f64).collect())
+            let f: Vec<f32> = xs.iter().map(|&x| x as f32).collect();
+            g.rw(xs.len(), Some(&f))
         })
-        .unwrap_or_else(|| Err("the GPU isn't available on this computer".into()))
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The first `n` numbers of a GPU buffer, brought back.
+    pub fn download(b: &Buf, n: usize) -> Result<Vec<f64>, String> {
+        with_gpu(|g| Ok(g.read(&b.0.buf, n)?.into_iter().map(|x| x as f64).collect())).unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The m x n matrix `a` times the n x p matrix `b`, both already on the
+    /// GPU, with the answer left there. `ta` / `tb`: the buffer holds that
+    /// matrix flipped (n x m, or p x n).
+    pub fn matmul_bufs(a: &Buf, b: &Buf, m: usize, n: usize, p: usize, ta: bool, tb: bool) -> Result<Buf, String> {
+        with_gpu(|g| {
+            let out = g.rw(m * p, None)?;
+            let consts = g.constants([m as u32, n as u32, p as u32, ta as u32 | (tb as u32) << 1, 0, 0, 0, 0])?;
+            g.run(&g.matmul, &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (p.div_ceil(16) as u32, m.div_ceil(16) as u32, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// `n` results of a two-input operation (see ADD.. and SAME.. in gpu.rs);
+    /// `inner` is the length of a repeated row.
+    pub fn binary(op: u32, mode: u32, a: &Buf, b: &Buf, n: usize, inner: usize) -> Result<Buf, String> {
+        with_gpu(|g| {
+            let out = g.rw(n, None)?;
+            let (gx, gy) = Gpu::spread(n);
+            let consts = g.constants([op, mode, n as u32, inner.max(1) as u32, gx, 0, 0, 0])?;
+            g.run(&g.binary, &consts, &[&a.0.srv, &b.0.srv], &[&out.0.uav], (gx, gy, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// `n` results of a one-input function (numbered as in UNARY_HLSL).
+    pub fn unary(op: u32, a: &Buf, n: usize) -> Result<Buf, String> {
+        with_gpu(|g| {
+            let out = g.rw(n, None)?;
+            let (gx, gy) = Gpu::spread(n);
+            let consts = g.constants([op, 0, n as u32, 1, gx, 0, 0, 0])?;
+            g.run(&g.unary, &consts, &[&a.0.srv], &[&out.0.uav], (gx, gy, 1));
+            Ok(out)
+        })
+        .unwrap_or_else(|| Err(NO_GPU.into()))
+    }
+
+    /// The m x n matrix `a` times the n x p matrix `b`, worked out on the
+    /// GPU in 32-bit numbers (sent there and brought back).
+    pub fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Result<Vec<f64>, String> {
+        let (ab, bb) = (upload(a)?, upload(b)?);
+        download(&matmul_bufs(&ab, &bb, m, n, p, false, false)?, m * p)
     }
 
     #[cfg(test)]
@@ -413,7 +590,7 @@ mod win {
             for &n in &[128usize, 256, 512, 1024, 1536] {
                 let a = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 17) as f64 / 17.0).collect());
                 let b = crate::tensor::new(vec![n, n], (0..n * n).map(|i| (i % 13) as f64 / 13.0).collect());
-                let _ = matmul(&a.data.borrow(), &b.data.borrow(), n, n, n); // warm up
+                let _ = matmul(&a.vals(), &b.vals(), n, n, n); // warm up
                 let reps = if n <= 512 { 5 } else { 2 };
                 let t = std::time::Instant::now();
                 for _ in 0..reps {
@@ -422,10 +599,64 @@ mod win {
                 let cpu = t.elapsed().as_secs_f64() / reps as f64;
                 let t = std::time::Instant::now();
                 for _ in 0..reps {
-                    let _ = matmul(&a.data.borrow(), &b.data.borrow(), n, n, n).unwrap();
+                    let _ = matmul(&a.vals(), &b.vals(), n, n, n).unwrap();
                 }
                 let gpu = t.elapsed().as_secs_f64() / reps as f64;
                 println!("{0} x {0}: CPU {1:.1} ms, GPU {2:.1} ms (with copying), {3:.1}x", n, cpu * 1e3, gpu * 1e3, cpu / gpu);
+            }
+        }
+
+        #[test]
+        fn element_wise_operations_match_the_cpu() {
+            if available().is_none() {
+                return;
+            }
+            let xs: Vec<f64> = (0..1000).map(|i| (i as f64 - 500.0) / 97.0).collect();
+            let ys: Vec<f64> = (0..1000).map(|i| ((i * 7 % 23) as f64 - 11.0) / 5.0 + 0.1).collect();
+            let (a, b) = (upload(&xs).unwrap(), upload(&ys).unwrap());
+            let row = upload(&ys[..10]).unwrap();
+            let one = upload(&[3.0]).unwrap();
+            let close = |g: f64, w: f64| (g - w).abs() <= 1e-4 * (1.0 + w.abs()) || (g.is_nan() && w.is_nan());
+            for (op, f) in [(super::super::ADD, (|x: f64, y: f64| x + y) as fn(f64, f64) -> f64), (super::super::SUB, |x, y| x - y), (super::super::MUL, |x, y| x * y), (super::super::DIV, |x, y| x / y), (super::super::MOD, |x: f64, y: f64| x.rem_euclid(y))] {
+                let got = download(&binary(op, super::super::SAME, &a, &b, 1000, 1000).unwrap(), 1000).unwrap();
+                for i in 0..1000 {
+                    assert!(close(got[i], f(xs[i], ys[i])), "op {} at {}: {} vs {}", op, i, got[i], f(xs[i], ys[i]));
+                }
+                let got = download(&binary(op, super::super::B_ROW, &a, &row, 1000, 10).unwrap(), 1000).unwrap();
+                assert!(close(got[37], f(xs[37], ys[7])));
+                let got = download(&binary(op, super::super::B_ONE, &a, &one, 1000, 1).unwrap(), 1000).unwrap();
+                assert!(close(got[5], f(xs[5], 3.0)));
+            }
+            // powers of negative numbers, as the CPU does them
+            let got = download(&binary(super::super::POW, super::super::B_ONE, &a, &upload(&[2.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
+            assert!(close(got[0], xs[0] * xs[0]));
+            let got = download(&binary(super::super::POW, super::super::B_ONE, &a, &upload(&[3.0]).unwrap(), 1000, 1).unwrap(), 1000).unwrap();
+            assert!(close(got[0], xs[0].powi(3)));
+            use crate::tensor::UFn::*;
+            for (op, u) in [Exp, Log, Tanh, Sigmoid, Relu, Sqrt, Abs, Sin, Cos, Gelu, Silu, Softplus, LeakyRelu].into_iter().enumerate() {
+                let got = download(&unary(op as u32, &a, 1000).unwrap(), 1000).unwrap();
+                for i in (0..1000).step_by(7) {
+                    let want = crate::tensor::apply(u, xs[i]);
+                    assert!(close(got[i], want) || (want.is_nan() && got[i].is_nan()) || (want.is_infinite() && got[i].is_infinite()), "unary {} at x = {}: {} vs {}", op, xs[i], got[i], want);
+                }
+            }
+        }
+
+        #[test]
+        fn matmul_with_flipped_inputs() {
+            if available().is_none() {
+                return;
+            }
+            let (m, n, p) = (19, 23, 17);
+            let a: Vec<f64> = (0..m * n).map(|i| (i % 7) as f64 - 3.0).collect();
+            let b: Vec<f64> = (0..n * p).map(|i| (i % 5) as f64 - 2.0).collect();
+            let flip = |x: &[f64], r: usize, c: usize| (0..r * c).map(|k| x[(k % r) * c + k / r]).collect::<Vec<f64>>();
+            let want = matmul(&a, &b, m, n, p).unwrap();
+            let at = upload(&flip(&a, m, n)).unwrap();
+            let bt = upload(&flip(&b, n, p)).unwrap();
+            let got = download(&matmul_bufs(&at, &bt, m, n, p, true, true).unwrap(), m * p).unwrap();
+            for i in 0..m * p {
+                assert!((got[i] - want[i]).abs() < 1e-3, "{} vs {}", got[i], want[i]);
             }
         }
 

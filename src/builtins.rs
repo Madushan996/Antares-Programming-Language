@@ -72,7 +72,7 @@ pub(crate) fn s(x: impl AsRef<str>) -> Value {
 
 fn dims(a: &[Value], name: &str) -> Result<Vec<usize>, String> {
     let vals: Vec<f64> = match a {
-        [Value::Tensor(t)] if t.shape.len() == 1 => t.data.borrow().clone(),
+        [Value::Tensor(t)] if t.shape.len() == 1 => t.vals().clone(),
         _ => {
             let mut v = vec![];
             for x in a {
@@ -110,7 +110,7 @@ fn unary(a: Vec<Value>, name: &str, f: UFn) -> Res {
 fn elementwise(a: Vec<Value>, name: &str, f: fn(f64) -> f64) -> Res {
     want(&a, 1, name)?;
     let t = ten(&a[0], name)?;
-    let d: Vec<f64> = t.data.borrow().iter().map(|x| f(*x)).collect();
+    let d: Vec<f64> = t.vals().iter().map(|x| f(*x)).collect();
     Ok(wrap(tensor::new(t.shape.clone(), d)))
 }
 
@@ -227,7 +227,7 @@ fn extreme(a: Vec<Value>, name: &str, better: fn(f64, f64) -> bool) -> Res {
     let mut best: Option<f64> = None;
     for v in &a {
         let t = ten(v, name)?;
-        for &x in t.data.borrow().iter() {
+        for &x in t.vals().iter() {
             if best.map_or(true, |b| better(x, b)) {
                 best = Some(x);
             }
@@ -331,12 +331,12 @@ fn b_argmax(_: &mut Interp, a: Vec<Value>) -> Res {
             return Err("argmax with a range needs a row of numbers".into());
         }
         let (first, last) = (num(&a[1], "argmax")?, num(&a[2], "argmax")?);
-        return Ok(Value::Num(argmax_range(&t.data.borrow(), first, last)?));
+        return Ok(Value::Num(argmax_range(&t.vals(), first, last)?));
     }
     want(&a, 1, "argmax")?;
     let t = ten(&a[0], "argmax")?;
     let d = t.shape.last().copied().unwrap_or(1).max(1);
-    let data = t.data.borrow();
+    let data = t.vals();
     let picks: Vec<f64> = data
         .chunks(d)
         .map(|row| {
@@ -357,7 +357,7 @@ fn b_onehot(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 2, "onehot")?;
     let labels = ten(&a[0], "onehot")?;
     let n = num(&a[1], "onehot")? as usize;
-    let ld = labels.data.borrow();
+    let ld = labels.vals();
     let mut data = vec![0.0; ld.len() * n];
     for (i, &l) in ld.iter().enumerate() {
         if l < 0.0 || l as usize >= n {
@@ -398,7 +398,7 @@ fn b_clip(_: &mut Interp, a: Vec<Value>) -> Res {
         return Err("clip can't be learned through; use relu or your own formula on `learn` values".into());
     }
     let (lo, hi) = (num(&a[1], "clip")?, num(&a[2], "clip")?);
-    let d: Vec<f64> = t.data.borrow().iter().map(|x| x.max(lo).min(hi)).collect();
+    let d: Vec<f64> = t.vals().iter().map(|x| x.max(lo).min(hi)).collect();
     Ok(wrap(tensor::new(t.shape.clone(), d)))
 }
 
@@ -413,12 +413,12 @@ fn b_sum_rows(_: &mut Interp, a: Vec<Value>) -> Res {
         return Err("sum_rows needs a matrix (rows and columns)".into());
     }
     let (n, h) = (m.shape[0], m.shape[1]);
-    let rd = rows.data.borrow();
+    let rd = rows.vals();
     let count = if a.len() == 3 { num(&a[2], "sum_rows")? as usize } else { rd.len() };
     if count > rd.len() {
         return Err(format!("sum_rows was asked for {} rows but only {} row numbers were given", count, rd.len()));
     }
-    let md = m.data.borrow();
+    let md = m.vals();
     let mut out = vec![0.0; h];
     for &r in &rd[..count] {
         if r < 0.0 || r as usize >= n {
@@ -443,7 +443,7 @@ fn b_compact(_: &mut Interp, a: Vec<Value>) -> Res {
         return Err("compact takes a row or matrix of numbers, and optionally the rows and columns to arrange it in".into());
     }
     let t = plain(&a[0], "compact")?;
-    let d = t.data.borrow();
+    let d = t.vals();
     let (rows, cols, matrix) = if a.len() == 3 {
         (num(&a[1], "compact")? as usize, num(&a[2], "compact")? as usize, true)
     } else {
@@ -471,7 +471,7 @@ fn b_expand(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 1, "expand")?;
     match &a[0] {
         Value::Packed(p) => {
-            let d: Vec<f64> = p.data.borrow().iter().map(|x| *x as f64).collect();
+            let d: Vec<f64> = p.vals().iter().map(|x| *x as f64).collect();
             let shape = if p.matrix { vec![p.rows, p.cols] } else { vec![p.cols] };
             Ok(Value::Tensor(tensor::new(shape, d)))
         }
@@ -485,7 +485,7 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
         return Err("update_rows needs a compact matrix whose rows are as long as the compact base row".into());
     }
     let h = m.cols;
-    let md = m.data.borrow();
+    let md = m.vals();
     let recycled: Option<Rc<Packed>> = match a.get(6) {
         Some(Value::Packed(t)) if !t.matrix && t.cols == h && Rc::strong_count(t) == 2 && !Rc::ptr_eq(t, base) => {
             Some(t.clone())
@@ -494,13 +494,13 @@ fn update_rows_packed(a: &[Value], base: &Rc<Packed>, m: &Rc<Packed>) -> Res {
     };
     let (adds, subs) = (ten(&a[2], "update_rows")?, ten(&a[4], "update_rows")?);
     let (n_add, n_sub) = (num(&a[3], "update_rows")?, num(&a[5], "update_rows")?);
-    let bd = base.data.borrow();
+    let bd = base.vals();
     let mut fresh_row: Vec<i16> = Vec::new();
     let mut held;
     let out: &mut [i16] = match &recycled {
         Some(t) => {
             t.max_abs.set(-1);
-            held = t.data.borrow_mut();
+            held = t.vals_mut();
             &mut held[..]
         }
         None => {
@@ -538,7 +538,7 @@ pub fn update_rows_into(
     let mut sub_rows: [MaybeUninit<&[i16]>; 32] = [const { MaybeUninit::uninit() }; 32];
     let (mut na, mut ns) = (0usize, 0usize);
     for (list, count, add) in [(adds, n_add, true), (subs, n_sub, false)] {
-        let rd = list.data.borrow();
+        let rd = list.vals();
         let count = count as usize;
         if count > rd.len() {
             return Err("update_rows was asked for more rows than row numbers were given".into());
@@ -689,7 +689,7 @@ pub fn max_abs(p: &Packed) -> i32 {
     if known >= 0 {
         return known;
     }
-    let m = p.data.borrow().iter().map(|x| (*x as i32).abs()).max().unwrap_or(0);
+    let m = p.vals().iter().map(|x| (*x as i32).abs()).max().unwrap_or(0);
     p.max_abs.set(m);
     m
 }
@@ -758,7 +758,7 @@ fn screlu_dot_plain(x: &[i16], w: &[i16], cap: i32) -> i64 {
 }
 
 fn screlu_dot_packed(x: &Packed, w: &Packed, cap: f64) -> Res {
-    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    let (xd, wd) = (x.vals(), w.vals());
     Ok(Value::Num(screlu_dot_rows(&xd, &wd, || max_abs(w), cap)?))
 }
 
@@ -795,7 +795,7 @@ fn row_max_abs(d: &[i16]) -> i32 {
 fn b_rows(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 1, "rows")?;
     if let Value::Packed(p) = &a[0] {
-        let d = p.data.borrow();
+        let d = p.vals();
         let out: Vec<Value> = d.chunks(p.cols.max(1)).map(|c| packed(c.to_vec(), 1, p.cols, false)).collect();
         return Ok(Value::List(Rc::new(out)));
     }
@@ -824,8 +824,7 @@ fn b_screlu(_: &mut Interp, a: Vec<Value>) -> Res {
     let t = plain(&a[0], "screlu")?;
     let cap = num(&a[1], "screlu")?;
     let d: Vec<f64> = t
-        .data
-        .borrow()
+        .vals()
         .iter()
         .map(|x| {
             let c = x.max(0.0).min(cap);
@@ -847,9 +846,9 @@ fn b_sum_product(_: &mut Interp, a: Vec<Value>) -> Res {
         return Err("sum_product needs rows of the same length".into());
     }
     let total = match &ts[..] {
-        [x] => x.data.borrow().iter().sum(),
+        [x] => x.vals().iter().sum(),
         [x, y] => {
-            let (x, y) = (x.data.borrow(), y.data.borrow());
+            let (x, y) = (x.vals(), y.vals());
             let mut lanes = [0.0f64; 8];
             let mut xc = x.chunks_exact(8);
             let mut yc = y.chunks_exact(8);
@@ -862,7 +861,7 @@ fn b_sum_product(_: &mut Interp, a: Vec<Value>) -> Res {
             lanes.iter().sum::<f64>() + rest
         }
         _ => {
-            let ds: Vec<_> = ts.iter().map(|t| t.data.borrow()).collect();
+            let ds: Vec<_> = ts.iter().map(|t| t.vals()).collect();
             let mut total = 0.0;
             for i in 0..n {
                 let mut p = 1.0;
@@ -895,7 +894,7 @@ pub fn screlu_dot_slice(a: &[Value]) -> Res {
     if x.len() != w.len() {
         return Err("screlu_dot needs two rows of the same length".into());
     }
-    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    let (xd, wd) = (x.vals(), w.vals());
     // Eight running totals, so the processor can work on eight numbers at once.
     let mut lanes = [0.0f64; 8];
     let mut xc = xd.chunks_exact(8);
@@ -935,7 +934,7 @@ pub fn update_rows_slice(a: &[Value]) -> Res {
         return Err("update_rows needs a matrix whose rows are as long as the base row".into());
     }
     let (n, h) = (m.shape[0], m.shape[1]);
-    let md = m.data.borrow();
+    let md = m.vals();
     // Reuse the old row when the only holders are the variable it came from and this call.
     let recycled: Option<T> = match a.get(6) {
         Some(Value::Tensor(t))
@@ -953,18 +952,18 @@ pub fn update_rows_slice(a: &[Value]) -> Res {
     let mut held;
     let out: &mut Vec<f64> = match &recycled {
         Some(t) => {
-            held = t.data.borrow_mut();
-            held.copy_from_slice(&base.data.borrow());
+            held = t.vals_mut();
+            held.copy_from_slice(&base.vals());
             &mut held
         }
         None => {
-            fresh_row = base.data.borrow().clone();
+            fresh_row = base.vals().clone();
             &mut fresh_row
         }
     };
     for (rows_arg, count_arg, sign) in [(&a[2], &a[3], 1.0), (&a[4], &a[5], -1.0)] {
         let rows = ten(rows_arg, "update_rows")?;
-        let rd = rows.data.borrow();
+        let rd = rows.vals();
         let count = num(count_arg, "update_rows")? as usize;
         if count > rd.len() {
             return Err("update_rows was asked for more rows than row numbers were given".into());
@@ -1072,8 +1071,8 @@ fn first_outside(v: &Value, bad: &dyn Fn(f64) -> bool) -> Result<Option<String>,
         Value::Int(i) => bad(*i as f64).then(|| i.to_string()),
         Value::Num(x) => bad(*x).then(|| fmt_num(*x)),
         Value::Ints(r) => r.iter().find(|&&i| bad(i as f64)).map(|i| i.to_string()),
-        Value::Tensor(t) => t.data.borrow().iter().find(|&&x| bad(x)).map(|x| fmt_num(*x)),
-        Value::Packed(p) => p.data.borrow().iter().find(|&&x| bad(x as f64)).map(|x| x.to_string()),
+        Value::Tensor(t) => t.vals().iter().find(|&&x| bad(x)).map(|x| fmt_num(*x)),
+        Value::Packed(p) => p.vals().iter().find(|&&x| bad(x as f64)).map(|x| x.to_string()),
         Value::List(items) => {
             for x in items.iter() {
                 if let Some(t) = first_outside(x, bad)? {
@@ -2192,7 +2191,7 @@ pub(crate) fn to_json(v: &Value) -> Result<String, String> {
         Value::Unset | Value::Nothing => "null".into(),
         Value::Bool(b) => b.to_string(),
         Value::Num(n) => json_num(*n),
-        Value::Tensor(t) => json_tensor(&t.shape, &t.data.borrow()),
+        Value::Tensor(t) => json_tensor(&t.shape, &t.vals()),
         Value::Str(st) => json::escape(st),
         Value::List(l) => {
             let mut parts = vec![];

@@ -297,7 +297,7 @@ pub fn index_value(base: &Value, idx: &[Value]) -> Result<Value, String> {
             if idx.len() != 1 {
                 return Err("compact numbers take one index: a row of a compact matrix, or a number of a compact row".into());
             }
-            let d = p.data.borrow();
+            let d = p.vals();
             if p.matrix {
                 // a row of a compact matrix (a copy, like any value read out)
                 let r = to_index(&idx[0], p.rows)?;
@@ -422,7 +422,7 @@ pub fn set_in(target: &mut Value, path: &[Key], v: Value) -> Result<(), String> 
             let (start, new): (usize, Vec<i16>) = if rc.matrix {
                 let r = to_index(idx, rc.rows)?;
                 match &v {
-                    Value::Packed(row) if !row.matrix && row.cols == rc.cols => (r * rc.cols, row.data.borrow().clone()),
+                    Value::Packed(row) if !row.matrix && row.cols == rc.cols => (r * rc.cols, row.vals().clone()),
                     Value::Packed(row) if !row.matrix => {
                         return Err(format!("a row of this compact matrix has {} numbers, not {}", rc.cols, row.cols))
                     }
@@ -445,7 +445,7 @@ pub fn set_in(target: &mut Value, path: &[Key], v: Value) -> Result<(), String> 
             // changed in place unless another variable shares it
             if Rc::strong_count(rc) != 1 {
                 let copy = crate::value::Packed {
-                    data: std::cell::RefCell::new(rc.data.borrow().clone()),
+                    data: std::cell::RefCell::new(rc.vals().clone()),
                     rows: rc.rows,
                     cols: rc.cols,
                     matrix: rc.matrix,
@@ -454,7 +454,7 @@ pub fn set_in(target: &mut Value, path: &[Key], v: Value) -> Result<(), String> 
                 *rc = Rc::new(copy);
             }
             rc.max_abs.set(-1);
-            rc.data.borrow_mut()[start..start + new.len()].copy_from_slice(&new);
+            rc.vals_mut()[start..start + new.len()].copy_from_slice(&new);
             Ok(())
         }
         Value::Ints(rc) => {
@@ -483,9 +483,9 @@ pub fn set_in(target: &mut Value, path: &[Key], v: Value) -> Result<(), String> 
                 off += j * size;
             }
             match Rc::get_mut(t) {
-                Some(node) => node.data.get_mut()[off] = x,
+                Some(node) => node.host_get_mut()[off] = x,
                 None => {
-                    let mut data = t.data.borrow().clone();
+                    let mut data = t.vals().clone();
                     data[off] = x;
                     *target = Value::Tensor(tensor::new(t.shape.clone(), data));
                 }
@@ -827,7 +827,7 @@ impl Interp {
                         )
                     }
                 };
-                let p = tensor::param(t.shape.clone(), t.data.borrow().clone());
+                let p = tensor::param(t.shape.clone(), t.vals().clone());
                 env.vars.borrow_mut()[*idx as usize] = Value::Tensor(p);
             }
             Stmt::SetPath { depth, idx, name, path, value, line } => {

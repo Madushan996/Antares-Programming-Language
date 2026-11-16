@@ -86,7 +86,14 @@ pub struct Adam {
 
 pub struct Node {
     pub shape: Vec<usize>,
-    pub data: RefCell<Vec<f64>>,
+    /// The numbers, in ordinary memory. Read them with `vals()` and change
+    /// them with `vals_mut()`: with `use gpu` they may live on the GPU.
+    host: RefCell<Vec<f64>>,
+    /// Whether `host` holds the numbers (it doesn't while they exist only
+    /// on the GPU).
+    host_ok: std::cell::Cell<bool>,
+    /// A copy of the numbers on the GPU, if any.
+    dev: RefCell<Option<crate::gpu::Buf>>,
     pub grad: RefCell<Vec<f64>>,
     pub requires: bool,
     pub op: Op,
@@ -95,7 +102,69 @@ pub struct Node {
 
 impl Node {
     pub fn len(&self) -> usize {
-        self.data.borrow().len()
+        self.shape.iter().product()
+    }
+
+    /// The numbers, brought back from the GPU first if they are only there.
+    pub fn vals(&self) -> std::cell::Ref<'_, Vec<f64>> {
+        if !self.host_ok.get() {
+            let back = self.dev.borrow().as_ref().map(|b| crate::gpu::download(b, self.len()));
+            match back {
+                Some(Ok(v)) => *self.host.borrow_mut() = v,
+                Some(Err(e)) => panic!("couldn't read numbers back from the GPU: {}", e),
+                None => panic!("a tensor lost its numbers"),
+            }
+            self.host_ok.set(true);
+        }
+        self.host.borrow()
+    }
+
+    /// The numbers, to change in place (any GPU copy is then out of date).
+    pub fn vals_mut(&self) -> std::cell::RefMut<'_, Vec<f64>> {
+        drop(self.vals());
+        *self.dev.borrow_mut() = None;
+        self.host.borrow_mut()
+    }
+
+    /// The GPU copy, uploading the numbers if there isn't one yet (it is
+    /// kept, so numbers used again aren't sent again).
+    pub fn on_gpu(&self) -> Result<crate::gpu::Buf, String> {
+        if let Some(b) = self.dev.borrow().as_ref() {
+            return Ok(b.clone());
+        }
+        let b = crate::gpu::upload(&self.vals())?;
+        *self.dev.borrow_mut() = Some(b.clone());
+        Ok(b)
+    }
+
+    /// The numbers as a raw pointer, for compiled loops that only read them.
+    #[inline(always)]
+    pub fn host_raw(&self) -> *mut Vec<f64> {
+        if !self.host_ok.get() {
+            drop(self.vals());
+        }
+        self.host.as_ptr()
+    }
+
+    /// The numbers as a raw pointer, for compiled code that changes them
+    /// (any GPU copy is then out of date).
+    #[inline(always)]
+    pub fn host_raw_mut(&self) -> *mut Vec<f64> {
+        if !self.host_ok.get() || unsafe { (*self.dev.as_ptr()).is_some() } {
+            drop(self.vals_mut());
+        }
+        self.host.as_ptr()
+    }
+
+    /// The numbers of a tensor nobody else holds, to change in place.
+    pub fn host_get_mut(&mut self) -> &mut Vec<f64> {
+        drop(self.vals_mut());
+        self.host.get_mut()
+    }
+
+    /// Whether the numbers are on the GPU already.
+    pub fn is_on_gpu(&self) -> bool {
+        self.dev.borrow().is_some()
     }
 
     fn parents(&self) -> Vec<&T> {
@@ -122,7 +191,9 @@ impl Node {
 fn make(shape: Vec<usize>, data: Vec<f64>, op: Op, requires: bool) -> T {
     Rc::new(Node {
         shape,
-        data: RefCell::new(data),
+        host: RefCell::new(data),
+        host_ok: std::cell::Cell::new(true),
+        dev: RefCell::new(None),
         grad: RefCell::new(Vec::new()),
         requires,
         op: if requires { op } else { Op::Leaf },
@@ -247,8 +318,8 @@ pub fn binary(k: BinK, a: &T, b: &T) -> Result<T, String> {
     let ma = bmap(&a.shape, &shape);
     let mb = bmap(&b.shape, &shape);
     let n: usize = shape.iter().product();
-    let ad = a.data.borrow();
-    let bd = b.data.borrow();
+    let ad = a.vals();
+    let bd = b.vals();
     let mut out = Vec::with_capacity(n);
     match (&ma, &mb) {
         (BMap::Same, BMap::Same) => {
@@ -369,7 +440,7 @@ fn mm(a: &[f64], b: &[f64], m: usize, n: usize, p: usize) -> Vec<f64> {
 
 pub fn matmul(a: &T, b: &T) -> Result<T, String> {
     let (m, n, p) = mat_dims(a, b)?;
-    let out = mm(&a.data.borrow(), &b.data.borrow(), m, n, p);
+    let out = mm(&a.vals(), &b.vals(), m, n, p);
     let mut shape = vec![];
     if a.shape.len() == 2 {
         shape.push(m);
@@ -382,7 +453,7 @@ pub fn matmul(a: &T, b: &T) -> Result<T, String> {
 }
 
 pub fn neg(a: &T) -> T {
-    let d: Vec<f64> = a.data.borrow().iter().map(|x| -x).collect();
+    let d: Vec<f64> = a.vals().iter().map(|x| -x).collect();
     make(a.shape.clone(), d, Op::Neg(a.clone()), a.requires)
 }
 
@@ -421,25 +492,25 @@ pub fn apply(f: UFn, x: f64) -> f64 {
 const GELU_K: f64 = 0.797_884_560_802_865_4;
 
 pub fn unary(f: UFn, a: &T) -> T {
-    let d: Vec<f64> = a.data.borrow().iter().map(|&x| apply(f, x)).collect();
+    let d: Vec<f64> = a.vals().iter().map(|&x| apply(f, x)).collect();
     make(a.shape.clone(), d, Op::Unary(f, a.clone()), a.requires)
 }
 
 pub fn sum(a: &T) -> T {
-    let s: f64 = a.data.borrow().iter().sum();
+    let s: f64 = a.vals().iter().sum();
     make(vec![], vec![s], Op::Sum(a.clone()), a.requires)
 }
 
 pub fn mean(a: &T) -> T {
     let n = a.len().max(1) as f64;
-    let s: f64 = a.data.borrow().iter().sum();
+    let s: f64 = a.vals().iter().sum();
     make(vec![], vec![s / n], Op::Mean(a.clone()), a.requires)
 }
 
 /// Softmax along the last dimension.
 pub fn softmax(a: &T) -> T {
     let d = a.shape.last().copied().unwrap_or(1).max(1);
-    let src = a.data.borrow();
+    let src = a.vals();
     let mut out = vec![0.0; src.len()];
     for (row, orow) in src.chunks(d).zip(out.chunks_mut(d)) {
         let mx = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -461,7 +532,7 @@ pub fn transpose(a: &T) -> Result<T, String> {
         0 | 1 => Ok(a.clone()),
         2 => {
             let (m, n) = (a.shape[0], a.shape[1]);
-            let src = a.data.borrow();
+            let src = a.vals();
             let mut out = vec![0.0; m * n];
             for i in 0..m {
                 for j in 0..n {
@@ -484,7 +555,7 @@ pub fn reshape(a: &T, shape: Vec<usize>) -> Result<T, String> {
             fmt_shape(&shape)
         ));
     }
-    let d = a.data.borrow().clone();
+    let d = a.vals().clone();
     Ok(make(shape, d, Op::Reshape(a.clone()), a.requires))
 }
 
@@ -511,7 +582,7 @@ pub fn index(t: &T, idx: &[i64]) -> Result<T, String> {
         off += j as usize * size;
     }
     let shape = t.shape[idx.len()..].to_vec();
-    let data = t.data.borrow()[off..off + size].to_vec();
+    let data = t.vals()[off..off + size].to_vec();
     Ok(make(shape, data, Op::Index(t.clone(), off), t.requires))
 }
 
@@ -539,7 +610,7 @@ pub fn gather(t: &T, shape: Vec<usize>, sel: &[Vec<usize>]) -> T {
             counter[d] = 0;
         }
     }
-    let src = t.data.borrow();
+    let src = t.vals();
     let data: Vec<f64> = offsets.iter().map(|&o| src[o]).collect();
     drop(src);
     make(shape, data, Op::Gather(t.clone(), offsets), t.requires)
@@ -561,7 +632,7 @@ pub fn sum_axis(t: &T, axis: i64) -> Result<T, String> {
     }
     let ax = ax as usize;
     let (outer, n, inner) = axis_parts(&t.shape, ax);
-    let src = t.data.borrow();
+    let src = t.vals();
     let mut out = vec![0.0; outer * inner];
     for o in 0..outer {
         for j in 0..n {
@@ -586,7 +657,7 @@ pub fn mean_axis(t: &T, axis: i64) -> Result<T, String> {
 /// log(softmax(x)) along the last dimension, computed without overflow.
 pub fn log_softmax(a: &T) -> T {
     let d = a.shape.last().copied().unwrap_or(1).max(1);
-    let src = a.data.borrow();
+    let src = a.vals();
     let mut out = vec![0.0; src.len()];
     for (row, orow) in src.chunks(d).zip(out.chunks_mut(d)) {
         let mx = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -610,7 +681,7 @@ pub fn cross_entropy(logits: &T, target: Vec<f64>) -> Result<T, String> {
     let lsm = log_softmax(logits);
     let d = logits.shape.last().copied().unwrap_or(1).max(1);
     let rows = (logits.len() / d).max(1);
-    let total: f64 = lsm.data.borrow().iter().zip(&target).map(|(l, t)| if *t == 0.0 { 0.0 } else { l * t }).sum();
+    let total: f64 = lsm.vals().iter().zip(&target).map(|(l, t)| if *t == 0.0 { 0.0 } else { l * t }).sum();
     let loss = -total / rows as f64;
     Ok(make(vec![], vec![loss], Op::CrossEntropy(logits.clone(), Rc::new(target)), logits.requires))
 }
@@ -643,7 +714,7 @@ pub fn concat(parts: &[T], axis: i64) -> Result<T, String> {
     let inner: usize = first.shape[ax + 1..].iter().product();
     let total: usize = parts.iter().map(|p| p.shape[ax]).sum();
     let mut out = Vec::with_capacity(outer * total * inner);
-    let datas: Vec<_> = parts.iter().map(|p| p.data.borrow()).collect();
+    let datas: Vec<_> = parts.iter().map(|p| p.vals()).collect();
     for o in 0..outer {
         for (p, d) in parts.iter().zip(&datas) {
             let n = p.shape[ax] * inner;
@@ -701,9 +772,9 @@ fn back(node: &Node, g: &[f64]) {
         Op::Bin(k, a, b) => {
             let ma = bmap(&a.shape, &node.shape);
             let mb = bmap(&b.shape, &node.shape);
-            let ad = a.data.borrow();
-            let bd = b.data.borrow();
-            let od = node.data.borrow();
+            let ad = a.vals();
+            let bd = b.vals();
+            let od = node.vals();
             let mut da = if a.requires { vec![0.0; ad.len()] } else { vec![] };
             let mut db = if b.requires { vec![0.0; bd.len()] } else { vec![] };
             for i in 0..g.len() {
@@ -735,8 +806,8 @@ fn back(node: &Node, g: &[f64]) {
         }
         Op::MatMul(a, b) => {
             let (m, n, p) = mat_dims(a, b).unwrap();
-            let ad = a.data.borrow();
-            let bd = b.data.borrow();
+            let ad = a.vals();
+            let bd = b.vals();
             let mut da = if a.requires { vec![0.0; m * n] } else { vec![] };
             let mut db = if b.requires { vec![0.0; n * p] } else { vec![] };
             // plain slices, so the cores can share them
@@ -798,8 +869,8 @@ fn back(node: &Node, g: &[f64]) {
         }
         Op::Unary(f, a) => {
             let d: Vec<f64> = {
-                let xd = a.data.borrow();
-                let yd = node.data.borrow();
+                let xd = a.vals();
+                let yd = node.vals();
                 (0..g.len())
                     .map(|i| {
                         let (x, y) = (xd[i], yd[i]);
@@ -857,7 +928,7 @@ fn back(node: &Node, g: &[f64]) {
             let d = node.shape.last().copied().unwrap_or(1).max(1);
             let mut out = vec![0.0; g.len()];
             {
-                let s = node.data.borrow();
+                let s = node.vals();
                 for ((srow, grow), orow) in s.chunks(d).zip(g.chunks(d)).zip(out.chunks_mut(d)) {
                     let dot: f64 = srow.iter().zip(grow).map(|(a, b)| a * b).sum();
                     for j in 0..srow.len() {
@@ -907,7 +978,7 @@ fn back(node: &Node, g: &[f64]) {
             let d = node.shape.last().copied().unwrap_or(1).max(1);
             let mut out = vec![0.0; g.len()];
             {
-                let y = node.data.borrow();
+                let y = node.vals();
                 for ((yrow, grow), orow) in y.chunks(d).zip(g.chunks(d)).zip(out.chunks_mut(d)) {
                     let total: f64 = grow.iter().sum();
                     for j in 0..yrow.len() {
@@ -923,7 +994,7 @@ fn back(node: &Node, g: &[f64]) {
             let rows = (a.len() / d).max(1) as f64;
             let mut out = vec![0.0; a.len()];
             {
-                let x = a.data.borrow();
+                let x = a.vals();
                 for ((xrow, trow), orow) in x.chunks(d).zip(target.chunks(d)).zip(out.chunks_mut(d)) {
                     let mx = xrow.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
                     let total: f64 = xrow.iter().map(|v| (v - mx).exp()).sum();
@@ -982,7 +1053,7 @@ pub fn descend(loss: &T, rate: f64, optim: Optim, clip: Option<f64>) -> Result<(
                 .into(),
         );
     }
-    if loss.data.borrow().iter().any(|x| !x.is_finite()) {
+    if loss.vals().iter().any(|x| !x.is_finite()) {
         return Err(
             "the value being minimised is no longer a real number (it blew up). Try a smaller rate after `by`"
                 .into(),
@@ -1008,7 +1079,7 @@ pub fn descend(loss: &T, rate: f64, optim: Optim, clip: Option<f64>) -> Result<(
             }
             let g = n.grad.borrow();
             if !g.is_empty() {
-                let mut d = n.data.borrow_mut();
+                let mut d = n.vals_mut();
                 if optim == Optim::Adam || optim == Optim::AdamW {
                     let mut o = n.opt.borrow_mut();
                     let len = d.len();

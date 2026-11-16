@@ -491,7 +491,7 @@ pub fn repeat_dyn(v: &Value, line: u32) -> R<f64> {
 
 pub fn learn(v: &Value, line: u32) -> R<Value> {
     match v.as_tensor() {
-        Some(t) => Ok(Value::Tensor(tensor::param(t.shape.clone(), t.data.borrow().clone()))),
+        Some(t) => Ok(Value::Tensor(tensor::param(t.shape.clone(), t.vals().clone()))),
         None => fail(format!("`learn` needs a number or tensor to start from, not a {}", v.kind()), line),
     }
 }
@@ -674,7 +674,7 @@ pub fn iset(a: &mut IA, i: i64, x: i64, line: u32) -> R<()> {
 /// a[i] for a row of ordinary numbers, with an integer position.
 #[inline(always)]
 pub fn aget_i(a: &T, i: i64, line: u32) -> R<f64> {
-    let d = unsafe { &*a.data.as_ptr() };
+    let d = unsafe { &*a.host_raw() };
     if (i as u64) < d.len() as u64 {
         Ok(unsafe { *d.get_unchecked(i as usize) })
     } else {
@@ -685,7 +685,7 @@ pub fn aget_i(a: &T, i: i64, line: u32) -> R<f64> {
 #[inline(always)]
 pub fn aset_i(a: &mut T, i: i64, x: f64, line: u32) -> R<()> {
     if Rc::strong_count(a) == 1 {
-        let d = unsafe { &mut *a.data.as_ptr() };
+        let d = unsafe { &mut *a.host_raw_mut() };
         if (i as u64) < d.len() as u64 {
             unsafe { *d.get_unchecked_mut(i as usize) = x };
             return Ok(());
@@ -699,7 +699,7 @@ pub fn aset_i(a: &mut T, i: i64, x: f64, line: u32) -> R<()> {
 /// The numbers of a row, for a loop that only reads them.
 #[inline(always)]
 pub fn arr_ptr(a: &T) -> *mut f64 {
-    unsafe { (&mut *a.data.as_ptr()).as_mut_ptr() }
+    unsafe { (&mut *a.host_raw()).as_mut_ptr() }
 }
 
 /// The numbers of a row for a loop that writes them: a row another variable
@@ -707,10 +707,11 @@ pub fn arr_ptr(a: &T) -> *mut f64 {
 #[inline]
 pub fn arr_unique(a: &mut T) -> *mut f64 {
     if Rc::strong_count(a) != 1 {
-        let copy = tensor::new(a.shape.clone(), a.data.borrow().clone());
+        let copy = tensor::new(a.shape.clone(), a.vals().clone());
         *a = copy;
     }
-    arr_ptr(a)
+    // the loop writes through this, so any GPU copy is out of date
+    unsafe { (&mut *a.host_raw_mut()).as_mut_ptr() }
 }
 
 #[inline(always)]
@@ -770,7 +771,7 @@ fn tset_slow_a(t: &mut [f64], k: Value, x: f64, line: u32) -> R<()> {
     let mut v = Value::Tensor(arr_of(t.to_vec()));
     at(interp::set_index(&mut v, k, Value::Num(x)), line)?;
     if let Value::Tensor(a) = v {
-        t.copy_from_slice(&a.data.borrow());
+        t.copy_from_slice(&a.vals());
     }
     Ok(())
 }
@@ -955,7 +956,7 @@ impl PkKey for Value {
 fn pk_unique(m: &mut PK) {
     if Rc::strong_count(m) != 1 {
         let copy = Packed {
-            data: RefCell::new(m.data.borrow().clone()),
+            data: RefCell::new(m.vals().clone()),
             rows: m.rows,
             cols: m.cols,
             matrix: m.matrix,
@@ -1012,8 +1013,8 @@ pub fn pk_update_from<D: PkKey, S: PkKey>(m: &mut PK, d: D, s: S, w: &PK, adds: 
     if let Ok(di) = d.pos(m.rows, line) {
         if di != si {
             pk_unique(m);
-            let wd = w.data.borrow();
-            let mut md = m.data.borrow_mut();
+            let wd = w.vals();
+            let mut md = m.vals_mut();
             let (base, out): (&[i16], &mut [i16]) = if si < di {
                 let (lo, hi) = md.split_at_mut(di * h);
                 (&lo[si * h..(si + 1) * h], &mut hi[..h])
@@ -1026,12 +1027,12 @@ pub fn pk_update_from<D: PkKey, S: PkKey>(m: &mut PK, d: D, s: S, w: &PK, adds: 
     }
     let mut out = vec![0i16; h];
     {
-        let (md, wd) = (m.data.borrow(), w.data.borrow());
+        let (md, wd) = (m.vals(), w.vals());
         at(crate::builtins::update_rows_into(&mut out, &md[si * h..(si + 1) * h], w.rows, &wd, adds, n_add, subs, n_sub), line)?;
     }
     let di = d.pos(m.rows, line)?;
     pk_unique(m);
-    m.data.borrow_mut()[di * h..(di + 1) * h].copy_from_slice(&out);
+    m.vals_mut()[di * h..(di + 1) * h].copy_from_slice(&out);
     Ok(())
 }
 
@@ -1044,8 +1045,8 @@ pub fn pk_update_with<D: PkKey>(m: &mut PK, d: D, base: &PK, w: &PK, adds: &T, n
     if let (true, Ok(di)) = (plain, d.pos(m.rows, line)) {
         let h = m.cols;
         pk_unique(m);
-        let (bd, wd) = (base.data.borrow(), w.data.borrow());
-        let mut md = m.data.borrow_mut();
+        let (bd, wd) = (base.vals(), w.vals());
+        let mut md = m.vals_mut();
         return at(crate::builtins::update_rows_into(&mut md[di * h..(di + 1) * h], &bd, w.rows, &wd, adds, n_add, subs, n_sub), line);
     }
     pk_update_general(m, d.value(), Value::Packed(base.clone()), w, adds, n_add, subs, n_sub, line)
@@ -1061,7 +1062,7 @@ pub fn pk_copy_row<D: PkKey, S: PkKey>(m: &mut PK, d: D, s: S, line: u32) -> R<(
     let d = d.pos(m.rows, line)?;
     pk_unique(m);
     let h = m.cols;
-    m.data.borrow_mut().copy_within(s * h..(s + 1) * h, d * h);
+    m.vals_mut().copy_within(s * h..(s + 1) * h, d * h);
     Ok(())
 }
 
@@ -1088,7 +1089,7 @@ pub fn pk_screlu<X: PkKey, W: PkKey>(x: &PK, xr: Option<X>, w: &PK, wr: Option<W
         Some(k) => k.pos(w.rows, line)?,
         None => 0,
     };
-    let (xd, wd) = (x.data.borrow(), w.data.borrow());
+    let (xd, wd) = (x.vals(), w.vals());
     let (xs, ws) = (&xd[xi * x.cols..(xi + 1) * x.cols], &wd[wi * w.cols..(wi + 1) * w.cols]);
     at(crate::builtins::screlu_dot_rows(xs, ws, || crate::builtins::max_abs(w), cap), line)
 }
@@ -1105,7 +1106,7 @@ pub fn a_argmax(a: &T, first: f64, last: f64, line: u32) -> R<f64> {
     if a.shape.len() != 1 {
         return fail("argmax with a range needs a row of numbers", line);
     }
-    let d = unsafe { &*a.data.as_ptr() };
+    let d = unsafe { &*a.host_raw() };
     at(crate::builtins::argmax_range(d, first, last), line)
 }
 
@@ -1147,13 +1148,13 @@ pub fn arr0() -> T {
 
 #[inline(always)]
 pub fn alen(a: &T) -> usize {
-    unsafe { (&*a.data.as_ptr()).len() }
+    unsafe { (&*a.host_raw()).len() }
 }
 
 /// Element k of an array, for loops that already know k is in range.
 #[inline(always)]
 pub fn aidx(a: &T, k: usize) -> f64 {
-    unsafe { *(&*a.data.as_ptr()).get_unchecked(k) }
+    unsafe { *(&*a.host_raw()).get_unchecked(k) }
 }
 
 /// A number as a whole number, in one machine instruction. Anything that is
@@ -1234,7 +1235,7 @@ fn aget_slow(a: &T, i: f64, line: u32) -> R<f64> {
 /// a[i] where a is a plain row of numbers.
 #[inline(always)]
 pub fn aget(a: &T, i: f64, line: u32) -> R<f64> {
-    let d = unsafe { &*a.data.as_ptr() };
+    let d = unsafe { &*a.host_raw() };
     let k = whole(i);
     if (k as u64) < d.len() as u64 && k as f64 == i {
         Ok(unsafe { *d.get_unchecked(k as usize) })
@@ -1258,7 +1259,7 @@ fn aset_slow(a: &mut T, i: f64, x: f64, line: u32) -> R<()> {
 pub fn aset(a: &mut T, i: f64, x: f64, line: u32) -> R<()> {
     let k = whole(i);
     if k as f64 == i && Rc::strong_count(a) == 1 {
-        let d = unsafe { &mut *a.data.as_ptr() };
+        let d = unsafe { &mut *a.host_raw_mut() };
         if (k as u64) < d.len() as u64 {
             unsafe { *d.get_unchecked_mut(k as usize) = x };
             return Ok(());

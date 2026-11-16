@@ -70,10 +70,10 @@ pub fn b_cross_entropy(_: &mut Interp, a: Vec<Value>) -> Res {
     let rows = logits.len() / classes.max(1);
     let answers = ten(&a[1], "cross_entropy")?;
     let target = if answers.shape == logits.shape {
-        answers.data.borrow().clone()
+        answers.vals().clone()
     } else if answers.len() == rows {
         let mut t = vec![0.0; logits.len()];
-        for (r, &c) in answers.data.borrow().iter().enumerate() {
+        for (r, &c) in answers.vals().iter().enumerate() {
             if c != c.trunc() || c < 0.0 || c as usize >= classes {
                 return Err(format!("cross_entropy: answer {} isn't a class number from 0 to {}", crate::value::fmt_num(c), classes - 1));
             }
@@ -118,7 +118,7 @@ fn index_list(v: &Value, name: &str, n: usize) -> Result<Vec<usize>, String> {
     let raw: Vec<f64> = match v {
         Value::List(l) => l.iter().map(|x| x.scalar()).collect::<Option<Vec<_>>>().ok_or_else(|| format!("{} needs whole numbers as positions", name))?,
         other => match other.as_tensor() {
-            Some(t) => t.data.borrow().clone(),
+            Some(t) => t.vals().clone(),
             None => return Err(format!("{} needs positions: a number or a list of numbers, not a {}", name, other.kind())),
         },
     };
@@ -252,8 +252,8 @@ pub fn b_accuracy(_: &mut Interp, a: Vec<Value>) -> Res {
     let rows = s.len() / classes;
     let ans = ten(&a[1], "accuracy")?;
     let best = |row: &[f64]| row.iter().enumerate().fold(0, |b, (i, x)| if *x > row[b] { i } else { b });
-    let sd = s.data.borrow();
-    let ad = ans.data.borrow();
+    let sd = s.vals();
+    let ad = ans.vals();
     let right: Vec<usize> = if ans.len() == rows {
         ad.iter().map(|x| *x as usize).collect()
     } else if ans.len() == s.len() {
@@ -270,7 +270,7 @@ pub fn b_top(_: &mut Interp, a: Vec<Value>) -> Res {
     want(&a, 2, "top")?;
     let t = ten(&a[0], "top")?;
     let k = whole(&a[1], "top", "a count")?;
-    let d = t.data.borrow();
+    let d = t.vals();
     let mut order: Vec<usize> = (0..d.len()).collect();
     order.sort_by(|&i, &j| d[j].partial_cmp(&d[i]).unwrap_or(std::cmp::Ordering::Equal).then(i.cmp(&j)));
     order.truncate(k);
@@ -290,7 +290,7 @@ pub fn b_sample(_: &mut Interp, a: Vec<Value>) -> Res {
     if !(temp > 0.0) {
         return Err(format!("sample needs a temperature above 0, not {}", a.get(1).map(|v| v.show()).unwrap_or_default()));
     }
-    let d = t.data.borrow();
+    let d = t.vals();
     if d.is_empty() || d.iter().any(|p| *p < 0.0 || !p.is_finite()) {
         return Err("sample needs probabilities: numbers of 0 or more, like the output of softmax".into());
     }
@@ -470,8 +470,8 @@ mod tests {
                 up[i] += h;
                 let mut dn = x.to_vec();
                 dn[i] -= h;
-                let fu = f(&tensor::new(shape.to_vec(), up)).data.borrow()[0];
-                let fd = f(&tensor::new(shape.to_vec(), dn)).data.borrow()[0];
+                let fu = f(&tensor::new(shape.to_vec(), up)).vals()[0];
+                let fd = f(&tensor::new(shape.to_vec(), dn)).vals()[0];
                 (fu - fd) / (2.0 * h)
             })
             .collect()
@@ -500,7 +500,7 @@ mod tests {
     fn log_softmax_and_cross_entropy() {
         let x = tensor::new(vec![2, 3], vec![1.0, 2.0, 3.0, 1000.0, 0.0, -1000.0]);
         let l = tensor::log_softmax(&x);
-        let ld = l.data.borrow();
+        let ld = l.vals();
         assert!(ld.iter().all(|v| v.is_finite()));
         let row0: f64 = ld[0..3].iter().map(|v| v.exp()).sum();
         assert!(close(row0, 1.0));
@@ -511,7 +511,7 @@ mod tests {
         });
         // uniform scores over 4 classes: loss is ln 4
         let ce = tensor::cross_entropy(&tensor::new(vec![1, 4], vec![0.0; 4]), vec![0.0, 0.0, 1.0, 0.0]).unwrap();
-        assert!(close(ce.data.borrow()[0], 4f64.ln()));
+        assert!(close(ce.vals()[0], 4f64.ln()));
         check_grad(vec![0.2, -1.0, 0.5, 2.0, 0.1, -0.4], vec![2, 3], &|t| {
             tensor::cross_entropy(t, vec![0.0, 1.0, 0.0, 0.25, 0.25, 0.5]).unwrap()
         });
@@ -523,7 +523,7 @@ mod tests {
         let b = tensor::new(vec![2, 2], vec![3.0, 4.0, 5.0, 6.0]);
         let c = tensor::concat(&[a.clone(), b.clone()], 1).unwrap();
         assert_eq!(c.shape, vec![2, 3]);
-        assert_eq!(*c.data.borrow(), vec![1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
+        assert_eq!(*c.vals(), vec![1.0, 3.0, 4.0, 2.0, 5.0, 6.0]);
         let r = tensor::concat(&[b.clone(), b.clone()], 0).unwrap();
         assert_eq!(r.shape, vec![4, 2]);
         assert!(tensor::concat(&[a, tensor::new(vec![3, 1], vec![0.0; 3])], 1).is_err());
@@ -540,17 +540,17 @@ mod tests {
         for optim in [tensor::Optim::Sgd, tensor::Optim::Adam, tensor::Optim::AdamW, tensor::Optim::Momentum] {
             let w = tensor::param(vec![2], vec![3.0, -2.0]);
             let loss = |w: &T| tensor::sum(&tensor::binary(BinK::Mul, w, w).unwrap());
-            let start = loss(&w).data.borrow()[0];
+            let start = loss(&w).vals()[0];
             for _ in 0..50 {
                 tensor::descend(&loss(&w), 0.05, optim, Some(1.0)).unwrap();
             }
-            let end = loss(&w).data.borrow()[0];
+            let end = loss(&w).vals()[0];
             assert!(end < start * 0.5, "{:?}: {} -> {}", optim, start, end);
         }
         // clipping limits the step: a gradient of size 10 is scaled to 1
         let w = tensor::param(vec![1], vec![5.0]);
         tensor::descend(&tensor::binary(BinK::Mul, &w, &tensor::scalar(10.0)).unwrap(), 1.0, tensor::Optim::Sgd, Some(1.0)).unwrap();
-        assert!(close(w.data.borrow()[0], 4.0));
+        assert!(close(w.vals()[0], 4.0));
     }
 
     #[test]

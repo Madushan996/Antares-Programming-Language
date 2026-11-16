@@ -41,6 +41,17 @@ pub struct Packed {
     pub max_abs: std::cell::Cell<i32>,
 }
 
+impl Packed {
+    /// The numbers (named like a tensor's, so code reads the same).
+    pub fn vals(&self) -> std::cell::Ref<'_, Vec<i16>> {
+        self.data.borrow()
+    }
+
+    pub fn vals_mut(&self) -> std::cell::RefMut<'_, Vec<i16>> {
+        self.data.borrow_mut()
+    }
+}
+
 /// A compact row made from its numbers.
 pub fn packed_row(data: Vec<i16>) -> Value {
     let cols = data.len();
@@ -122,7 +133,7 @@ pub fn pack_list(items: Vec<Value>) -> Value {
                 let mut data = Vec::new();
                 for v in &items {
                     if let Value::Tensor(t) = v {
-                        data.extend(t.data.borrow().iter());
+                        data.extend(t.vals().iter());
                     }
                 }
                 return Value::Tensor(tensor::new(shape, data));
@@ -135,7 +146,7 @@ pub fn pack_list(items: Vec<Value>) -> Value {
 /// Collapse a tensor holding one plain number back to a number.
 pub fn wrap(t: T) -> Value {
     if t.shape.is_empty() && !t.requires {
-        let x = t.data.borrow()[0];
+        let x = t.vals()[0];
         Value::Num(x)
     } else {
         Value::Tensor(t)
@@ -181,7 +192,7 @@ impl Value {
         match self {
             Value::Int(n) => Some(*n as f64),
             Value::Num(n) => Some(*n),
-            Value::Tensor(t) if t.len() == 1 => Some(t.data.borrow()[0]),
+            Value::Tensor(t) if t.len() == 1 => Some(t.vals()[0]),
             _ => None,
         }
     }
@@ -209,7 +220,7 @@ impl Value {
             Value::Unset | Value::Nothing => "nothing".into(),
             Value::Bool(b) => if *b { "yes" } else { "no" }.into(),
             Value::Num(n) => fmt_num(*n),
-            Value::Tensor(t) => fmt_tensor(&t.shape, &t.data.borrow(), indent),
+            Value::Tensor(t) => fmt_tensor(&t.shape, &t.vals(), indent),
             Value::Str(s) => format!("\"{}\"", s),
             Value::List(l) => {
                 let parts: Vec<String> = l.iter().map(|v| v.repr(indent + 1)).collect();
@@ -256,7 +267,7 @@ impl Value {
                     })
             }
             (a, b) => match (a.as_tensor(), b.as_tensor()) {
-                (Some(x), Some(y)) => x.shape == y.shape && *x.data.borrow() == *y.data.borrow(),
+                (Some(x), Some(y)) => x.shape == y.shape && *x.vals() == *y.vals(),
                 _ => false,
             },
         }
