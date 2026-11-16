@@ -23,6 +23,9 @@ jobs:
 
       - name: Unit tests
         run: cargo test --release
+        env:
+          # machines without a graphics card test the GPU code with Windows' software GPU
+          ANTARES_GPU: warp
 
       - name: Self-check suites
         shell: bash
