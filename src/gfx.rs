@@ -449,6 +449,10 @@ struct Input {
     held: Vec<&'static str>,
     /// Keys pressed since the last frame.
     pressed: Vec<&'static str>,
+    /// How many of `pressed` the program has had a frame to see. The next
+    /// `frame()` forgets those, and keeps any that came in after (read by
+    /// `window_open()`, say, while the program was busy drawing).
+    seen: usize,
     /// Keys pressed (with repeats), for `key()`.
     typed: VecDeque<&'static str>,
     mouse_x: f64,
@@ -463,7 +467,8 @@ impl Input {
             if !self.held.contains(&k) {
                 self.held.push(k);
             }
-            if !self.pressed.contains(&k) {
+            // a key already seen and pressed again counts again
+            if !self.pressed[self.seen..].contains(&k) {
                 self.pressed.push(k);
             }
         }
@@ -701,7 +706,11 @@ pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
     #[cfg(windows)]
     with_screen("frame", |sc| win::present(sc.hwnd, &sc.canvas, sc.view))?;
     let next = with_screen("frame", |sc| {
-        sc.input.pressed.clear();
+        // forget the presses the program has had a frame to see, but not
+        // ones that came in since
+        let seen = sc.input.seen.min(sc.input.pressed.len());
+        sc.input.pressed.drain(..seen);
+        sc.input.seen = 0;
         let step = Duration::from_secs_f64(1.0 / 60.0);
         let now = Instant::now();
         // after a slow frame, start counting again instead of rushing to catch up
@@ -722,6 +731,8 @@ pub fn b_frame(_: &mut Interp, a: Vec<Value>) -> Res {
     }
     pump();
     let dt = with_screen("frame", |sc| {
+        // everything pressed so far is the program's to see this frame
+        sc.input.seen = sc.input.pressed.len();
         let now = Instant::now();
         let dt = (now - sc.last).as_secs_f64();
         sc.last = now;
